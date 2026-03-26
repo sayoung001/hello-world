@@ -339,7 +339,7 @@ class SLAgent:
             # 최고 모델 로드
             best_path = w_dir / "best" / "best_model.zip"
             if best_path.exists():
-                best_model = PPO.load(str(best_path), device="auto")
+                best_model = PPO.load(str(best_path), device="cpu")
                 logger.info(f"  최고 모델 로드: {best_path}")
             else:
                 best_model = model
