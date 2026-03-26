@@ -88,6 +88,9 @@ class TrainConfig:
     # 학습 총 스텝
     total_timesteps: int = 500_000
 
+    # 병렬 환경 수 (CPU 코어 활용)
+    n_envs: int = 8
+
     # 경로
     output_dir: str = "experiments/sl_agent"
     log_interval: int = 10
@@ -196,6 +199,7 @@ class SLAgent:
         """
         from stable_baselines3 import PPO
         from stable_baselines3.common.callbacks import EvalCallback
+        from stable_baselines3.common.vec_env import SubprocVecEnv
 
         from rl.env.sl_env import SLAdjustEnv
         from rl.features.state_builder import build_from_csv
@@ -251,18 +255,30 @@ class SLAgent:
                 logger.warning(f"{wname}: Train 관측 벡터 0건, 스킵")
                 continue
 
-            # 학습 환경
-            train_env = SLAdjustEnv(
-                signals=train_data["observations"],
-                ohlc_slices=train_data["ohlc_slices"],
-                base_sl_distances=train_data["base_sl_distances"],
-                tp_distances=train_data["tp_distances"],
-                entry_prices=train_data["entry_prices"],
-                directions=train_data["directions"],
-                shuffle=True,
+            # 학습 환경 (SubprocVecEnv로 멀티코어 활용)
+            n_envs = min(cfg.n_envs, len(train_data["observations"]))
+            logger.info(f"  병렬 환경 {n_envs}개 생성")
+
+            def _make_train_env(seed: int):
+                def _init():
+                    env = SLAdjustEnv(
+                        signals=train_data["observations"],
+                        ohlc_slices=train_data["ohlc_slices"],
+                        base_sl_distances=train_data["base_sl_distances"],
+                        tp_distances=train_data["tp_distances"],
+                        entry_prices=train_data["entry_prices"],
+                        directions=train_data["directions"],
+                        shuffle=True,
+                    )
+                    env.reset(seed=seed)
+                    return env
+                return _init
+
+            train_env = SubprocVecEnv(
+                [_make_train_env(i) for i in range(n_envs)]
             )
 
-            # 검증 환경
+            # 검증 환경 (단일 — 평가용)
             val_env = SLAdjustEnv(
                 signals=val_data["observations"],
                 ohlc_slices=val_data["ohlc_slices"],
@@ -277,13 +293,15 @@ class SLAgent:
             w_dir = output_dir / wname
             w_dir.mkdir(parents=True, exist_ok=True)
 
-            # PPO 모델 생성
+            # PPO 모델 생성 (n_steps는 환경당 스텝 수)
+            n_steps_per_env = max(min(cfg.n_steps // n_envs, len(train_data["observations"])), 2)
+            actual_batch = min(cfg.batch_size, n_steps_per_env * n_envs)
             model = PPO(
                 "MlpPolicy",
                 train_env,
                 learning_rate=cfg.learning_rate,
-                n_steps=min(cfg.n_steps, len(train_data["observations"])),
-                batch_size=min(cfg.batch_size, len(train_data["observations"])),
+                n_steps=n_steps_per_env,
+                batch_size=actual_batch,
                 n_epochs=cfg.n_epochs,
                 gamma=cfg.gamma,
                 gae_lambda=cfg.gae_lambda,
@@ -307,12 +325,15 @@ class SLAgent:
             )
 
             # 학습
-            logger.info(f"  PPO 학습 시작 (총 {cfg.total_timesteps} 스텝)")
+            logger.info(f"  PPO 학습 시작 (총 {cfg.total_timesteps} 스텝, {n_envs}코어 병렬)")
             model.learn(
                 total_timesteps=cfg.total_timesteps,
                 callback=eval_callback,
                 log_interval=cfg.log_interval,
             )
+
+            # 병렬 환경 정리
+            train_env.close()
 
             # 최고 모델 로드
             best_path = w_dir / "best" / "best_model.zip"
