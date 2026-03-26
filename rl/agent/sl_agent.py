@@ -129,7 +129,7 @@ class SLAgent:
         """저장된 모델 로드."""
         from stable_baselines3 import PPO
 
-        model = PPO.load(str(model_path))
+        model = PPO.load(str(model_path), device="cpu")
         return cls(model=model)
 
     def predict(self, observation: np.ndarray) -> float:
@@ -311,7 +311,8 @@ class SLAgent:
                 max_grad_norm=cfg.max_grad_norm,
                 policy_kwargs={"net_arch": cfg.net_arch},
                 verbose=1,
-                tensorboard_log=None,  # 한국어/공백 경로 호환 위해 비활성화
+                device="cpu",  # 작은 MLP는 CPU가 더 빠름
+                tensorboard_log=None,
             )
 
             # EvalCallback: Val 기준 최고 모델 저장
@@ -338,7 +339,7 @@ class SLAgent:
             # 최고 모델 로드
             best_path = w_dir / "best" / "best_model.zip"
             if best_path.exists():
-                best_model = PPO.load(str(best_path))
+                best_model = PPO.load(str(best_path), device="auto")
                 logger.info(f"  최고 모델 로드: {best_path}")
             else:
                 best_model = model
