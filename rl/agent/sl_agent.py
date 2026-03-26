@@ -207,7 +207,7 @@ class SLAgent:
         # 전체 데이터 로드
         logger.info(f"시그널 로드 중: {signals_csv}")
         signals_df = pd.read_csv(signals_csv)
-        signals_df["timestamp"] = pd.to_datetime(signals_df["timestamp"])
+        signals_df["entry_time"] = pd.to_datetime(signals_df["entry_time"])
 
         all_results: dict[str, list[EvalResult]] = {}
 
@@ -221,12 +221,12 @@ class SLAgent:
             logger.info(f"{'='*60}")
 
             # 시간 기반 분할 (candle_idx 버그 교훈: 시간 기반 분리 강화)
-            train_mask = signals_df["timestamp"] <= window["train_end"]
-            val_mask = (signals_df["timestamp"] > window["train_end"]) & (
-                signals_df["timestamp"] <= window["val_end"]
+            train_mask = signals_df["entry_time"] <= window["train_end"]
+            val_mask = (signals_df["entry_time"] > window["train_end"]) & (
+                signals_df["entry_time"] <= window["val_end"]
             )
-            test_mask = (signals_df["timestamp"] > window["val_end"]) & (
-                signals_df["timestamp"] <= window["test_end"]
+            test_mask = (signals_df["entry_time"] > window["val_end"]) & (
+                signals_df["entry_time"] <= window["test_end"]
             )
 
             train_df = signals_df[train_mask]
