@@ -199,7 +199,7 @@ class SLAgent:
         """
         from stable_baselines3 import PPO
         from stable_baselines3.common.callbacks import EvalCallback
-        from stable_baselines3.common.vec_env import SubprocVecEnv
+        from stable_baselines3.common.vec_env import DummyVecEnv
 
         from rl.env.sl_env import SLAdjustEnv
         from rl.features.state_builder import build_from_csv
@@ -248,16 +248,16 @@ class SLAgent:
             # 관측 벡터 빌드
             from rl.features.state_builder import build_observations
 
-            train_data = build_observations(train_df, ohlcv_dir, max_signals=max_signals)
-            val_data = build_observations(val_df, ohlcv_dir, max_signals=max_signals)
+            train_data = build_observations(train_df, ohlcv_dir, max_signals=max_signals, n_workers=cfg.n_envs)
+            val_data = build_observations(val_df, ohlcv_dir, max_signals=max_signals, n_workers=cfg.n_envs)
 
             if len(train_data["observations"]) == 0:
                 logger.warning(f"{wname}: Train 관측 벡터 0건, 스킵")
                 continue
 
-            # 학습 환경 (SubprocVecEnv로 멀티코어 활용)
+            # 학습 환경 (DummyVecEnv — Windows Jupyter 호환)
             n_envs = min(cfg.n_envs, len(train_data["observations"]))
-            logger.info(f"  병렬 환경 {n_envs}개 생성")
+            logger.info(f"  환경 {n_envs}개 생성")
 
             def _make_train_env(seed: int):
                 def _init():
@@ -274,11 +274,11 @@ class SLAgent:
                     return env
                 return _init
 
-            train_env = SubprocVecEnv(
+            train_env = DummyVecEnv(
                 [_make_train_env(i) for i in range(n_envs)]
             )
 
-            # 검증 환경 (단일 — 평가용)
+            # 검증 환경
             val_env = SLAdjustEnv(
                 signals=val_data["observations"],
                 ohlc_slices=val_data["ohlc_slices"],
@@ -359,7 +359,7 @@ class SLAgent:
 
             # Test 평가
             if len(test_df) > 0:
-                test_data = build_observations(test_df, ohlcv_dir, max_signals=max_signals)
+                test_data = build_observations(test_df, ohlcv_dir, max_signals=max_signals, n_workers=cfg.n_envs)
                 if len(test_data["observations"]) > 0:
                     test_result = self._evaluate(test_data, f"{wname}", "test")
                     window_results.append(test_result)

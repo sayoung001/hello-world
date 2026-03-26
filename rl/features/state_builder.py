@@ -1,24 +1,16 @@
 """
-State Builder — 시그널 CSV → RL 관측 벡터 변환
-==============================================
-signals_all_labeled.csv에서 RL 환경에 필요한 데이터를 추출·정규화.
+State Builder — 시그널 CSV → RL 관측 벡터 변환 (고속 버전)
+==========================================================
+벡터화 + 멀티프로세싱으로 370만 시그널을 빠르게 처리.
 
-CSV 컬럼 (실제):
-    entry_time, entry_price, stop_loss, take_profit, direction,
-    confidence, atr, adx_value, rsi, volume_ratio, gap_pct,
-    squeeze_candles, squeeze_range, squeeze_high, squeeze_low,
-    body_ratio, wick_ratio, bbw, bbw_avg, vol_decrease,
-    candle_idx, symbol, btc7, data_tier, data_days,
-    exit_type, exit_time, exit_price, realized_roe,
-    hold_candles, mae_pct, mfe_pct, direction_correct
-
-입력: 라벨링된 시그널 CSV + 코인별 OHLCV 15분봉
-출력: (observations, ohlc_slices, base_sl_distances, tp_distances, entry_prices, directions)
+- 관측 벡터: pandas 벡터 연산으로 일괄 생성 (iterrows 제거)
+- OHLC 슬라이스: 코인별 병렬 처리 (multiprocessing)
 """
 
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -26,56 +18,121 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# 타임아웃 캔들 수
 TIMEOUT_CANDLES = 96
 
-# 관측 피처 이름 (OBS_DIM=13과 일치해야 함)
 FEATURE_NAMES = [
-    "atr_norm",
-    "squeeze_range_norm",
-    "gap_pct",
-    "confidence",
-    "adx_value",
-    "volume_ratio",
-    "rsi",
-    "bbw",
-    "direction",
-    "hour_sin",
-    "hour_cos",
-    "dow_sin",
-    "dow_cos",
+    "atr_norm", "squeeze_range_norm", "gap_pct", "confidence",
+    "adx_value", "volume_ratio", "rsi", "bbw", "direction",
+    "hour_sin", "hour_cos", "dow_sin", "dow_cos",
 ]
+
+
+def _load_ohlcv(ohlcv_dir: Path, symbol: str) -> pd.DataFrame | None:
+    """코인별 OHLCV 로드. 타임스탬프/OHLC 컬럼 자동 감지."""
+    for name in [symbol, symbol.upper(), symbol.lower()]:
+        csv_path = ohlcv_dir / f"{name}.csv"
+        if csv_path.exists():
+            break
+    else:
+        return None
+
+    coin_df = pd.read_csv(csv_path)
+
+    # 타임스탬프 컬럼 감지
+    time_col = None
+    for col_name in ["timestamp", "time", "date", "datetime"]:
+        if col_name in coin_df.columns:
+            time_col = col_name
+            break
+    if time_col is None:
+        time_col = coin_df.columns[0]
+
+    coin_df[time_col] = pd.to_datetime(coin_df[time_col])
+    coin_df = coin_df.rename(columns={time_col: "ts"})
+    coin_df = coin_df.sort_values("ts").reset_index(drop=True)
+
+    # OHLC 컬럼 감지
+    renames = {}
+    for target, candidates in [
+        ("open", ["open", "Open", "OPEN"]),
+        ("high", ["high", "High", "HIGH"]),
+        ("low", ["low", "Low", "LOW"]),
+        ("close", ["close", "Close", "CLOSE"]),
+    ]:
+        for c in candidates:
+            if c in coin_df.columns:
+                renames[c] = target
+                break
+    if len(renames) < 4:
+        return None
+
+    coin_df = coin_df.rename(columns=renames)
+    return coin_df
+
+
+def _extract_slices_for_symbol(
+    symbol: str,
+    signal_times: list,
+    signal_indices: list,
+    ohlcv_dir: str,
+) -> list[tuple[int, np.ndarray | None]]:
+    """
+    단일 코인의 모든 시그널에 대해 OHLC 슬라이스 추출.
+    멀티프로세싱 워커 함수.
+
+    Returns: [(원본_인덱스, ohlc_slice 또는 None), ...]
+    """
+    coin_df = _load_ohlcv(Path(ohlcv_dir), symbol)
+    if coin_df is None:
+        return [(idx, None) for idx in signal_indices]
+
+    # 타임스탬프 → 인덱스 매핑 (빠른 검색용)
+    ts_to_idx = pd.Series(coin_df.index, index=coin_df["ts"])
+    ohlc_values = coin_df[["open", "high", "low", "close"]].values.astype(np.float32)
+    n_rows = len(coin_df)
+
+    results = []
+    for orig_idx, ts in zip(signal_indices, signal_times):
+        ts = pd.Timestamp(ts)
+
+        # 정확 매칭
+        if ts in ts_to_idx.index:
+            entry_idx = ts_to_idx[ts]
+            if isinstance(entry_idx, pd.Series):
+                entry_idx = entry_idx.iloc[0]
+        else:
+            # 가장 가까운 캔들 (15분 이내)
+            time_diff = (coin_df["ts"] - ts).abs()
+            closest_idx = time_diff.idxmin()
+            if time_diff.iloc[closest_idx] > pd.Timedelta(minutes=15):
+                results.append((orig_idx, None))
+                continue
+            entry_idx = closest_idx
+
+        # OHLC 슬라이스
+        start = entry_idx + 1
+        end = min(start + TIMEOUT_CANDLES, n_rows)
+        if start >= n_rows:
+            results.append((orig_idx, None))
+            continue
+
+        ohlc_slice = ohlc_values[start:end]
+        results.append((orig_idx, ohlc_slice))
+
+    return results
 
 
 def build_observations(
     signals_df: pd.DataFrame,
     ohlcv_dir: str | Path,
     max_signals: int | None = None,
+    n_workers: int = 8,
 ) -> dict[str, np.ndarray | list]:
     """
-    시그널 DataFrame + OHLCV 디렉토리 → RL 환경 입력 데이터 생성.
+    시그널 DataFrame → RL 환경 입력 데이터 생성 (고속 버전).
 
-    CSV에 atr, rsi, volume_ratio, bbw 등 지표가 이미 포함되어 있으므로
-    OHLCV는 진입 이후 가격 시뮬레이션(ohlc_slices)에만 사용.
-
-    Parameters
-    ----------
-    signals_df : pd.DataFrame
-        outcome_labeler.py 출력 (33컬럼).
-    ohlcv_dir : str | Path
-        코인별 15분봉 CSV 디렉토리 (예: Raw_Data/CRYPTO_BINANCE_15M/)
-    max_signals : int | None
-        디버깅용 — 처리할 최대 시그널 수
-
-    Returns
-    -------
-    dict with keys:
-        observations: np.ndarray (N, 13)
-        ohlc_slices: list[np.ndarray] — 각 (<=96, 4)
-        base_sl_distances: np.ndarray (N,)
-        tp_distances: np.ndarray (N,)
-        entry_prices: np.ndarray (N,)
-        directions: np.ndarray (N,)  — 1=LONG, -1=SHORT
+    1단계: 관측 벡터를 벡터 연산으로 일괄 생성 (수 초)
+    2단계: OHLC 슬라이스를 코인별 병렬 추출 (멀티프로세싱)
     """
     ohlcv_dir = Path(ohlcv_dir)
     df = signals_df.copy()
@@ -83,175 +140,102 @@ def build_observations(
     if max_signals is not None:
         df = df.head(max_signals)
 
-    # 방향 숫자화 (소문자 "long"/"short" 대응)
+    # 방향 숫자화
     df["dir_num"] = df["direction"].str.lower().map({"long": 1.0, "short": -1.0})
     df = df.dropna(subset=["dir_num"])
-
-    # 타임스탬프 파싱
     df["entry_time"] = pd.to_datetime(df["entry_time"])
 
-    observations = []
+    # SL/TP 거리
+    df["sl_dist"] = (df["entry_price"] - df["stop_loss"]).abs()
+    df["tp_dist"] = (df["take_profit"] - df["entry_price"]).abs()
+
+    # 유효하지 않은 행 제거
+    df = df[(df["sl_dist"] > 1e-8) & (df["tp_dist"] > 1e-8)].reset_index(drop=True)
+    logger.info(f"유효 시그널: {len(df)}건")
+
+    # ── 1단계: 관측 벡터 벡터화 생성 ──────────────────────────
+    logger.info("관측 벡터 벡터화 생성 중...")
+    entry_prices = df["entry_price"].values
+    ep_safe = np.maximum(entry_prices, 1e-8)
+
+    hour = df["entry_time"].dt.hour + df["entry_time"].dt.minute / 60.0
+    dow = df["entry_time"].dt.weekday
+
+    obs_array = np.column_stack([
+        df["atr"].fillna(0).values / ep_safe,                                    # atr_norm
+        df["squeeze_range"].fillna(0).values / ep_safe,                           # squeeze_range_norm
+        df["gap_pct"].fillna(0).values,                                           # gap_pct
+        df["confidence"].fillna(50).values / 100.0,                               # confidence
+        df["adx_value"].fillna(25).values / 100.0,                                # adx_value
+        np.clip(df["volume_ratio"].fillna(1).values, 0, 10) / 10.0,              # volume_ratio
+        df["rsi"].fillna(50).values / 100.0,                                      # rsi
+        np.clip(df["bbw"].fillna(0).values, 0, 0.5) / 0.5,                       # bbw
+        df["dir_num"].values,                                                      # direction
+        np.sin(2 * np.pi * hour / 24),                                            # hour_sin
+        np.cos(2 * np.pi * hour / 24),                                            # hour_cos
+        np.sin(2 * np.pi * dow / 7),                                              # dow_sin
+        np.cos(2 * np.pi * dow / 7),                                              # dow_cos
+    ]).astype(np.float32)
+
+    logger.info(f"관측 벡터 생성 완료: {obs_array.shape}")
+
+    # ── 2단계: OHLC 슬라이스 병렬 추출 ──────────────────────
+    logger.info(f"OHLC 슬라이스 추출 중 ({n_workers} 워커)...")
+
+    # 코인별 시그널 그룹핑
+    symbol_groups: dict[str, tuple[list, list]] = {}
+    for i, row in df.iterrows():
+        sym = row["symbol"]
+        if sym not in symbol_groups:
+            symbol_groups[sym] = ([], [])
+        symbol_groups[sym][0].append(row["entry_time"])
+        symbol_groups[sym][1].append(i)
+
+    logger.info(f"  {len(symbol_groups)}개 코인 처리")
+
+    # 병렬 실행
+    ohlc_results: dict[int, np.ndarray | None] = {}
+
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = {}
+        for sym, (times, indices) in symbol_groups.items():
+            f = executor.submit(
+                _extract_slices_for_symbol,
+                sym, times, indices, str(ohlcv_dir),
+            )
+            futures[f] = sym
+
+        done_count = 0
+        for future in as_completed(futures):
+            done_count += 1
+            if done_count % 20 == 0:
+                logger.info(f"  코인 처리: {done_count}/{len(symbol_groups)}")
+            for orig_idx, ohlc_slice in future.result():
+                ohlc_results[orig_idx] = ohlc_slice
+
+    # ── 3단계: 유효한 것만 필터링 ────────────────────────────
+    valid_mask = []
     ohlc_slices = []
-    base_sl_distances = []
-    tp_distances = []
-    entry_prices = []
-    directions = []
+    for i in range(len(df)):
+        ohlc = ohlc_results.get(i)
+        if ohlc is not None and len(ohlc) > 0:
+            valid_mask.append(i)
+            ohlc_slices.append(ohlc)
 
-    # 코인별 OHLCV 캐시
-    ohlcv_cache: dict[str, pd.DataFrame] = {}
-
-    skipped = 0
-    total = len(df)
-
-    for i, (_, row) in enumerate(df.iterrows()):
-        if i % 500 == 0:
-            logger.info(f"  처리 중: {i}/{total}")
-
-        symbol = row["symbol"]
-
-        # OHLCV 로드 (캐시)
-        if symbol not in ohlcv_cache:
-            # 파일명 패턴 시도: symbol.csv 또는 SYMBOL.csv
-            csv_path = ohlcv_dir / f"{symbol}.csv"
-            if not csv_path.exists():
-                csv_path = ohlcv_dir / f"{symbol.upper()}.csv"
-            if not csv_path.exists():
-                csv_path = ohlcv_dir / f"{symbol.lower()}.csv"
-            if not csv_path.exists():
-                skipped += 1
-                ohlcv_cache[symbol] = None
-                continue
-            coin_df = pd.read_csv(csv_path)
-            # 타임스탬프 컬럼 자동 감지
-            time_col = None
-            for col_name in ["timestamp", "time", "date", "datetime", "entry_time"]:
-                if col_name in coin_df.columns:
-                    time_col = col_name
-                    break
-            if time_col is None:
-                # 첫 번째 컬럼이 시간일 가능성
-                time_col = coin_df.columns[0]
-            coin_df[time_col] = pd.to_datetime(coin_df[time_col])
-            coin_df = coin_df.rename(columns={time_col: "ts"})
-            coin_df = coin_df.sort_values("ts").reset_index(drop=True)
-
-            # OHLC 컬럼 자동 감지
-            ohlc_cols = {}
-            for target, candidates in [
-                ("open", ["open", "Open", "OPEN"]),
-                ("high", ["high", "High", "HIGH"]),
-                ("low", ["low", "Low", "LOW"]),
-                ("close", ["close", "Close", "CLOSE"]),
-            ]:
-                for c in candidates:
-                    if c in coin_df.columns:
-                        ohlc_cols[target] = c
-                        break
-
-            if len(ohlc_cols) < 4:
-                skipped += 1
-                ohlcv_cache[symbol] = None
-                continue
-
-            coin_df = coin_df.rename(columns={v: k for k, v in ohlc_cols.items()})
-            ohlcv_cache[symbol] = coin_df
-
-        coin_df = ohlcv_cache[symbol]
-        if coin_df is None:
-            skipped += 1
-            continue
-
-        # 진입 캔들 찾기 (타임스탬프 매칭)
-        ts = row["entry_time"]
-        mask = coin_df["ts"] == ts
-        if not mask.any():
-            # 가장 가까운 캔들 찾기 (15분 이내)
-            time_diff = (coin_df["ts"] - ts).abs()
-            closest_idx = time_diff.idxmin()
-            if time_diff.loc[closest_idx] > pd.Timedelta(minutes=15):
-                skipped += 1
-                continue
-            entry_idx = closest_idx
-        else:
-            entry_idx = mask.idxmax()
-
-        # 진입 이후 OHLC 슬라이스 (최대 TIMEOUT_CANDLES)
-        end_idx = min(entry_idx + 1 + TIMEOUT_CANDLES, len(coin_df))
-        ohlc_slice = coin_df.iloc[entry_idx + 1 : end_idx][
-            ["open", "high", "low", "close"]
-        ].values.astype(np.float32)
-
-        if len(ohlc_slice) == 0:
-            skipped += 1
-            continue
-
-        # CSV에서 직접 값 가져오기
-        entry_price = float(row["entry_price"])
-
-        # SL/TP 거리
-        sl_dist = abs(entry_price - float(row["stop_loss"]))
-        tp_dist = abs(float(row["take_profit"]) - entry_price)
-        if sl_dist < 1e-8 or tp_dist < 1e-8:
-            skipped += 1
-            continue
-
-        # CSV에 이미 있는 지표 사용
-        atr_val = float(row.get("atr", 0.0))
-        rsi_val = float(row.get("rsi", 50.0))
-        bbw_val = float(row.get("bbw", 0.0))
-        vol_ratio = float(row.get("volume_ratio", 1.0))
-        squeeze_range = float(row.get("squeeze_range", 0.0))
-        gap_pct = float(row.get("gap_pct", 0.0))
-        confidence = float(row.get("confidence", 50.0))
-        adx_val = float(row.get("adx_value", 25.0))
-
-        # 시간 사이클 인코딩
-        hour = ts.hour + ts.minute / 60.0
-        dow = ts.weekday()
-        hour_sin = np.sin(2 * np.pi * hour / 24)
-        hour_cos = np.cos(2 * np.pi * hour / 24)
-        dow_sin = np.sin(2 * np.pi * dow / 7)
-        dow_cos = np.cos(2 * np.pi * dow / 7)
-
-        # 관측 벡터 조립 (13차원)
-        obs = np.array(
-            [
-                atr_val / max(entry_price, 1e-8),           # atr_norm
-                squeeze_range / max(entry_price, 1e-8),     # squeeze_range_norm
-                gap_pct,                                     # gap_pct (이미 %)
-                confidence / 100.0,                          # 0~1 정규화
-                adx_val / 100.0,                             # 0~1 정규화
-                np.clip(vol_ratio, 0.0, 10.0) / 10.0,       # 0~1 정규화
-                rsi_val / 100.0,                             # 0~1 정규화
-                np.clip(bbw_val, 0.0, 0.5) / 0.5,           # 0~1 정규화
-                float(row["dir_num"]),                       # 1 or -1
-                hour_sin,
-                hour_cos,
-                dow_sin,
-                dow_cos,
-            ],
-            dtype=np.float32,
-        )
-
-        observations.append(obs)
-        ohlc_slices.append(ohlc_slice)
-        base_sl_distances.append(sl_dist)
-        tp_distances.append(tp_dist)
-        entry_prices.append(entry_price)
-        directions.append(float(row["dir_num"]))
-
+    valid_mask = np.array(valid_mask)
+    skipped = len(df) - len(valid_mask)
     if skipped > 0:
-        logger.warning(f"{skipped}건 시그널 스킵 (OHLCV 미매칭 또는 데이터 부족)")
+        logger.warning(f"{skipped}건 스킵 (OHLCV 미매칭 또는 데이터 부족)")
 
-    logger.info(f"관측 벡터 {len(observations)}건 생성 완료")
+    logger.info(f"최종 관측 벡터 {len(valid_mask)}건 완료")
 
     return {
-        "observations": np.array(observations, dtype=np.float32) if observations else np.empty((0, 13), dtype=np.float32),
+        "observations": obs_array[valid_mask],
         "ohlc_slices": ohlc_slices,
-        "base_sl_distances": np.array(base_sl_distances, dtype=np.float32),
-        "tp_distances": np.array(tp_distances, dtype=np.float32),
-        "entry_prices": np.array(entry_prices, dtype=np.float32),
-        "directions": np.array(directions, dtype=np.float32),
+        "base_sl_distances": df["sl_dist"].values[valid_mask].astype(np.float32),
+        "tp_distances": df["tp_dist"].values[valid_mask].astype(np.float32),
+        "entry_prices": entry_prices[valid_mask].astype(np.float32),
+        "directions": df["dir_num"].values[valid_mask].astype(np.float32),
     }
 
 
@@ -259,7 +243,8 @@ def build_from_csv(
     signals_csv: str | Path,
     ohlcv_dir: str | Path,
     max_signals: int | None = None,
+    n_workers: int = 8,
 ) -> dict[str, np.ndarray | list]:
     """CSV 파일 경로에서 직접 로드하여 build_observations 호출."""
     df = pd.read_csv(signals_csv)
-    return build_observations(df, ohlcv_dir, max_signals=max_signals)
+    return build_observations(df, ohlcv_dir, max_signals=max_signals, n_workers=n_workers)
