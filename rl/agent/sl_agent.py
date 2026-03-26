@@ -293,7 +293,7 @@ class SLAgent:
                 max_grad_norm=cfg.max_grad_norm,
                 policy_kwargs={"net_arch": cfg.net_arch},
                 verbose=1,
-                tensorboard_log=str(w_dir / "tb_logs"),
+                tensorboard_log=None,  # 한국어/공백 경로 호환 위해 비활성화
             )
 
             # EvalCallback: Val 기준 최고 모델 저장
