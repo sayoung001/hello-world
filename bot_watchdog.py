@@ -19,11 +19,17 @@ bot_watchdog.py — 자동매매 봇 감시 + 오류 자동 분석 + 노션 보�
   python bot_watchdog.py --no-notion        # 노션 없이 실행
 """
 
-import os, sys, json, time, subprocess, requests, traceback, re
+import os, sys, json, time, subprocess, requests, traceback, re, math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
+
+try:
+    import ccxt
+except ImportError:
+    print("[WARNING] ccxt 미설치 — pip install ccxt (바이낸스 연동 비활성)")
+    ccxt = None
 
 KST = timezone(timedelta(hours=9))
 
@@ -51,6 +57,7 @@ CONFIG = {
         "v9": {
             "name": "V9 자동매매 (메인계정)",
             "cmd": "python3 auto_trader_v9.py --mode E --live",
+            "account": "main",
             "positions_files": [
                 "trade_logs/positions_v9.json",
             ],
@@ -62,6 +69,7 @@ CONFIG = {
         "semi": {
             "name": "Semi-Auto V8.2 (서브계정)",
             "cmd": "python3 semi_auto_trader.py --live",
+            "account": "semi",
             "positions_files": [
                 "trade_logs_semi/positions_semi.json",
             ],
@@ -69,6 +77,20 @@ CONFIG = {
                 "trade_logs_semi/trade_history_semi.jsonl",
             ],
             "tmux_session": "bots_2",
+        },
+    },
+
+    # 바이낸스 계정 (ccxt 연동)
+    "ACCOUNTS": {
+        "main": {
+            "name": "메인계정",
+            "api_key": os.environ.get("BINANCE_API_KEY", ""),
+            "secret": os.environ.get("BINANCE_SECRET", ""),
+        },
+        "semi": {
+            "name": "서브계정",
+            "api_key": os.environ.get("BINANCE_API_KEY_SEMI", ""),
+            "secret": os.environ.get("BINANCE_SECRET_SEMI", ""),
         },
     },
 
@@ -334,6 +356,133 @@ class LogAnalyzer:
 
 
 # ═══════════════════════════════════════════════════════════
+#  바이낸스 계정 연동 (ccxt)
+# ═══════════════════════════════════════════════════════════
+
+class BinanceClient:
+    """바이낸스 선물 계정 조회/주문 클라이언트"""
+
+    def __init__(self, accounts_cfg):
+        self.exchanges = {}  # {account_id: ccxt.binance}
+        if not ccxt:
+            return
+        for acc_id, acc in accounts_cfg.items():
+            if acc["api_key"] and acc["secret"]:
+                try:
+                    ex = ccxt.binance({
+                        'apiKey': acc["api_key"],
+                        'secret': acc["secret"],
+                        'enableRateLimit': True,
+                        'options': {'defaultType': 'future'},
+                    })
+                    self.exchanges[acc_id] = ex
+                    print(f"[Binance] {acc['name']}({acc_id}) 연결 완료")
+                except Exception as e:
+                    print(f"[Binance] {acc['name']}({acc_id}) 연결 실패: {e}")
+
+    def get_balance(self, account_id):
+        """계정 잔고 조회 → {free, total, margin_used}"""
+        ex = self.exchanges.get(account_id)
+        if not ex:
+            return None
+        try:
+            b = ex.fetch_balance({"type": "future"})
+            usdt = b.get("USDT", {})
+            return {
+                "free": float(usdt.get("free", 0)),
+                "total": float(usdt.get("total", 0)),
+                "used": float(usdt.get("used", 0)),
+            }
+        except Exception as e:
+            print(f"[Binance] 잔고 조회 실패 ({account_id}): {e}")
+            return None
+
+    def get_positions(self, account_id):
+        """열린 포지션 조회 → [{symbol, side, qty, entry, mark, pnl, leverage, margin, roe}]"""
+        ex = self.exchanges.get(account_id)
+        if not ex:
+            return []
+        try:
+            raw = ex.fetch_positions()
+            positions = []
+            for p in raw:
+                contracts = abs(float(p.get('contracts', 0)))
+                if contracts == 0:
+                    continue
+                entry = float(p.get('entryPrice', 0))
+                mark = float(p.get('markPrice', 0))
+                notional = abs(float(p.get('notional', 0)))
+                pnl = float(p.get('unrealizedPnl', 0))
+                leverage = int(float(p.get('leverage', 1)))
+                margin = notional / leverage if leverage else notional
+                roe = (pnl / margin * 100) if margin > 0 else 0
+
+                positions.append({
+                    'symbol': p.get('symbol', ''),
+                    'side': p.get('side', '').upper(),
+                    'qty': contracts,
+                    'entry': entry,
+                    'mark': mark,
+                    'notional': notional,
+                    'pnl': pnl,
+                    'leverage': leverage,
+                    'margin': margin,
+                    'roe': roe,
+                })
+            return positions
+        except Exception as e:
+            print(f"[Binance] 포지션 조회 실패 ({account_id}): {e}")
+            return []
+
+    def close_position(self, account_id, symbol, side, qty=None):
+        """포지션 시장가 청산. qty=None이면 전량 청산"""
+        ex = self.exchanges.get(account_id)
+        if not ex:
+            return False, "계정 미연결"
+        try:
+            # 현재 포지션에서 수량 확인
+            if qty is None:
+                positions = ex.fetch_positions([symbol])
+                for p in positions:
+                    p_side = (p.get('side') or '').upper()
+                    contracts = abs(float(p.get('contracts', 0)))
+                    if p_side == side.upper() and contracts > 0:
+                        qty = contracts
+                        break
+                if not qty:
+                    return False, f"{symbol} {side} 포지션 없음"
+
+            # 청산 주문
+            ps = "LONG" if side.upper() == "LONG" else "SHORT"
+            close_side = "sell" if side.upper() == "LONG" else "buy"
+            o = ex.create_order(symbol, "market", close_side, qty,
+                                params={"positionSide": ps})
+            fill = float(o.get("average", 0))
+
+            # 잔여 주문 정리
+            try:
+                raw_sym = symbol.replace('/', '')
+                ex.fapiPrivateDeleteAllOpenOrders({"symbol": raw_sym})
+            except:
+                pass
+
+            return True, f"체결 @{fill:,.4f} qty={qty}"
+        except Exception as e:
+            return False, str(e)
+
+    def close_all_positions(self, account_id):
+        """계정의 모든 포지션 청산"""
+        positions = self.get_positions(account_id)
+        if not positions:
+            return True, "열린 포지션 없음"
+        results = []
+        for p in positions:
+            ok, msg = self.close_position(account_id, p['symbol'], p['side'], p['qty'])
+            results.append(f"{'✅' if ok else '❌'} {p['symbol']} {p['side']}: {msg}")
+        return all('✅' in r for r in results), '\n'.join(results)
+
+
+# ═══════════════════════════════════════════════════════════
 #  메인 워치독
 # ═══════════════════════════════════════════════════════════
 
@@ -346,8 +495,10 @@ class BotWatchdog:
             self.cfg["NOTION_PAGE_ID"])
         self.monitor = ProcessMonitor()
         self.analyzer = LogAnalyzer(self.cfg["ERROR_PATTERNS"])
+        self.binance = BinanceClient(self.cfg.get("ACCOUNTS", {}))
         self._daily_report_done = False
         self._tg_offset = 0
+        self._close_confirm = {}  # 청산 확인 대기 {chat_id: {symbol, side, account, time}}
 
         os.makedirs(self.cfg["REPORT_DIR"], exist_ok=True)
 
@@ -519,6 +670,23 @@ class BotWatchdog:
 
             if text.startswith("/status"):
                 self._cmd_status()
+            elif text.startswith("/positions"):
+                parts = text.split()
+                acc = parts[1] if len(parts) > 1 else "all"
+                self._cmd_positions(acc)
+            elif text.startswith("/balance"):
+                self._cmd_balance()
+            elif text.startswith("/close"):
+                self._cmd_close(text)
+            elif text == "/yes":
+                self._cmd_close_confirm(chat_id)
+            elif text == "/no":
+                self._close_confirm.pop(chat_id, None)
+                self.tg.send("❌ 청산 취소")
+            elif text.startswith("/closeall"):
+                parts = text.split()
+                acc = parts[1] if len(parts) > 1 else None
+                self._cmd_closeall(acc, chat_id)
             elif text.startswith("/restart"):
                 parts = text.split()
                 bot_id = parts[1] if len(parts) > 1 else "all"
@@ -529,20 +697,245 @@ class BotWatchdog:
                 self.daily_report()
             elif text.startswith("/help"):
                 bot_list = ", ".join(self.cfg["BOTS"].keys())
+                acc_list = ", ".join(self.cfg.get("ACCOUNTS", {}).keys())
                 self.tg.send(
                     "🤖 워치독 명령어:\n"
-                    "/status — 봇 상태 확인\n"
+                    "━━ 상태 조회 ━━\n"
+                    "/status — 봇 상태 + 실시간 포지션 요약\n"
+                    f"/positions [{acc_list}|all] — 포지션 상세\n"
+                    "/balance — 계정별 잔고\n"
+                    "━━ 포지션 관리 ━━\n"
+                    "/close <심볼> [계정] — 특정 포지션 청산\n"
+                    f"/closeall [{acc_list}] — 계정 전체 청산\n"
+                    "━━ 봇 관리 ━━\n"
                     f"/restart [{bot_list}|all] — 봇 재시작\n"
                     "/errors — 최근 오류 확인\n"
                     "/report — 일일 보고서 생성")
 
     def _cmd_status(self):
+        """봇 프로세스 상태 + 실시간 포지션/잔고 요약"""
         lines = ["🤖 봇 상태:"]
+
+        # 계정별 잔고/포지션을 미리 조회 (중복 API 호출 방지)
+        acc_data = {}  # {account_id: {balance, positions}}
+        seen_accounts = set()
+        for bot_id, bot_cfg in self.cfg["BOTS"].items():
+            acc_id = bot_cfg.get("account")
+            if acc_id and acc_id not in seen_accounts:
+                seen_accounts.add(acc_id)
+                bal = self.binance.get_balance(acc_id)
+                pos = self.binance.get_positions(acc_id)
+                acc_data[acc_id] = {"balance": bal, "positions": pos}
+
         for bot_id, bot_cfg in self.cfg["BOTS"].items():
             alive = self.monitor.is_alive(bot_cfg["tmux_session"])
             status = "🟢" if alive else "🔴"
-            lines.append(f"  {status} {bot_cfg['name']} ({bot_cfg['tmux_session']})")
+            lines.append(f"\n{status} {bot_cfg['name']}")
+
+            acc_id = bot_cfg.get("account")
+            data = acc_data.get(acc_id, {})
+            bal = data.get("balance")
+            positions = data.get("positions", [])
+
+            # 잔고
+            if bal:
+                lines.append(f"  💰 잔고: ${bal['total']:,.2f} (가용: ${bal['free']:,.2f})")
+            else:
+                lines.append("  💰 잔고: 조회 불가")
+
+            # 포지션 요약
+            if positions:
+                total_pnl = sum(p['pnl'] for p in positions)
+                total_margin = sum(p['margin'] for p in positions)
+                pnl_sign = "+" if total_pnl >= 0 else ""
+                lines.append(f"  📊 포지션 {len(positions)}개 | "
+                             f"마진 ${total_margin:,.1f} | "
+                             f"PnL {pnl_sign}${total_pnl:,.2f}")
+                for p in positions:
+                    d = "L" if p['side'] == "LONG" else "S"
+                    pnl_s = f"+${p['pnl']:,.2f}" if p['pnl'] >= 0 else f"-${abs(p['pnl']):,.2f}"
+                    roe_s = f"+{p['roe']:.1f}%" if p['roe'] >= 0 else f"{p['roe']:.1f}%"
+                    sym_short = p['symbol'].replace('/USDT:USDT', '').replace('USDT', '')
+                    lines.append(f"    {d} {sym_short} x{p['leverage']} | "
+                                 f"{pnl_s} ({roe_s})")
+            else:
+                lines.append("  📊 포지션 없음")
+
         self.tg.send('\n'.join(lines))
+
+    def _cmd_positions(self, target="all"):
+        """포지션 상세 조회"""
+        accounts = self.cfg.get("ACCOUNTS", {})
+        if target != "all":
+            if target in accounts:
+                accounts = {target: accounts[target]}
+            else:
+                self.tg.send(f"❌ 알 수 없는 계정: {target}"); return
+
+        for acc_id, acc_cfg in accounts.items():
+            positions = self.binance.get_positions(acc_id)
+            bal = self.binance.get_balance(acc_id)
+
+            lines = [f"📋 {acc_cfg['name']} ({acc_id}) 포지션 상세"]
+            if bal:
+                usage = (bal['used'] / bal['total'] * 100) if bal['total'] > 0 else 0
+                lines.append(f"잔고: ${bal['total']:,.2f} | "
+                             f"사용: ${bal['used']:,.2f} ({usage:.1f}%) | "
+                             f"가용: ${bal['free']:,.2f}")
+
+            if not positions:
+                lines.append("\n포지션 없음")
+                self.tg.send('\n'.join(lines))
+                continue
+
+            lines.append(f"\n{'─' * 28}")
+            total_pnl = 0
+            total_margin = 0
+
+            for p in positions:
+                d = "LONG 🟢" if p['side'] == "LONG" else "SHORT 🔴"
+                sym = p['symbol'].replace('/USDT:USDT', '').replace('USDT', '')
+                pnl_s = f"+${p['pnl']:,.2f}" if p['pnl'] >= 0 else f"-${abs(p['pnl']):,.2f}"
+                roe_s = f"+{p['roe']:.1f}%" if p['roe'] >= 0 else f"{p['roe']:.1f}%"
+                lines.append(f"\n{sym} {d} x{p['leverage']}")
+                lines.append(f"  수량: {p['qty']} | 명목: ${p['notional']:,.1f}")
+                lines.append(f"  진입: {p['entry']:,.4f} → 현재: {p['mark']:,.4f}")
+                lines.append(f"  마진: ${p['margin']:,.2f} | PnL: {pnl_s} ({roe_s})")
+
+                total_pnl += p['pnl']
+                total_margin += p['margin']
+
+            lines.append(f"\n{'─' * 28}")
+            pnl_total_s = f"+${total_pnl:,.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.2f}"
+            lines.append(f"합계: {len(positions)}개 | "
+                         f"마진 ${total_margin:,.1f} | PnL {pnl_total_s}")
+            self.tg.send('\n'.join(lines))
+
+    def _cmd_balance(self):
+        """계정별 잔고 조회"""
+        lines = ["💰 계정별 잔고:"]
+        for acc_id, acc_cfg in self.cfg.get("ACCOUNTS", {}).items():
+            bal = self.binance.get_balance(acc_id)
+            if bal:
+                usage = (bal['used'] / bal['total'] * 100) if bal['total'] > 0 else 0
+                lines.append(f"\n{acc_cfg['name']} ({acc_id})")
+                lines.append(f"  총자산: ${bal['total']:,.2f}")
+                lines.append(f"  사용중: ${bal['used']:,.2f} ({usage:.1f}%)")
+                lines.append(f"  가용:   ${bal['free']:,.2f}")
+            else:
+                lines.append(f"\n{acc_cfg['name']} ({acc_id}): 조회 불가")
+        self.tg.send('\n'.join(lines))
+
+    def _cmd_close(self, text):
+        """포지션 청산: /close BTCUSDT [계정]"""
+        parts = text.split()
+        if len(parts) < 2:
+            self.tg.send("사용법: /close <심볼> [계정]\n"
+                         "예: /close BTCUSDT\n"
+                         "예: /close ETHUSDT semi")
+            return
+
+        raw_symbol = parts[1].upper()
+        target_acc = parts[2] if len(parts) > 2 else None
+
+        # 심볼 정규화 (BTCUSDT → BTC/USDT:USDT)
+        if '/' not in raw_symbol:
+            if raw_symbol.endswith('USDT'):
+                symbol = raw_symbol[:-4] + '/USDT:USDT'
+            else:
+                symbol = raw_symbol + '/USDT:USDT'
+        else:
+            symbol = raw_symbol
+
+        # 해당 심볼의 포지션 찾기
+        found = []
+        accounts = self.cfg.get("ACCOUNTS", {})
+        search_accs = {target_acc: accounts[target_acc]} if target_acc and target_acc in accounts else accounts
+
+        for acc_id in search_accs:
+            positions = self.binance.get_positions(acc_id)
+            for p in positions:
+                if p['symbol'] == symbol:
+                    found.append((acc_id, p))
+
+        if not found:
+            self.tg.send(f"❌ {raw_symbol} 포지션 없음")
+            return
+
+        # 확인 메시지
+        lines = ["⚠️ 청산 확인:"]
+        for acc_id, p in found:
+            acc_name = self.cfg["ACCOUNTS"][acc_id]["name"]
+            d = "LONG" if p['side'] == "LONG" else "SHORT"
+            pnl_s = f"+${p['pnl']:,.2f}" if p['pnl'] >= 0 else f"-${abs(p['pnl']):,.2f}"
+            sym_short = p['symbol'].replace('/USDT:USDT', '')
+            lines.append(f"  {acc_name}: {d} {sym_short} qty={p['qty']} PnL={pnl_s}")
+
+        lines.append("\n/yes — 청산 실행\n/no — 취소")
+        self.tg.send('\n'.join(lines))
+
+        # 확인 대기 저장
+        self._close_confirm[self.cfg["TELEGRAM_CHAT_ID"]] = {
+            "targets": found,
+            "symbol": symbol,
+            "time": time.time(),
+        }
+
+    def _cmd_close_confirm(self, chat_id):
+        """청산 확인 처리"""
+        pending = self._close_confirm.pop(chat_id, None)
+        if not pending:
+            self.tg.send("❌ 대기 중인 청산 요청 없음"); return
+
+        # 30초 타임아웃
+        if time.time() - pending["time"] > 30:
+            self.tg.send("❌ 청산 요청 만료 (30초 초과)"); return
+
+        lines = ["🔄 청산 실행:"]
+        for acc_id, p in pending["targets"]:
+            acc_name = self.cfg["ACCOUNTS"][acc_id]["name"]
+            sym_short = p['symbol'].replace('/USDT:USDT', '')
+            ok, msg = self.binance.close_position(acc_id, p['symbol'], p['side'], p['qty'])
+            if ok:
+                lines.append(f"  ✅ {acc_name} {sym_short}: {msg}")
+            else:
+                lines.append(f"  ❌ {acc_name} {sym_short}: {msg}")
+        self.tg.send('\n'.join(lines))
+
+    def _cmd_closeall(self, target_acc, chat_id):
+        """전체 포지션 청산: /closeall [계정]"""
+        accounts = self.cfg.get("ACCOUNTS", {})
+        if target_acc and target_acc not in accounts:
+            self.tg.send(f"❌ 알 수 없는 계정: {target_acc}"); return
+
+        search = {target_acc: accounts[target_acc]} if target_acc else accounts
+
+        # 대상 포지션 수집
+        all_found = []
+        for acc_id, acc_cfg in search.items():
+            positions = self.binance.get_positions(acc_id)
+            for p in positions:
+                all_found.append((acc_id, p))
+
+        if not all_found:
+            self.tg.send("✅ 열린 포지션 없음"); return
+
+        lines = ["⚠️ 전체 청산 확인:"]
+        for acc_id, p in all_found:
+            acc_name = self.cfg["ACCOUNTS"][acc_id]["name"]
+            d = "L" if p['side'] == "LONG" else "S"
+            sym_short = p['symbol'].replace('/USDT:USDT', '').replace('USDT', '')
+            pnl_s = f"+${p['pnl']:,.2f}" if p['pnl'] >= 0 else f"-${abs(p['pnl']):,.2f}"
+            lines.append(f"  {acc_name}: {d} {sym_short} {pnl_s}")
+        lines.append(f"\n총 {len(all_found)}개 포지션 청산됩니다.")
+        lines.append("/yes — 청산 실행\n/no — 취소")
+        self.tg.send('\n'.join(lines))
+
+        self._close_confirm[self.cfg["TELEGRAM_CHAT_ID"]] = {
+            "targets": all_found,
+            "symbol": "ALL",
+            "time": time.time(),
+        }
 
     def _cmd_restart(self, bot_id):
         if bot_id == "all":
