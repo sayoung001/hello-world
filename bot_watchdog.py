@@ -94,18 +94,20 @@ CONFIG = {
     "REPORT_DIR": "trade_logs/reports",
 
     # 바이낸스 API (원격 포지션 조정용)
+    # v9: BINANCE_API_KEY / BINANCE_SECRET (메인 계정)
+    # semi: BINANCE_API_KEY_SEMI / BINANCE_SECRET_SEMI (별도 계정)
     "EXCHANGES": {
-        "bot2": {
-            "name": "Bot2 (V9.2 Hunt)",
-            "api_key": os.environ.get("BINANCE_API_KEY_BOT2",
-                       os.environ.get("BINANCE_API_KEY", "")),
-            "secret": os.environ.get("BINANCE_SECRET_BOT2",
-                      os.environ.get("BINANCE_SECRET", "")),
+        "v9": {
+            "name": "V9 자동매매",
+            "api_key": os.environ.get("BINANCE_API_KEY", ""),
+            "secret": os.environ.get("BINANCE_SECRET", ""),
         },
         "semi": {
-            "name": "Semi-Auto (V8.2)",
-            "api_key": os.environ.get("BINANCE_API_KEY_SEMI", ""),
-            "secret": os.environ.get("BINANCE_SECRET_SEMI", ""),
+            "name": "Semi-Auto (소형코인)",
+            "api_key": os.environ.get("BINANCE_API_KEY_SEMI",
+                       os.environ.get("BINANCE_API_KEY", "")),
+            "secret": os.environ.get("BINANCE_SECRET_SEMI",
+                      os.environ.get("BINANCE_SECRET", "")),
         },
     },
     "DEFAULT_LEVERAGE": 20,
