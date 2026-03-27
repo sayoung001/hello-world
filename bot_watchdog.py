@@ -43,23 +43,24 @@ CONFIG = {
     "NOTION_PAGE_ID": os.environ.get("NOTION_PAGE_ID", "32c6b195d47f8037b433c171b134b9f1"),
     "NOTION_VERSION": "2022-06-28",
 
-    # 감시 대상 봇
+    # 감시 대상 봇 (2계정 운영: v9=메인계정, semi=서브계정)
+    # .env 키 매핑:
+    #   v9:   BINANCE_API_KEY / BINANCE_SECRET / TELEGRAM_TOKEN_TRADER / TELEGRAM_CHAT_ID
+    #   semi: BINANCE_API_KEY_SEMI / BINANCE_SECRET_SEMI / TELEGRAM_TOKEN_SEMI / TELEGRAM_CHAT_ID_SEMI
     "BOTS": {
-        "bots": {
-            "name": "Bot1+Bot2 (V9.2 + Hunt)",
-            "cmd": "python3 auto_trader_v9.py --mode E --live & python3 auto_trader_v9_bot2.py --mode E --live",
+        "v9": {
+            "name": "V9 자동매매 (메인계정)",
+            "cmd": "python3 auto_trader_v9.py --mode E --live",
             "positions_files": [
                 "trade_logs/positions_v9.json",
-                "trade_logs/positions_v9_bot2.json",
             ],
             "history_files": [
                 "trade_logs/trade_history_v9.jsonl",
-                "trade_logs/trade_history_v9_bot2.jsonl",
             ],
             "tmux_session": "bots",
         },
-        "bots_2": {
-            "name": "Semi-Auto (V8.2 소형코인)",
+        "semi": {
+            "name": "Semi-Auto V8.2 (서브계정)",
             "cmd": "python3 semi_auto_trader.py --live",
             "positions_files": [
                 "trade_logs_semi/positions_semi.json",
