@@ -397,6 +397,16 @@ class BinanceClient:
             print(f"[Binance] 잔고 조회 실패 ({account_id}): {e}")
             return None
 
+    @staticmethod
+    def _safe_float(val, default=0.0):
+        """None-safe float 변환"""
+        if val is None:
+            return default
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return default
+
     def get_positions(self, account_id):
         """열린 포지션 조회 → [{symbol, side, qty, entry, mark, pnl, leverage, margin, roe}]"""
         ex = self.exchanges.get(account_id)
@@ -405,21 +415,22 @@ class BinanceClient:
         try:
             raw = ex.fetch_positions()
             positions = []
+            sf = self._safe_float
             for p in raw:
-                contracts = abs(float(p.get('contracts', 0)))
+                contracts = abs(sf(p.get('contracts')))
                 if contracts == 0:
                     continue
-                entry = float(p.get('entryPrice', 0))
-                mark = float(p.get('markPrice', 0))
-                notional = abs(float(p.get('notional', 0)))
-                pnl = float(p.get('unrealizedPnl', 0))
-                leverage = int(float(p.get('leverage', 1)))
+                entry = sf(p.get('entryPrice'))
+                mark = sf(p.get('markPrice'))
+                notional = abs(sf(p.get('notional')))
+                pnl = sf(p.get('unrealizedPnl'))
+                leverage = int(sf(p.get('leverage'), 1))
                 margin = notional / leverage if leverage else notional
                 roe = (pnl / margin * 100) if margin > 0 else 0
 
                 positions.append({
                     'symbol': p.get('symbol', ''),
-                    'side': p.get('side', '').upper(),
+                    'side': (p.get('side') or '').upper(),
                     'qty': contracts,
                     'entry': entry,
                     'mark': mark,
