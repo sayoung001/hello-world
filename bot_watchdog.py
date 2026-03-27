@@ -95,7 +95,8 @@ CONFIG = {
     },
 
     # 감시 주기
-    "CHECK_INTERVAL_SEC": 300,     # 5분마다 점검
+    "CHECK_INTERVAL_SEC": 300,     # 5분마다 봇 점검
+    "CMD_POLL_SEC": 3,             # 3초마다 텔레그램 명령 폴링
     "DAILY_REPORT_HOUR": 8,       # 매일 오전 8시 일일 보고
     "ERROR_PATTERNS": [
         r"Traceback \(most recent call last\)",
@@ -709,49 +710,43 @@ class BotWatchdog:
             elif text.startswith("/help"):
                 bot_list = ", ".join(self.cfg["BOTS"].keys())
                 acc_list = ", ".join(self.cfg.get("ACCOUNTS", {}).keys())
+                # 안전한 명령어는 /로 시작 (클릭 가능)
+                # 위험한 명령어(close, closeall, restart)는 클릭 방지
                 self.tg.send(
                     "🤖 워치독 명령어 안내\n"
                     "━━━━━━━━━━━━━━━━━━━━\n"
-                    "\n📊 상태 조회\n"
+                    "\n📊 상태 조회 (바로 클릭 가능)\n"
                     "\n/status\n"
                     "  봇 프로세스 생존 상태 (🟢/🔴)\n"
                     "  + 계정별 잔고, 포지션 수, 총 PnL 요약\n"
                     "  + 각 포지션: 방향, 심볼, 레버리지, PnL, ROE%\n"
-                    f"\n/positions [{acc_list}|all]\n"
-                    "  포지션 상세 정보 조회\n"
+                    "\n/positions\n"
+                    f"  포지션 상세 (계정 지정: /positions {acc_list})\n"
                     "  진입가, 현재가, 수량, 명목금액, 마진, ROE%\n"
-                    "  예: /positions main → 메인계정만\n"
-                    "  예: /positions → 전체 계정\n"
                     "\n/balance\n"
-                    "  계정별 잔고 상세 (총자산/사용중/가용)\n")
-                self.tg.send(
-                    "💰 포지션 관리 (원격 청산)\n"
-                    "\n/close <심볼> [계정]\n"
-                    "  특정 심볼 포지션 시장가 청산\n"
-                    "  확인 메시지 후 /yes로 실행, /no로 취소\n"
-                    "  30초 내 미응답 시 자동 취소\n"
-                    "  예: /close BTCUSDT → 양쪽 계정에서 검색\n"
-                    "  예: /close ETHUSDT semi → 서브계정만\n"
-                    f"\n/closeall [{acc_list}]\n"
-                    "  해당 계정의 모든 포지션 일괄 청산\n"
-                    "  확인 절차 동일 (/yes, /no)\n"
-                    "  예: /closeall semi → 서브계정 전체 청산\n"
-                    "  예: /closeall → 모든 계정 전체 청산\n"
-                    "\n━━━━━━━━━━━━━━━━━━━━\n"
-                    "🔧 봇 관리\n"
-                    f"\n/restart [{bot_list}|all]\n"
-                    "  tmux 세션 kill 후 재시작\n"
-                    f"  예: /restart v9 → 메인봇 재시작\n"
-                    f"  예: /restart semi → 서브봇 재시작\n"
-                    "  예: /restart all → 전체 재시작\n"
+                    "  계정별 잔고 상세 (총자산/사용중/가용)\n"
                     "\n/errors\n"
-                    "  최근 로그에서 오류 패턴 스캔\n"
-                    "  (Traceback, 긴급청산, SL실패, API에러 등)\n"
+                    "  최근 로그 오류 스캔\n"
                     "\n/report\n"
-                    "  일일 보고서 즉시 생성\n"
-                    "  (봇 상태 + 포지션 + 오늘 거래 승패/PnL)\n"
-                    "  노션에도 자동 기록됨\n"
+                    "  일일 보고서 즉시 생성 (노션 자동 기록)\n"
                     "  ※ 매일 오전 8시 자동 생성")
+                # 위험 명령어: / 없이 설명 (오클릭 방지)
+                self.tg.send(
+                    "⚠️ 포지션 관리 (직접 입력 필요)\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    "\n• close 심볼 [계정]\n"
+                    "  특정 포지션 시장가 청산\n"
+                    "  확인 후 /yes 또는 /no (30초 제한)\n"
+                    "  입력 예: /close BTCUSDT\n"
+                    "  입력 예: /close ETHUSDT semi\n"
+                    "\n• closeall [계정]\n"
+                    "  계정 전체 포지션 일괄 청산\n"
+                    "  입력 예: /closeall semi\n"
+                    "\n• restart [봇|all]\n"
+                    "  tmux 세션 kill 후 재시작\n"
+                    f"  입력 예: /restart v9\n"
+                    f"  입력 예: /restart semi\n"
+                    "  입력 예: /restart all")
 
     def _cmd_status(self):
         """봇 프로세스 상태 + 실시간 포지션/잔고 요약"""
@@ -1010,18 +1005,23 @@ class BotWatchdog:
             f"명령어: /help")
         print(f"[Watchdog] 시작 — {len(self.cfg['BOTS'])}개 봇 감시")
 
+        last_check = 0  # 마지막 봇 점검 시각
+        check_interval = self.cfg["CHECK_INTERVAL_SEC"]
+        poll_interval = self.cfg.get("CMD_POLL_SEC", 3)
+
         while True:
             try:
                 now = datetime.now(KST)
+                now_ts = time.time()
 
-                # 프로세스 생존 체크
-                self.check_processes()
-
-                # 로그 오류 체크
-                self.check_errors()
-
-                # 텔레그램 명령 처리
+                # 텔레그램 명령 처리 (매 폴링마다)
                 self.process_commands()
+
+                # 봇 점검 (CHECK_INTERVAL_SEC마다)
+                if now_ts - last_check >= check_interval:
+                    self.check_processes()
+                    self.check_errors()
+                    last_check = now_ts
 
                 # 일일 보고 (오전 8시)
                 if now.hour == self.cfg["DAILY_REPORT_HOUR"] and not self._daily_report_done:
@@ -1030,7 +1030,7 @@ class BotWatchdog:
                 elif now.hour != self.cfg["DAILY_REPORT_HOUR"]:
                     self._daily_report_done = False
 
-                time.sleep(self.cfg["CHECK_INTERVAL_SEC"])
+                time.sleep(poll_interval)
 
             except KeyboardInterrupt:
                 self.tg.send("🤖 워치독 종료"); break
