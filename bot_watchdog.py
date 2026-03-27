@@ -19,11 +19,16 @@ bot_watchdog.py — 자동매매 봇 감시 + 오류 자동 분석 + 노션 보�
   python bot_watchdog.py --no-notion        # 노션 없이 실행
 """
 
-import os, sys, json, time, subprocess, requests, traceback, re
+import os, sys, json, time, subprocess, requests, traceback, re, math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
+
+try:
+    import ccxt
+except ImportError:
+    ccxt = None
 
 KST = timezone(timedelta(hours=9))
 
@@ -87,6 +92,23 @@ CONFIG = {
     # 작업 디렉토리
     "WORK_DIR": os.path.dirname(os.path.abspath(__file__)),
     "REPORT_DIR": "trade_logs/reports",
+
+    # 바이낸스 API (원격 포지션 조정용)
+    "EXCHANGES": {
+        "bot2": {
+            "name": "Bot2 (V9.2 Hunt)",
+            "api_key": os.environ.get("BINANCE_API_KEY_BOT2",
+                       os.environ.get("BINANCE_API_KEY", "")),
+            "secret": os.environ.get("BINANCE_SECRET_BOT2",
+                      os.environ.get("BINANCE_SECRET", "")),
+        },
+        "semi": {
+            "name": "Semi-Auto (V8.2)",
+            "api_key": os.environ.get("BINANCE_API_KEY_SEMI", ""),
+            "secret": os.environ.get("BINANCE_SECRET_SEMI", ""),
+        },
+    },
+    "DEFAULT_LEVERAGE": 20,
 }
 
 
@@ -198,6 +220,224 @@ class NotionReporter:
         except Exception as e:
             print(f"[Notion] 오류: {e}")
             return False
+
+
+# ═══════════════════════════════════════════════════════════
+#  거래소 연동 (원격 포지션 조회/조정)
+# ═══════════════════════════════════════════════════════════
+
+class ExchangeManager:
+    """바이낸스 선물 계정 연결 — 포지션 조회 + 원격 조정"""
+
+    def __init__(self, exchanges_cfg, leverage=20):
+        self._exchanges = {}  # name → ccxt instance
+        self._leverage = leverage
+        if not ccxt:
+            print("[Exchange] ccxt 미설치 — 거래소 연동 비활성")
+            return
+        for name, cfg in exchanges_cfg.items():
+            if not cfg.get("api_key") or not cfg.get("secret"):
+                continue
+            try:
+                ex = ccxt.binance({
+                    'apiKey': cfg["api_key"],
+                    'secret': cfg["secret"],
+                    'enableRateLimit': True,
+                    'options': {'defaultType': 'future'},
+                })
+                self._exchanges[name] = {'exchange': ex, 'display': cfg.get("name", name)}
+                print(f"[Exchange] {name} ({cfg.get('name', '')}) 연결 완료")
+            except Exception as e:
+                print(f"[Exchange] {name} 연결 실패: {e}")
+
+    @property
+    def available(self):
+        return len(self._exchanges) > 0
+
+    def list_accounts(self):
+        return list(self._exchanges.keys())
+
+    def _get_ex(self, account):
+        info = self._exchanges.get(account)
+        if not info:
+            return None, f"계정 '{account}' 없음. 사용 가능: {', '.join(self._exchanges.keys())}"
+        return info['exchange'], None
+
+    def get_balance(self, account):
+        """계정 잔고 조회"""
+        ex, err = self._get_ex(account)
+        if err: return None, err
+        try:
+            b = ex.fetch_balance({"type": "future"})
+            return {
+                'total': float(b["USDT"]["total"]),
+                'free': float(b["USDT"]["free"]),
+                'used': float(b["USDT"]["used"]),
+            }, None
+        except Exception as e:
+            return None, str(e)
+
+    def get_positions(self, account):
+        """실제 거래소 포지션 목록 조회"""
+        ex, err = self._get_ex(account)
+        if err: return None, err
+        try:
+            raw = ex.fetch_positions()
+            positions = []
+            for p in raw:
+                contracts = abs(float(p.get('contracts', 0)))
+                if contracts <= 0:
+                    continue
+                sym = p.get('symbol', '')
+                # 정규화: BTC/USDT:USDT → BTC/USDT
+                if ':' in sym:
+                    sym = sym.split(':')[0]
+                entry = float(p.get('entryPrice', 0))
+                mark = float(p.get('markPrice', 0))
+                notional = abs(float(p.get('notional', 0)))
+                margin = notional / float(p.get('leverage', self._leverage))
+                pnl = float(p.get('unrealizedPnl', 0))
+                lev = float(p.get('leverage', self._leverage))
+                side = p.get('side', '').lower()
+
+                # ROE 계산
+                if entry > 0 and side:
+                    if side == 'long':
+                        roe_spot = (mark - entry) / entry * 100
+                    else:
+                        roe_spot = (entry - mark) / entry * 100
+                    roe_lev = roe_spot * lev
+                else:
+                    roe_spot = 0; roe_lev = 0
+
+                positions.append({
+                    'symbol': sym,
+                    'side': side,
+                    'entry': entry,
+                    'mark': mark,
+                    'contracts': contracts,
+                    'notional': notional,
+                    'margin': margin,
+                    'pnl': pnl,
+                    'roe_spot': round(roe_spot, 2),
+                    'roe_lev': round(roe_lev, 1),
+                    'leverage': lev,
+                    'liq_price': float(p.get('liquidationPrice', 0)),
+                })
+            return positions, None
+        except Exception as e:
+            return None, str(e)
+
+    def close_position(self, account, symbol, side=None):
+        """포지션 시장가 청산"""
+        ex, err = self._get_ex(account)
+        if err: return False, err
+        try:
+            positions, perr = self.get_positions(account)
+            if perr: return False, perr
+
+            target = None
+            for p in positions:
+                if symbol.upper() in p['symbol'].upper().replace('/', ''):
+                    if side and p['side'] != side.lower():
+                        continue
+                    target = p; break
+
+            if not target:
+                return False, f"{symbol} 포지션 없음"
+
+            ps = "LONG" if target['side'] == 'long' else "SHORT"
+            close_side = "sell" if target['side'] == 'long' else "buy"
+            o = ex.create_order(target['symbol'], "market", close_side,
+                                target['contracts'],
+                                params={"positionSide": ps})
+            fill = float(o.get("average", target['mark']))
+
+            # 잔여 주문 정리
+            try:
+                raw_sym = target['symbol'].replace('/', '')
+                ex.fapiPrivateDeleteAllOpenOrders({"symbol": raw_sym})
+            except: pass
+
+            return True, f"청산 완료: {target['side']} {target['symbol']} @{fill:,.4f}"
+        except Exception as e:
+            return False, str(e)
+
+    def update_sl(self, account, symbol, new_sl_price):
+        """SL 가격 변경 (기존 STOP_MARKET 취소 → 새로 생성)"""
+        ex, err = self._get_ex(account)
+        if err: return False, err
+        try:
+            positions, perr = self.get_positions(account)
+            if perr: return False, perr
+
+            target = None
+            for p in positions:
+                if symbol.upper() in p['symbol'].upper().replace('/', ''):
+                    target = p; break
+            if not target:
+                return False, f"{symbol} 포지션 없음"
+
+            sym = target['symbol']
+            raw_sym = sym.replace('/', '')
+            ps = "LONG" if target['side'] == 'long' else "SHORT"
+            sl_side = "sell" if target['side'] == 'long' else "buy"
+
+            # 기존 STOP_MARKET 주문만 취소
+            try:
+                orders = ex.fapiPrivateGetOpenOrders({"symbol": raw_sym})
+                for oo in orders:
+                    otype = str(oo.get('type', oo.get('origType', ''))).upper()
+                    if 'STOP' in otype and 'PROFIT' not in otype:
+                        ex.cancel_order(str(oo.get('orderId')), sym)
+            except: pass
+
+            # 새 SL 생성
+            o = ex.create_order(sym, "STOP_MARKET", sl_side, target['contracts'],
+                params={"stopPrice": new_sl_price, "positionSide": ps,
+                        "closePosition": True, "priceProtect": "TRUE"})
+
+            return True, f"SL 변경: {sym} → {new_sl_price:,.6f}"
+        except Exception as e:
+            return False, str(e)
+
+    def update_tp(self, account, symbol, new_tp_price):
+        """TP 가격 변경 (기존 TAKE_PROFIT_MARKET 취소 → 새로 생성)"""
+        ex, err = self._get_ex(account)
+        if err: return False, err
+        try:
+            positions, perr = self.get_positions(account)
+            if perr: return False, perr
+
+            target = None
+            for p in positions:
+                if symbol.upper() in p['symbol'].upper().replace('/', ''):
+                    target = p; break
+            if not target:
+                return False, f"{symbol} 포지션 없음"
+
+            sym = target['symbol']
+            raw_sym = sym.replace('/', '')
+            ps = "LONG" if target['side'] == 'long' else "SHORT"
+            sl_side = "sell" if target['side'] == 'long' else "buy"
+
+            # 기존 TAKE_PROFIT_MARKET 취소
+            try:
+                orders = ex.fapiPrivateGetOpenOrders({"symbol": raw_sym})
+                for oo in orders:
+                    otype = str(oo.get('type', oo.get('origType', ''))).upper()
+                    if 'PROFIT' in otype:
+                        ex.cancel_order(str(oo.get('orderId')), sym)
+            except: pass
+
+            # 새 TP 생성
+            o = ex.create_order(sym, "TAKE_PROFIT_MARKET", sl_side, target['contracts'],
+                params={"stopPrice": new_tp_price, "positionSide": ps,
+                        "closePosition": True, "priceProtect": "TRUE"})
+
+            return True, f"TP 변경: {sym} → {new_tp_price:,.6f}"
+        except Exception as e:
+            return False, str(e)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -345,6 +585,9 @@ class BotWatchdog:
             self.cfg["NOTION_PAGE_ID"])
         self.monitor = ProcessMonitor()
         self.analyzer = LogAnalyzer(self.cfg["ERROR_PATTERNS"])
+        self.ex_mgr = ExchangeManager(
+            self.cfg.get("EXCHANGES", {}),
+            self.cfg.get("DEFAULT_LEVERAGE", 20))
         self._daily_report_done = False
         self._tg_offset = 0
 
@@ -526,14 +769,49 @@ class BotWatchdog:
                 self._cmd_errors()
             elif text.startswith("/report"):
                 self.daily_report()
+            elif text.startswith("/positions"):
+                parts = text.split()
+                acct = parts[1] if len(parts) > 1 else None
+                self._cmd_positions(acct)
+            elif text.startswith("/close"):
+                # /close <account> <symbol> [side]
+                parts = text.split()
+                if len(parts) >= 3:
+                    acct, sym = parts[1], parts[2]
+                    side = parts[3] if len(parts) > 3 else None
+                    self._cmd_close(acct, sym, side)
+                else:
+                    self.tg.send("사용법: /close <계정> <심볼> [long|short]")
+            elif text.startswith("/sl"):
+                # /sl <account> <symbol> <price>
+                parts = text.split()
+                if len(parts) >= 4:
+                    self._cmd_sl(parts[1], parts[2], parts[3])
+                else:
+                    self.tg.send("사용법: /sl <계정> <심볼> <가격>")
+            elif text.startswith("/tp"):
+                # /tp <account> <symbol> <price>
+                parts = text.split()
+                if len(parts) >= 4:
+                    self._cmd_tp(parts[1], parts[2], parts[3])
+                else:
+                    self.tg.send("사용법: /tp <계정> <심볼> <가격>")
             elif text.startswith("/help"):
                 bot_list = ", ".join(self.cfg["BOTS"].keys())
+                acct_list = ", ".join(self.ex_mgr.list_accounts()) if self.ex_mgr.available else "없음"
                 self.tg.send(
                     "🤖 워치독 명령어:\n"
-                    "/status — 봇 상태 확인\n"
+                    "━━━━ 감시 ━━━━\n"
+                    "/status — 봇 상태 + 거래소 포지션\n"
                     f"/restart [{bot_list}|all] — 봇 재시작\n"
                     "/errors — 최근 오류 확인\n"
-                    "/report — 일일 보고서 생성")
+                    "/report — 일일 보고서 생성\n"
+                    "━━━━ 포지션 관리 ━━━━\n"
+                    f"계정: {acct_list}\n"
+                    "/positions [계정] — 상세 포지션 조회\n"
+                    "/close <계정> <심볼> [long|short] — 포지션 청산\n"
+                    "/sl <계정> <심볼> <가격> — SL 변경\n"
+                    "/tp <계정> <심볼> <가격> — TP 변경")
 
     def _cmd_status(self):
         lines = ["🤖 봇 상태:"]
@@ -541,6 +819,45 @@ class BotWatchdog:
             alive = self.monitor.is_alive(bot_cfg["tmux_session"])
             status = "🟢" if alive else "🔴"
             lines.append(f"  {status} {bot_cfg['name']} ({bot_cfg['tmux_session']})")
+
+        # 거래소 실제 포지션 + 잔고
+        if self.ex_mgr.available:
+            for acct in self.ex_mgr.list_accounts():
+                bal, berr = self.ex_mgr.get_balance(acct)
+                positions, perr = self.ex_mgr.get_positions(acct)
+                display = self.cfg.get("EXCHANGES", {}).get(acct, {}).get("name", acct)
+                lines.append(f"\n💰 [{display}]")
+                if bal:
+                    lines.append(f"  잔고: ${bal['total']:,.2f} "
+                                 f"(가용: ${bal['free']:,.2f} / 사용: ${bal['used']:,.2f})")
+                elif berr:
+                    lines.append(f"  잔고 조회 실패: {berr}")
+
+                if positions:
+                    total_pnl = sum(p['pnl'] for p in positions)
+                    total_margin = sum(p['margin'] for p in positions)
+                    total_notional = sum(p['notional'] for p in positions)
+                    lines.append(f"  포지션: {len(positions)}개 | "
+                                 f"총마진: ${total_margin:,.1f} | "
+                                 f"총규모: ${total_notional:,.0f} | "
+                                 f"총PnL: ${total_pnl:+,.2f}")
+                    for p in positions:
+                        d_s = '📈L' if p['side'] == 'long' else '📉S'
+                        lines.append(f"  {d_s} {p['symbol']}")
+                        lines.append(f"    진입: {p['entry']:,.4f} → 현재: {p['mark']:,.4f}")
+                        lines.append(f"    규모: ${p['notional']:,.0f} | "
+                                     f"마진: ${p['margin']:,.1f} | "
+                                     f"×{p['leverage']:.0f}")
+                        lines.append(f"    PnL: ${p['pnl']:+,.2f} | "
+                                     f"현물{p['roe_spot']:+.2f}% | "
+                                     f"ROE{p['roe_lev']:+.1f}%")
+                        if p['liq_price'] > 0:
+                            lines.append(f"    청산가: {p['liq_price']:,.4f}")
+                elif perr:
+                    lines.append(f"  포지션 조회 실패: {perr}")
+                else:
+                    lines.append(f"  포지션: 없음")
+
         self.tg.send('\n'.join(lines))
 
     def _cmd_restart(self, bot_id):
@@ -562,6 +879,92 @@ class BotWatchdog:
         errors = self.check_errors()
         if not errors:
             self.tg.send("✅ 최근 오류 없음")
+
+    # ── 포지션 관리 명령어 ──
+
+    def _cmd_positions(self, account=None):
+        """상세 포지션 조회 — 계정 미지정 시 전체"""
+        if not self.ex_mgr.available:
+            self.tg.send("❌ 거래소 연동 없음 (ccxt 미설치 또는 API 미설정)")
+            return
+
+        accounts = [account] if account else self.ex_mgr.list_accounts()
+        for acct in accounts:
+            display = self.cfg.get("EXCHANGES", {}).get(acct, {}).get("name", acct)
+            bal, berr = self.ex_mgr.get_balance(acct)
+            positions, perr = self.ex_mgr.get_positions(acct)
+
+            lines = [f"📊 [{display}] 상세 포지션"]
+            if bal:
+                lines.append(f"총자산: ${bal['total']:,.2f} | "
+                             f"가용: ${bal['free']:,.2f} | 사용: ${bal['used']:,.2f}")
+            if perr:
+                lines.append(f"❌ 조회 실패: {perr}")
+                self.tg.send('\n'.join(lines))
+                continue
+
+            if not positions:
+                lines.append("포지션 없음")
+                self.tg.send('\n'.join(lines))
+                continue
+
+            total_pnl = 0; total_margin = 0
+            for p in positions:
+                total_pnl += p['pnl']; total_margin += p['margin']
+                d_s = '📈 LONG' if p['side'] == 'long' else '📉 SHORT'
+                lines.append(f"\n{d_s} {p['symbol']}")
+                lines.append(f"  진입가: {p['entry']:,.6f}")
+                lines.append(f"  현재가: {p['mark']:,.6f}")
+                lines.append(f"  수량: {p['contracts']}")
+                lines.append(f"  규모: ${p['notional']:,.0f} (마진 ${p['margin']:,.1f})")
+                lines.append(f"  레버리지: ×{p['leverage']:.0f}")
+                lines.append(f"  PnL: ${p['pnl']:+,.2f}")
+                lines.append(f"  현물: {p['roe_spot']:+.2f}% | ROE: {p['roe_lev']:+.1f}%")
+                if p['liq_price'] > 0:
+                    lines.append(f"  청산가: {p['liq_price']:,.4f}")
+
+            lines.append(f"\n━━━━━━━━━━━━━━━━")
+            lines.append(f"총 마진: ${total_margin:,.1f} | 총 PnL: ${total_pnl:+,.2f}")
+            self.tg.send('\n'.join(lines))
+
+    def _cmd_close(self, account, symbol, side=None):
+        """원격 포지션 청산"""
+        if not self.ex_mgr.available:
+            self.tg.send("❌ 거래소 연동 없음"); return
+        display = self.cfg.get("EXCHANGES", {}).get(account, {}).get("name", account)
+        self.tg.send(f"🔄 [{display}] {symbol} 청산 시도 중...")
+        ok, msg = self.ex_mgr.close_position(account, symbol, side)
+        self.tg.send(f"{'✅' if ok else '❌'} {msg}")
+        if ok:
+            self.notion.append_report(
+                f"🔧 원격 청산 — {datetime.now(KST).strftime('%m/%d %H:%M')}",
+                [f"[{display}] {msg}"])
+
+    def _cmd_sl(self, account, symbol, price_str):
+        """원격 SL 변경"""
+        if not self.ex_mgr.available:
+            self.tg.send("❌ 거래소 연동 없음"); return
+        try:
+            price = float(price_str)
+        except ValueError:
+            self.tg.send(f"❌ 가격 형식 오류: {price_str}"); return
+        display = self.cfg.get("EXCHANGES", {}).get(account, {}).get("name", account)
+        self.tg.send(f"🔄 [{display}] {symbol} SL → {price:,.6f} 변경 중...")
+        ok, msg = self.ex_mgr.update_sl(account, symbol, price)
+        self.tg.send(f"{'✅' if ok else '❌'} {msg}")
+
+    def _cmd_tp(self, account, symbol, price_str):
+        """원격 TP 변경"""
+        if not self.ex_mgr.available:
+            self.tg.send("❌ 거래소 연동 없음"); return
+        try:
+            price = float(price_str)
+        except ValueError:
+            self.tg.send(f"❌ 가격 형식 오류: {price_str}"); return
+        display = self.cfg.get("EXCHANGES", {}).get(account, {}).get("name", account)
+        self.tg.send(f"🔄 [{display}] {symbol} TP → {price:,.6f} 변경 중...")
+        ok, msg = self.ex_mgr.update_tp(account, symbol, price)
+        self.tg.send(f"{'✅' if ok else '❌'} {msg}")
 
     # ── 메인 루프 ──
 

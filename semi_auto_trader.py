@@ -403,6 +403,9 @@ class Position:
     # EE 체크 상태
     ee_checked: bool = False         # 6~8h 구간에서 EE 체크 완료?
 
+    # SL 잠금 재시도 제한
+    sl_lock_retries: int = 0         # SL 잠금 실패 횟수 (최대 5회)
+
     # 거래소 주문 ID
     sl_order_id: str = ""
     tp_order_id: str = ""
@@ -624,10 +627,10 @@ class Executor:
         for attempt in range(2):
             try:
                 # ── 방법 A: positionSide로 방향 지정 (헤지모드) ──
-                # 새 SL 먼저 생성
+                # 새 SL 먼저 생성 (closePosition으로 전체 포지션 청산 보장)
                 o_sl = self.ex.create_order(sym, "STOP_MARKET", sl_side, rounded_qty,
                     params={"stopPrice": new_sl, "positionSide": ps,
-                            "priceProtect": "TRUE"})
+                            "closePosition": True, "priceProtect": "TRUE"})
                 new_sl_id = o_sl.get('id', '')
                 print(f"  {sym}: 새 SL(본전) 생성 완료 id={new_sl_id}")
 
@@ -1214,6 +1217,12 @@ class ConvergenceTrader:
             sl_hit = ((pos.direction == 'long' and price <= pos.stop_loss) or
                       (pos.direction == 'short' and price >= pos.stop_loss))
             if sl_hit:
+                # 거래소 STOP_MARKET이 이미 체결되었을 수 있음 → 먼저 확인
+                if (not self.cfg["PAPER_TRADE"]
+                        and self.executor._verify_position_closed(pos.symbol, pos.direction)):
+                    # 거래소에서 이미 청산 → runtime_sync에서 처리하도록 skip
+                    print(f"  {pos.symbol} SL 도달 but 거래소에서 이미 청산됨 → sync 대기")
+                    continue
                 reason = 'SL_본전' if pos.sl_locked else 'SL'
                 self._close(pos, price, reason, closed); continue
 
@@ -1221,16 +1230,25 @@ class ConvergenceTrader:
             tp_hit = ((pos.direction == 'long' and price >= pos.take_profit) or
                       (pos.direction == 'short' and price <= pos.take_profit))
             if tp_hit:
+                if (not self.cfg["PAPER_TRADE"]
+                        and self.executor._verify_position_closed(pos.symbol, pos.direction)):
+                    print(f"  {pos.symbol} TP 도달 but 거래소에서 이미 청산됨 → sync 대기")
+                    continue
                 self._close(pos, price, 'TP_F8.0', closed); continue
 
             # ── [V8-3] Lock: F2.0 도달 시 SL→본전 ──
+            MAX_SL_LOCK_RETRIES = 5
             if not pos.sl_locked and pos.lock_trigger_roe > 0:
                 if pos.max_fav_roe >= pos.lock_trigger_roe:
-                    new_sl = pos.entry_price
-                    if self.executor.update_sl_order(
-                            pos.symbol, pos.direction, pos.quantity, new_sl, pos):
+                    if pos.sl_lock_retries >= MAX_SL_LOCK_RETRIES:
+                        # 최대 재시도 초과 → 더 이상 시도하지 않음 (API ban 방지)
+                        pass
+                    elif self.executor.update_sl_order(
+                            pos.symbol, pos.direction, pos.quantity,
+                            pos.entry_price, pos):
                         pos.sl_locked = True
-                        pos.stop_loss = new_sl
+                        pos.stop_loss = pos.entry_price
+                        pos.sl_lock_retries = 0
                         self._save_positions()
                         d_s = 'Long' if pos.direction == 'long' else 'Short'
                         self.tg.send(
@@ -1238,16 +1256,20 @@ class ConvergenceTrader:
                             f"━━━━━━━━━━━━━━━━\n"
                             f"Lock(F{self.cfg['LOCK_FIBO']}) 도달! "
                             f"(현물+{pos.max_fav_roe:.1f}%)\n"
-                            f"SL: {pos.original_sl:,.6f} → {new_sl:,.6f} (본전)\n"
+                            f"SL: {pos.original_sl:,.6f} → {pos.entry_price:,.6f} (본전)\n"
                             f"→ 이제 Trail {self.cfg['TRAIL_PCT']}% 모드")
                     else:
-                        # [8.1-5 FIX] sl_locked=False 유지 → 다음 루프에서 재시도
-                        raw_sym = pos.symbol.replace('/', '')
-                        self.tg.send(
-                            f"⚠️ SL 잠금 실패 (재시도 예정) | {pos.symbol}\n"
-                            f"진입가: {pos.entry_price:,.6f}\n"
-                            f"새 SL = {pos.entry_price:,.6f} (본전)\n"
-                            f"→ {self.cfg['MONITOR_SEC']}초 후 자동 재시도")
+                        pos.sl_lock_retries += 1
+                        self._save_positions()
+                        if pos.sl_lock_retries >= MAX_SL_LOCK_RETRIES:
+                            self.tg.send(
+                                f"🚨 SL 잠금 {MAX_SL_LOCK_RETRIES}회 실패! | {pos.symbol}\n"
+                                f"→ 수동 확인 필요! 바이낸스에서 SL을 본전({pos.entry_price:,.6f})으로 변경하세요")
+                        else:
+                            self.tg.send(
+                                f"⚠️ SL 잠금 실패 ({pos.sl_lock_retries}/{MAX_SL_LOCK_RETRIES}) | {pos.symbol}\n"
+                                f"진입가: {pos.entry_price:,.6f}\n"
+                                f"→ {self.cfg['MONITOR_SEC']}초 후 자동 재시도")
 
             # ── [V8-3] Trail: 본전 잠금 후 최고점 대비 50% 후퇴 시 청산 ──
             if pos.sl_locked and pos.max_fav_roe > 0.5:
