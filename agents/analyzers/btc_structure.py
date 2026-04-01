@@ -76,6 +76,183 @@ class BTCStructureAgent(AgentBase):
 }
 ```"""
 
+    # ── 매물대(Volume Profile) 분석 ──
+
+    @staticmethod
+    def _compute_volume_profile(df: pd.DataFrame, lookback: int = 50, bins: int = 30) -> dict:
+        """
+        Volume Profile 근사 계산.
+        HVN(High Volume Node) = 지지/저항, LVN(Low Volume Node) = 돌파 가능 구간.
+        """
+        tail = df.tail(lookback)
+        price_range = tail["high"].max() - tail["low"].min()
+        if price_range <= 0:
+            return {"poc": float(df["close"].iloc[-1]), "hvn": [], "lvn": [], "value_area": {}}
+
+        price_bins = np.linspace(tail["low"].min(), tail["high"].max(), bins + 1)
+        vol_profile = np.zeros(bins)
+
+        for _, row in tail.iterrows():
+            # 캔들 전체 범위에 거래량 분배 (더 정확한 근사)
+            low_bin = np.clip(int((row["low"] - price_bins[0]) / (price_range / bins)), 0, bins - 1)
+            high_bin = np.clip(int((row["high"] - price_bins[0]) / (price_range / bins)), 0, bins - 1)
+            if low_bin == high_bin:
+                vol_profile[low_bin] += row["volume"]
+            else:
+                spread = high_bin - low_bin + 1
+                for b in range(low_bin, high_bin + 1):
+                    vol_profile[b] += row["volume"] / spread
+
+        # POC (Point of Control)
+        poc_idx = int(np.argmax(vol_profile))
+        poc_price = float((price_bins[poc_idx] + price_bins[poc_idx + 1]) / 2)
+
+        # Value Area (거래량 70% 집중 구간)
+        total_vol = vol_profile.sum()
+        sorted_bins = np.argsort(vol_profile)[::-1]
+        cumulative = 0.0
+        va_bins = set()
+        for b in sorted_bins:
+            va_bins.add(b)
+            cumulative += vol_profile[b]
+            if cumulative >= total_vol * 0.7:
+                break
+        va_low = float(price_bins[min(va_bins)])
+        va_high = float(price_bins[max(va_bins) + 1])
+
+        # HVN: 상위 20% 거래량 구간 (강한 지지/저항)
+        threshold_high = np.percentile(vol_profile, 80)
+        hvn = []
+        for i in range(bins):
+            if vol_profile[i] >= threshold_high:
+                hvn.append(round(float((price_bins[i] + price_bins[i + 1]) / 2), 2))
+
+        # LVN: 하위 20% 거래량 구간 (가격 빠르게 통과 = 돌파 가능)
+        threshold_low = np.percentile(vol_profile[vol_profile > 0], 20) if vol_profile.sum() > 0 else 0
+        lvn = []
+        for i in range(bins):
+            if 0 < vol_profile[i] <= threshold_low:
+                lvn.append(round(float((price_bins[i] + price_bins[i + 1]) / 2), 2))
+
+        return {
+            "poc": round(poc_price, 2),
+            "hvn": hvn[:5],  # 상위 5개
+            "lvn": lvn[:5],
+            "value_area": {"low": round(va_low, 2), "high": round(va_high, 2)},
+        }
+
+    # ── 돌파/반동 패턴 인식 ──
+
+    @staticmethod
+    def _detect_breakout_patterns(df: pd.DataFrame, vol_profile: dict) -> dict:
+        """
+        가격 행동 기반 돌파/반동 패턴 감지.
+        - 매물대(HVN) 돌파: 거래량 동반 여부로 진위 판단
+        - 반동(Rejection): HVN에서 꼬리 형성
+        - Squeeze → Expansion: 변동성 수축 후 확장
+        """
+        if len(df) < 20:
+            return {"pattern": "insufficient_data"}
+
+        close = df["close"]
+        high = df["high"]
+        low = df["low"]
+        volume = df["volume"]
+        current = float(close.iloc[-1])
+        avg_vol = float(volume.tail(20).mean())
+
+        patterns = []
+        hvn_levels = vol_profile.get("hvn", [])
+        va = vol_profile.get("value_area", {})
+        va_high = va.get("high", current * 1.05)
+        va_low = va.get("low", current * 0.95)
+
+        # 1. Value Area 돌파 감지
+        prev_close = float(close.iloc[-2])
+        vol_ratio = float(volume.iloc[-1]) / max(avg_vol, 1)
+
+        if prev_close < va_high <= current:
+            strength = "strong" if vol_ratio > 1.5 else "weak"
+            patterns.append({
+                "type": "va_breakout_up",
+                "level": va_high,
+                "vol_ratio": round(vol_ratio, 2),
+                "strength": strength,
+                "desc": f"VA 상단 돌파 ({strength}, vol {vol_ratio:.1f}x)"
+            })
+        elif prev_close > va_low >= current:
+            strength = "strong" if vol_ratio > 1.5 else "weak"
+            patterns.append({
+                "type": "va_breakdown",
+                "level": va_low,
+                "vol_ratio": round(vol_ratio, 2),
+                "strength": strength,
+                "desc": f"VA 하단 이탈 ({strength}, vol {vol_ratio:.1f}x)"
+            })
+
+        # 2. HVN 반동(Rejection) 감지 — 꼬리가 HVN에 닿고 복귀
+        for lvl in hvn_levels:
+            # 위꼬리: high가 HVN 돌파했지만 close가 아래로 복귀
+            if float(high.iloc[-1]) >= lvl > current and (float(high.iloc[-1]) - current) > (current - float(low.iloc[-1])):
+                patterns.append({
+                    "type": "rejection_resistance",
+                    "level": lvl,
+                    "desc": f"${lvl:,.0f} 저항 매물대에서 반동(위꼬리)"
+                })
+            # 아래꼬리: low가 HVN 하회했지만 close가 위로 복귀
+            if float(low.iloc[-1]) <= lvl < current and (current - float(low.iloc[-1])) > (float(high.iloc[-1]) - current):
+                patterns.append({
+                    "type": "rejection_support",
+                    "level": lvl,
+                    "desc": f"${lvl:,.0f} 지지 매물대에서 반동(아래꼬리)"
+                })
+
+        # 3. Squeeze → Expansion (볼린저밴드 폭 기반)
+        bb_width = ((high - low) / close * 100).rolling(20).mean()
+        if len(bb_width.dropna()) >= 5:
+            recent_width = float(bb_width.iloc[-1])
+            avg_width = float(bb_width.tail(20).mean())
+            min_width = float(bb_width.tail(20).min())
+
+            if recent_width > avg_width * 1.5 and float(bb_width.iloc[-2]) < avg_width:
+                direction = "up" if current > float(close.iloc[-2]) else "down"
+                patterns.append({
+                    "type": "squeeze_expansion",
+                    "direction": direction,
+                    "expansion_ratio": round(recent_width / max(min_width, 0.01), 2),
+                    "desc": f"변동성 확장 ({direction}, {recent_width/max(min_width,0.01):.1f}x)"
+                })
+
+        # 4. 연속 방향 캔들 (모멘텀)
+        last_3 = close.tail(4).values
+        if len(last_3) == 4:
+            if all(last_3[i] > last_3[i-1] for i in range(1, 4)):
+                patterns.append({"type": "momentum_up", "candles": 3, "desc": "3연속 양봉"})
+            elif all(last_3[i] < last_3[i-1] for i in range(1, 4)):
+                patterns.append({"type": "momentum_down", "candles": 3, "desc": "3연속 음봉"})
+
+        # 종합 판단
+        bullish_patterns = sum(1 for p in patterns if p["type"] in
+                               ("va_breakout_up", "rejection_support", "momentum_up")
+                               or (p["type"] == "squeeze_expansion" and p.get("direction") == "up"))
+        bearish_patterns = sum(1 for p in patterns if p["type"] in
+                                ("va_breakdown", "rejection_resistance", "momentum_down")
+                                or (p["type"] == "squeeze_expansion" and p.get("direction") == "down"))
+
+        if bullish_patterns > bearish_patterns:
+            bias = "bullish"
+        elif bearish_patterns > bullish_patterns:
+            bias = "bearish"
+        else:
+            bias = "neutral"
+
+        return {
+            "patterns": patterns[:5],
+            "pattern_bias": bias,
+            "bullish_count": bullish_patterns,
+            "bearish_count": bearish_patterns,
+        }
+
     def collect_data(self) -> dict:
         """BTC 관련 데이터 수집 (API 직접 호출)"""
         data = {}
@@ -105,24 +282,13 @@ class BTCStructureAgent(AgentBase):
                                 (low - close.shift(1)).abs()], axis=1).max(axis=1)
                 atr = float(tr.rolling(14).mean().iloc[-1])
 
-                # Volume Profile 근사: 가격대별 거래량 집중도
-                price_range = high.tail(50).max() - low.tail(50).min()
-                if price_range > 0:
-                    bins = 20
-                    price_bins = np.linspace(low.tail(50).min(), high.tail(50).max(), bins + 1)
-                    vol_profile = np.zeros(bins)
-                    for i in range(len(df.tail(50))):
-                        row = df.iloc[-(50 - i)]
-                        bin_idx = np.clip(int((row["close"] - price_bins[0]) / (price_range / bins)), 0, bins - 1)
-                        vol_profile[bin_idx] += row["volume"]
-                    poc_idx = int(np.argmax(vol_profile))
-                    poc_price = float((price_bins[poc_idx] + price_bins[poc_idx + 1]) / 2)
-                    # 지지/저항: 거래량 상위 3개 레벨
-                    top_levels = np.argsort(vol_profile)[-3:][::-1]
-                    vol_levels = [float((price_bins[i] + price_bins[i + 1]) / 2) for i in top_levels]
-                else:
-                    poc_price = float(close.iloc[-1])
-                    vol_levels = []
+                # Volume Profile (HVN/LVN/VA 포함)
+                vol_profile = self._compute_volume_profile(df, lookback=50, bins=30)
+
+                # 돌파/반동 패턴 (4h, 1h에서만)
+                bp = {}
+                if tf in ("4h", "1h"):
+                    bp = self._detect_breakout_patterns(df, vol_profile)
 
                 tail_count = 96 if tf == "15m" else 24 if tf == "1h" else 6
                 data[f"btc_{tf}"] = {
@@ -138,8 +304,10 @@ class BTCStructureAgent(AgentBase):
                     "rsi": round(float(rsi.iloc[-1]), 1),
                     "atr": round(atr, 2),
                     "atr_pct": round(atr / float(close.iloc[-1]) * 100, 3),
-                    "poc_price": round(poc_price, 2),
-                    "volume_levels": [round(v, 2) for v in vol_levels],
+                    "poc_price": vol_profile["poc"],
+                    "volume_levels": vol_profile["hvn"],
+                    "volume_profile": vol_profile,
+                    "breakout_patterns": bp,
                 }
             except Exception as e:
                 data[f"btc_{tf}"] = {"error": str(e)}
@@ -258,6 +426,26 @@ class BTCStructureAgent(AgentBase):
                            f"- 분위기 변화: {btc_filter.get('mood_shift', 'STABLE')}\n"
                            f"- 근거: {', '.join(btc_filter.get('reasons', []))}")
 
+        # 매물대 & 패턴 정보
+        vp_4h = btc_4h.get("volume_profile", {})
+        bp_4h = btc_4h.get("breakout_patterns", {})
+        bp_1h = btc_1h.get("breakout_patterns", {})
+        va_4h = vp_4h.get("value_area", {})
+
+        vp_info = ""
+        if vp_4h:
+            vp_info = (f"- POC (최대 거래량): ${vp_4h.get('poc', 'N/A')}\n"
+                       f"- Value Area: ${va_4h.get('low', 'N/A')} ~ ${va_4h.get('high', 'N/A')}\n"
+                       f"- HVN (지지/저항 매물대): {vp_4h.get('hvn', [])}\n"
+                       f"- LVN (돌파 가능 구간): {vp_4h.get('lvn', [])}")
+
+        pattern_info = ""
+        for label, bp_data in [("4h", bp_4h), ("1h", bp_1h)]:
+            if bp_data and bp_data.get("patterns"):
+                pattern_info += f"\n### {label} 패턴 (편향: {bp_data.get('pattern_bias', 'N/A')})\n"
+                for p in bp_data.get("patterns", []):
+                    pattern_info += f"  - {p.get('desc', p.get('type', ''))}\n"
+
         prompt = f"""다음 BTC 데이터를 분석하여 구조적 판단을 내려주세요.
 
 ## 가격 데이터 (멀티타임프레임)
@@ -267,8 +455,12 @@ class BTCStructureAgent(AgentBase):
 - EMA 12/26: ${btc_4h.get('ema_12', 'N/A')} / ${btc_4h.get('ema_26', 'N/A')} (갭: {btc_4h.get('ema_gap_pct', 'N/A')}%)
 - RSI: {btc_4h.get('rsi', 'N/A')} | ATR: {btc_4h.get('atr_pct', 'N/A')}%
 - 거래량 비율(최근/평균): {btc_4h.get('volume_ratio', 'N/A')}x
-- Volume POC: ${btc_4h.get('poc_price', 'N/A')}
-- 매물대 레벨: {btc_4h.get('volume_levels', [])}
+
+### 매물대 분석 (Volume Profile)
+{vp_info or "데이터 없음"}
+
+### 돌파/반동 패턴
+{pattern_info or "감지된 패턴 없음"}
 
 ### 1시간봉
 - EMA 12/26: ${btc_1h.get('ema_12', 'N/A')} / ${btc_1h.get('ema_26', 'N/A')}
@@ -335,7 +527,7 @@ class BTCStructureAgent(AgentBase):
         ema12 = btc_4h.get("ema_12", 0)
         ema26 = btc_4h.get("ema_26", 0)
 
-        # 트렌드 판단 (EMA + BTCFilter 종합)
+        # 트렌드 판단 (EMA + BTCFilter + 패턴 종합)
         if ema12 > ema26:
             trend = "bullish"
             breakout_prob = 0.55
@@ -345,6 +537,14 @@ class BTCStructureAgent(AgentBase):
         else:
             trend = "neutral"
             breakout_prob = 0.45
+
+        # 패턴 편향 반영
+        bp = btc_4h.get("breakout_patterns", {})
+        pattern_bias = bp.get("pattern_bias", "neutral")
+        if pattern_bias == "bullish":
+            breakout_prob = min(breakout_prob + 0.1, 0.85)
+        elif pattern_bias == "bearish":
+            breakout_prob = max(breakout_prob - 0.1, 0.1)
 
         # BTCFilter 반영
         filter_state = btc_filter.get("market_state", "NEUTRAL")
@@ -367,17 +567,26 @@ class BTCStructureAgent(AgentBase):
         else:
             risk_level = "SAFE"
 
+        # Volume Profile 정보 통합
+        vp = btc_4h.get("volume_profile", {})
+        va = vp.get("value_area", {})
+
         return {
             "btc_price": price,
-            "key_resistance": btc_4h.get("volume_levels", []),
-            "key_support": [],
-            "volume_profile_poc": btc_4h.get("poc_price", 0),
+            "key_resistance": vp.get("hvn", btc_4h.get("volume_levels", [])),
+            "key_support": [lvl for lvl in vp.get("hvn", []) if lvl < price],
+            "volume_profile_poc": vp.get("poc", btc_4h.get("poc_price", 0)),
+            "value_area": va,
             "breakout_probability": round(breakout_prob, 2),
             "trend": trend,
+            "trend_strength": "moderate",
+            "pattern_bias": pattern_bias,
+            "patterns_detected": [p.get("desc", "") for p in bp.get("patterns", [])],
             "liquidation_gravity": gravity_dir,
             "risk_level": risk_level,
             "confidence": 0.5,
             "reasoning": (f"규칙 기반 폴백: {filter_state}, "
+                          f"패턴 {pattern_bias}, "
                           f"청산중력 {gravity_dir}({gravity}/10), "
                           f"위험도 {danger}")
         }
