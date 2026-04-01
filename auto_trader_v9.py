@@ -2203,7 +2203,7 @@ class ConvergenceTrader:
 
                 # ── [V9.5] 실시간 급락 감지 (매 루프) ──
                 if self.agent_hook:
-                    self.agent_hook.crash_check()
+                    self.agent_hook.crash_check(self.positions)
 
                 # ── 포지션 모니터 (30초마다) ──
                 if self.positions:
