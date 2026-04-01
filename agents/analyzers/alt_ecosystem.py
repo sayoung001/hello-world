@@ -5,15 +5,16 @@ alt_ecosystem.py — Agent 4: 알트코인 생태계 분석가
 분석 유형: Subjective (주관적 해석)
 
 데이터 소스:
-- Binance (상위 알트코인 가격)
-- 분산도 지수(Dispersion Index) 계산
-- 섹터별 퍼포먼스 분류
+- Binance (상위 알트코인 가격 + 거래량)
+- Dispersion Index (방향 + 크기 기반)
+- 섹터별 Rolling 모멘텀
+- 포지션별 BTC 베타 계산
 """
 
 from __future__ import annotations
 import pandas as pd
 import numpy as np
-import time
+import time as _time
 from typing import Any
 
 from agents.core.base import AgentBase
@@ -33,7 +34,7 @@ SECTOR_MAP = {
     # 인프라
     "LINK": "Infra", "DOT": "Infra", "ATOM": "Infra", "ARB": "Infra", "OP": "Infra",
     # 기타
-    "XRP": "Payment", "BNB": "Exchange", "LTC": "Legacy",
+    "XRP": "Payment", "BNB": "Exchange", "LTC": "Legacy", "ETH": "L1",
 }
 
 # 분석 대상 (시총 상위 + v9 워치리스트)
@@ -49,10 +50,10 @@ class AltEcosystemAgent(AgentBase):
     알트코인 생태계 분석가
 
     책임:
-    - Dispersion Index 계산 (알트 간 방향 일치도)
-    - BTC 상승 시 알트 베타 (과민반응 정도)
-    - 섹터별 강세/약세 판단
-    - 현재 포지션 코인의 생태계 맥락 분석
+    - Dispersion Index 계산 (방향 + 크기 기반 고도화)
+    - 섹터별 Rolling 모멘텀 (4h / 24h / 7d)
+    - 포지션별 BTC 베타 계산 (개별 코인 리스크)
+    - 섹터 로테이션 감지
     """
 
     def __init__(self, exchange=None):
@@ -81,12 +82,15 @@ BTC 도미넌스, 섹터 로테이션, 알트코인 분산도를 분석합니다
 ```json
 {
   "dispersion_index": 0~1(0=완전동조, 1=완전분산),
+  "dispersion_detail": {"direction": 방향분산, "magnitude": 크기분산},
   "market_consensus": "bullish|bearish|unclear",
   "btc_dominance_trend": "rising|stable|falling",
   "leading_sector": "섹터명",
   "lagging_sector": "섹터명",
-  "sector_performance": {"L1": 변동률%, "AI": %, "Meme": %, ...},
-  "alt_beta": BTC 대비 알트 베타 계수,
+  "sector_momentum": {"L1": {"4h": %, "24h": %, "7d": %}, ...},
+  "sector_rotation": "섹터 로테이션 설명",
+  "alt_beta": BTC 대비 알트 평균 베타,
+  "coin_betas": {"SOL": 1.5, "DOGE": 2.1, ...},
   "risk_level": "SAFE|CAUTION|DANGER",
   "confidence": 0.0~1.0,
   "reasoning": "분석 근거"
@@ -94,34 +98,43 @@ BTC 도미넌스, 섹터 로테이션, 알트코인 분산도를 분석합니다
 ```"""
 
     def collect_data(self) -> dict:
-        """알트코인 데이터 수집"""
-        data = {"coins": {}, "btc": []}
+        """알트코인 데이터 수집 (7일 1시간봉)"""
+        data = {"coins": {}, "btc": {}}
 
-        # BTC 기준 데이터
+        # BTC 기준 데이터 (7일)
         try:
-            ohlcv = self.exchange.fetch_ohlcv("BTC/USDT", "1h", limit=24)
+            ohlcv = self.exchange.fetch_ohlcv("BTC/USDT", "1h", limit=168)
             df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
-            data["btc"] = df["close"].values.tolist()
+            data["btc"] = {
+                "prices": df["close"].values.tolist(),
+                "volumes": df["volume"].values.tolist(),
+            }
         except Exception:
             pass
 
         # 알트코인 데이터
         for coin in ANALYSIS_COINS:
             try:
-                ohlcv = self.exchange.fetch_ohlcv(f"{coin}/USDT", "1h", limit=24)
+                ohlcv = self.exchange.fetch_ohlcv(f"{coin}/USDT", "1h", limit=168)
                 df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
+                prices = df["close"].values.tolist()
+                volumes = df["volume"].values.tolist()
+
+                # 멀티타임프레임 변동률
+                change_4h = (prices[-1] / prices[-4] - 1) * 100 if len(prices) >= 5 else 0
+                change_24h = (prices[-1] / prices[-24] - 1) * 100 if len(prices) >= 25 else 0
+                change_7d = (prices[-1] / prices[0] - 1) * 100 if len(prices) >= 2 else 0
+
                 data["coins"][coin] = {
-                    "prices": df["close"].values.tolist(),
-                    "volume": float(df["volume"].tail(4).mean()),
-                    "change_4h": round(
-                        (df["close"].iloc[-1] - df["close"].iloc[-4]) / df["close"].iloc[-4] * 100, 2
-                    ) if len(df) >= 5 else 0,
-                    "change_24h": round(
-                        (df["close"].iloc[-1] - df["close"].iloc[0]) / df["close"].iloc[0] * 100, 2
-                    ) if len(df) >= 2 else 0,
+                    "prices": prices,
+                    "volumes": volumes,
+                    "change_4h": round(change_4h, 2),
+                    "change_24h": round(change_24h, 2),
+                    "change_7d": round(change_7d, 2),
+                    "volume_24h": float(np.sum(volumes[-24:])) if len(volumes) >= 24 else 0,
                     "sector": SECTOR_MAP.get(coin, "Other"),
                 }
-                time.sleep(0.05)
+                _time.sleep(0.05)
             except Exception:
                 pass
 
@@ -130,14 +143,21 @@ BTC 도미넌스, 섹터 로테이션, 알트코인 분산도를 분석합니다
     def analyze(self, collected_data: dict, context: dict | None = None) -> AgentMessage:
         """알트코인 생태계 분석"""
         coins = collected_data.get("coins", {})
-        btc_prices = collected_data.get("btc", [])
+        btc_data = collected_data.get("btc", {})
+        btc_prices = btc_data.get("prices", []) if isinstance(btc_data, dict) else btc_data
 
-        result = self._compute_ecosystem_metrics(coins, btc_prices)
+        # 핵심 계산
+        dispersion = self._compute_dispersion(coins)
+        sector_mom = self._compute_sector_momentum(coins)
+        betas = self._compute_coin_betas(coins, btc_prices)
+        dominance = self._estimate_dominance_trend(coins, btc_prices)
+
+        result = {**dispersion, **sector_mom, **betas, **dominance}
 
         # LLM 보강 분석
         if coins:
             try:
-                sector_perf = result.get("sector_performance", {})
+                sp = result.get("sector_momentum", {})
                 top_movers = sorted(
                     [(c, d.get("change_4h", 0)) for c, d in coins.items()],
                     key=lambda x: abs(x[1]), reverse=True
@@ -147,29 +167,50 @@ BTC 도미넌스, 섹터 로테이션, 알트코인 분산도를 분석합니다
 
 ## 분산도
 - Dispersion Index: {result.get('dispersion_index', 'N/A'):.3f}
+  - 방향 분산: {result.get('dispersion_detail', {}).get('direction', 'N/A'):.3f}
+  - 크기 분산: {result.get('dispersion_detail', {}).get('magnitude', 'N/A'):.3f}
+- 시장 컨센서스: {result.get('market_consensus', 'N/A')}
 
-## 섹터별 4시간 수익률
-{chr(10).join(f'- {k}: {v:+.2f}%' for k, v in sector_perf.items())}
+## 섹터별 모멘텀
+{chr(10).join(f'- {s}: 4h {m.get("4h", 0):+.2f}% / 24h {m.get("24h", 0):+.2f}% / 7d {m.get("7d", 0):+.2f}%' for s, m in sp.items())}
 
 ## 상위 변동 코인 (4h)
 {chr(10).join(f'- {c} ({SECTOR_MAP.get(c, "?")}): {ch:+.2f}%' for c, ch in top_movers)}
 
-## BTC 대비 알트 베타
-- 평균 베타: {result.get('alt_beta', 'N/A'):.2f}
+## BTC 베타 (상위)
+{chr(10).join(f'- {c}: {b:.2f}x' for c, b in sorted(result.get('coin_betas', {}).items(), key=lambda x: abs(x[1]), reverse=True)[:5])}
+
+## BTC 도미넌스
+- 추세: {result.get('btc_dominance_trend', 'N/A')}
+- 알트 평균 베타: {result.get('alt_beta', 'N/A'):.2f}
+
+## 섹터 로테이션
+- 선두: {result.get('leading_sector', 'N/A')}
+- 후미: {result.get('lagging_sector', 'N/A')}
 
 20배 레버리지 환경에서 알트코인 포지션 관리에 대한 판단을 내려주세요."""
 
                 llm_result = self.llm_json(prompt, deep=True)
                 if not llm_result.get("parse_error"):
-                    result.update(llm_result)
+                    for key in ("risk_level", "confidence", "reasoning",
+                                "sector_rotation", "recommendation"):
+                        if key in llm_result:
+                            result[key] = llm_result[key]
             except Exception:
                 pass
 
         warnings = []
         if result.get("dispersion_index", 0) > 0.7:
-            warnings.append("⚠️ 알트 분산도 높음 — 시장 불안정")
+            warnings.append("⚠️ 알트 분산도 높음 — 시장 방향성 불명확")
         if result.get("alt_beta", 1.0) > 2.0:
             warnings.append(f"⚡ 알트 베타 {result['alt_beta']:.1f}x — 과민반응 구간")
+        if result.get("btc_dominance_trend") == "rising":
+            warnings.append("₿ BTC 도미넌스 상승 — 알트 약세 주의")
+
+        # 섹터 급락 경고
+        for sector, mom in result.get("sector_momentum", {}).items():
+            if mom.get("4h", 0) < -3:
+                warnings.append(f"📉 {sector} 섹터 4h {mom['4h']:+.1f}% 급락")
 
         return self._build_message(
             data=result,
@@ -178,73 +219,159 @@ BTC 도미넌스, 섹터 로테이션, 알트코인 분산도를 분석합니다
             warnings=warnings
         )
 
-    def _compute_ecosystem_metrics(self, coins: dict, btc_prices: list) -> dict:
-        """생태계 지표 계산"""
+    # ── Dispersion Index (고도화) ──
+
+    @staticmethod
+    def _compute_dispersion(coins: dict) -> dict:
+        """
+        고도화된 Dispersion Index.
+        기존: 방향만 (상승/하락 비율)
+        개선: 방향 분산 + 크기 분산 결합
+        """
         result = {
             "dispersion_index": 0.5,
+            "dispersion_detail": {"direction": 0.5, "magnitude": 0.5},
             "market_consensus": "unclear",
-            "btc_dominance_trend": "stable",
-            "leading_sector": "N/A",
-            "lagging_sector": "N/A",
-            "sector_performance": {},
-            "alt_beta": 1.0,
-            "risk_level": "CAUTION",
-            "confidence": 0.4,
-            "reasoning": "데이터 기반 생태계 분석",
         }
 
-        if not coins:
+        changes_4h = [d.get("change_4h", 0) for d in coins.values() if d.get("change_4h") is not None]
+        if not changes_4h:
             return result
 
-        # 1. 분산도 (Dispersion Index)
-        changes = [d.get("change_4h", 0) for d in coins.values() if d.get("change_4h") is not None]
-        if changes:
-            positive = sum(1 for c in changes if c > 0)
-            negative = sum(1 for c in changes if c < 0)
-            total = len(changes)
-            # 완전 동조(모두 같은 방향) = 0, 완전 분산(반반) = 1
-            dispersion = 1.0 - abs(positive - negative) / max(total, 1)
-            result["dispersion_index"] = round(dispersion, 3)
+        # 1. 방향 분산 (기존 개선): 상승/하락 비율
+        positive = sum(1 for c in changes_4h if c > 0.1)
+        negative = sum(1 for c in changes_4h if c < -0.1)
+        neutral = len(changes_4h) - positive - negative
+        total = len(changes_4h)
+        direction_disp = 1.0 - abs(positive - negative) / max(total, 1)
 
-            # 시장 컨센서스
-            if positive > total * 0.7:
-                result["market_consensus"] = "bullish"
-            elif negative > total * 0.7:
-                result["market_consensus"] = "bearish"
-            else:
-                result["market_consensus"] = "unclear"
+        # 2. 크기 분산: 변동률의 분산계수(CV)
+        abs_changes = [abs(c) for c in changes_4h]
+        mean_change = np.mean(abs_changes)
+        std_change = np.std(abs_changes)
+        cv = std_change / max(mean_change, 0.01)
+        magnitude_disp = min(cv / 2.0, 1.0)  # 0~1 정규화
 
-        # 2. 섹터별 퍼포먼스
-        sector_returns: dict[str, list[float]] = {}
+        # 3. 종합: 방향 60% + 크기 40% (방향이 더 중요)
+        combined = direction_disp * 0.6 + magnitude_disp * 0.4
+
+        result["dispersion_index"] = round(combined, 3)
+        result["dispersion_detail"] = {
+            "direction": round(direction_disp, 3),
+            "magnitude": round(magnitude_disp, 3),
+        }
+
+        # 시장 컨센서스
+        if positive > total * 0.7:
+            result["market_consensus"] = "bullish"
+        elif negative > total * 0.7:
+            result["market_consensus"] = "bearish"
+        else:
+            result["market_consensus"] = "unclear"
+
+        return result
+
+    # ── 섹터 모멘텀 (멀티타임프레임) ──
+
+    @staticmethod
+    def _compute_sector_momentum(coins: dict) -> dict:
+        """섹터별 4h / 24h / 7d 모멘텀"""
+        sector_data: dict[str, dict[str, list]] = {}
+
         for coin, info in coins.items():
             sector = info.get("sector", "Other")
-            change = info.get("change_4h", 0)
-            sector_returns.setdefault(sector, []).append(change)
+            if sector not in sector_data:
+                sector_data[sector] = {"4h": [], "24h": [], "7d": []}
+            sector_data[sector]["4h"].append(info.get("change_4h", 0))
+            sector_data[sector]["24h"].append(info.get("change_24h", 0))
+            sector_data[sector]["7d"].append(info.get("change_7d", 0))
 
-        sector_avg = {s: round(np.mean(returns), 2) for s, returns in sector_returns.items() if returns}
-        result["sector_performance"] = sector_avg
+        sector_momentum = {}
+        for sector, tf_data in sector_data.items():
+            sector_momentum[sector] = {
+                tf: round(float(np.mean(changes)), 2) if changes else 0
+                for tf, changes in tf_data.items()
+            }
 
-        if sector_avg:
-            result["leading_sector"] = max(sector_avg, key=sector_avg.get)
-            result["lagging_sector"] = min(sector_avg, key=sector_avg.get)
+        # 선두/후미 섹터 (24h 기준)
+        leading = max(sector_momentum, key=lambda s: sector_momentum[s].get("24h", 0),
+                      default="N/A") if sector_momentum else "N/A"
+        lagging = min(sector_momentum, key=lambda s: sector_momentum[s].get("24h", 0),
+                      default="N/A") if sector_momentum else "N/A"
 
-        # 3. 알트 베타 (BTC 대비 변동성)
-        if btc_prices and len(btc_prices) >= 5:
-            btc_ret = np.diff(btc_prices) / np.array(btc_prices[:-1])
-            btc_change = (btc_prices[-1] - btc_prices[-4]) / btc_prices[-4] * 100 if len(btc_prices) > 4 else 0
+        return {
+            "sector_momentum": sector_momentum,
+            "leading_sector": leading,
+            "lagging_sector": lagging,
+        }
 
-            if abs(btc_change) > 0.1:
-                alt_changes = [d.get("change_4h", 0) for d in coins.values()]
-                avg_alt_change = np.mean(alt_changes) if alt_changes else 0
-                result["alt_beta"] = round(avg_alt_change / btc_change, 2) if btc_change != 0 else 1.0
+    # ── 포지션별 BTC 베타 계산 ──
+
+    @staticmethod
+    def _compute_coin_betas(coins: dict, btc_prices: list) -> dict:
+        """
+        각 코인의 BTC 대비 베타 계수.
+        베타 = Cov(coin, btc) / Var(btc) (72h 기준)
+        """
+        result = {"alt_beta": 1.0, "coin_betas": {}}
+
+        if not btc_prices or len(btc_prices) < 72:
+            return result
+
+        btc_arr = np.array(btc_prices[-72:])
+        btc_ret = np.diff(btc_arr) / btc_arr[:-1]
+        btc_var = np.var(btc_ret)
+        if btc_var < 1e-10:
+            return result
+
+        betas = {}
+        for coin, info in coins.items():
+            prices = info.get("prices", [])
+            if len(prices) < 72:
+                continue
+            alt_arr = np.array(prices[-72:])
+            alt_ret = np.diff(alt_arr) / alt_arr[:-1]
+
+            min_len = min(len(btc_ret), len(alt_ret))
+            cov = np.cov(btc_ret[-min_len:], alt_ret[-min_len:])[0, 1]
+            beta = float(cov / btc_var)
+            betas[coin] = round(beta, 2)
+
+        result["coin_betas"] = betas
+        if betas:
+            result["alt_beta"] = round(float(np.mean(list(betas.values()))), 2)
 
         # 위험도
-        if result["dispersion_index"] > 0.7:
-            result["risk_level"] = "CAUTION"
-        elif result["market_consensus"] == "unclear":
-            result["risk_level"] = "CAUTION"
-        else:
-            result["risk_level"] = "SAFE"
-
+        result["risk_level"] = "CAUTION" if result["alt_beta"] > 1.5 else "SAFE"
         result["confidence"] = 0.5
+
         return result
+
+    # ── BTC 도미넌스 추정 ──
+
+    @staticmethod
+    def _estimate_dominance_trend(coins: dict, btc_prices: list) -> dict:
+        """
+        BTC 도미넌스 추정: BTC가 알트보다 강하면 도미넌스 상승.
+        """
+        if not btc_prices or len(btc_prices) < 24:
+            return {"btc_dominance_trend": "stable"}
+
+        btc_change_24h = (btc_prices[-1] / btc_prices[-24] - 1) * 100
+
+        alt_changes = [d.get("change_24h", 0) for d in coins.values()]
+        avg_alt_change = float(np.mean(alt_changes)) if alt_changes else 0
+
+        diff = btc_change_24h - avg_alt_change
+        if diff > 1.0:
+            trend = "rising"  # BTC가 알트보다 강함
+        elif diff < -1.0:
+            trend = "falling"  # 알트가 BTC보다 강함
+        else:
+            trend = "stable"
+
+        return {
+            "btc_dominance_trend": trend,
+            "reasoning": (f"데이터 기반: BTC 24h {btc_change_24h:+.2f}%, "
+                          f"알트 평균 {avg_alt_change:+.2f}%, 차이 {diff:+.2f}%"),
+        }
