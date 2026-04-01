@@ -910,6 +910,7 @@ class ConvergenceTrader:
                     cg_client=self.onchain,
                     btc_filter=self.btc_trend,
                     tg=self.tg,
+                    exchange=self.exchange,
                     shadow_mode=True,
                     analysis_interval_h=4,
                 )
@@ -2199,6 +2200,10 @@ class ConvergenceTrader:
             try:
                 now = time.time()
                 now_dt = datetime.now(KST)
+
+                # ── [V9.5] 실시간 급락 감지 (매 루프) ──
+                if self.agent_hook:
+                    self.agent_hook.crash_check()
 
                 # ── 포지션 모니터 (30초마다) ──
                 if self.positions:
