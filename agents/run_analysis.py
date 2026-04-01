@@ -28,6 +28,7 @@ from agents.analyzers.alt_ecosystem import AltEcosystemAgent
 from agents.analyzers.position_judge import PositionJudgeAgent
 from agents.output.telegram_formatter import TelegramFormatter
 from agents.memory.store import AnalysisMemory
+from agents.shadow_logger import ShadowLogger
 
 
 def build_orchestrator(mvp: bool = False, cg_client=None) -> Orchestrator:
@@ -38,8 +39,8 @@ def build_orchestrator(mvp: bool = False, cg_client=None) -> Orchestrator:
     orch.register_context_agent(BTCStructureAgent(cg_client=cg_client))
 
     if not mvp:
-        # Agent 2~4: Phase 2 스텁
-        orch.register_context_agent(MacroAgent())
+        # Agent 2~4: 전체 모드
+        orch.register_context_agent(MacroAgent(cg_client=cg_client))
         orch.register_context_agent(CorrelationAgent())
         orch.register_context_agent(AltEcosystemAgent())
 
@@ -84,6 +85,10 @@ def run_market_analysis(
     memory = AnalysisMemory()
     memory.store(consensus)
 
+    # Shadow Mode 로깅
+    shadow = ShadowLogger()
+    shadow.log_analysis(consensus, trigger="manual")
+
     # 텔레그램 전송
     tg_token = telegram_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
     tg_chat = telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -98,6 +103,7 @@ def run_market_analysis(
         "warnings": consensus.warnings,
         "verdicts": consensus.position_verdicts,
         "risk_trend": memory.get_risk_trend(),
+        "accuracy_report": shadow.generate_accuracy_report(),
     }
 
 
@@ -128,6 +134,15 @@ def main():
     print(f"  리스크: {result['overall_risk']}")
     print(f"  시장: {result['market_regime']}")
     print(f"  BTC: {result['btc_bias']}")
+
+    # 정확도 리포트
+    report = result.get("accuracy_report", {})
+    if report.get("evaluated", 0) > 0:
+        print(f"\n📊 Shadow Mode 정확도:")
+        print(f"  평가 건수: {report['evaluated']}")
+        print(f"  정확도: {report['accuracy_pct']}%")
+        print(f"  FP율(과도경고): {report['false_positive_rate']}%")
+        print(f"  FN율(미감지): {report['false_negative_rate']}%")
 
 
 if __name__ == "__main__":
