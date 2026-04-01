@@ -4,13 +4,18 @@ crash_detector.py — 실시간 시장 급락 감지 + 즉시 텔레그램 알�
 v9 메인 루프(15초)에 편승하여 경량 체크.
 전체 에이전트 분석과 달리 BTC 가격만 빠르게 조회 → 즉시 알림.
 
+20x 레버리지 기준 설계:
+  BTC -1% = ROE -20%, -2.5% = ROE -50%, -5% = 청산(ROE -100%)
+  → 청산 전에 충분히 대응할 수 있도록 기준을 공격적으로 설정
+
 감지 기준 (OR 조건):
-  Level 1 (경고):   BTC 15분 -2% 이상 하락
-  Level 2 (위험):   BTC 1시간 -5% 이상 하락
-  Level 3 (크래시): BTC 4시간 -10% 이상 하락
+  Level 1 (주의):   BTC 15분 -1.0% (= ROE -20%) — 급변 초기 포착
+  Level 2 (경고):   BTC 1시간 -2.5% (= ROE -50%) — SL/포지션 점검
+  Level 3 (위험):   BTC 1시간 -3.5% (= ROE -70%) — 즉시 대응 필요
+  Level 4 (크래시): BTC 4시간 -5.0% (= 청산 임박)  — 생존 모드
   추가: 거래량 급증 (최근 15분 거래량 > 평균의 3배)
 
-쿨다운: 동일 레벨 알림은 15분 간격으로 제한 (스팸 방지)
+쿨다운: Level 1~2는 15분, Level 3~4는 5분 (긴급도 반영)
 """
 
 from __future__ import annotations
@@ -21,21 +26,34 @@ from typing import Any
 
 KST = timezone(timedelta(hours=9))
 
-# ── 감지 기준 ──
+# ── 레버리지 설정 ──
+LEVERAGE = 20
+
+# ── 감지 기준 (20x 레버리지 기준) ──
+#
+# ROE 환산: BTC 변동% × 20 = ROE%
+#   -1.0% × 20 = ROE -20%  (자산 1/5 손실)
+#   -2.5% × 20 = ROE -50%  (자산 반토막)
+#   -3.5% × 20 = ROE -70%  (심각)
+#   -5.0% × 20 = ROE -100% (청산)
+#
 CRASH_LEVELS = {
-    1: {"window": "15m", "candles": 1,  "threshold": -2.0,
-        "emoji": "⚠️", "label": "급락 경고"},
-    2: {"window": "1h",  "candles": 4,  "threshold": -5.0,
-        "emoji": "🔴", "label": "시장 위험"},
-    3: {"window": "4h",  "candles": 16, "threshold": -10.0,
-        "emoji": "🚨", "label": "크래시 감지"},
+    1: {"window": "15m", "candles": 1,  "threshold": -1.0,
+        "roe_impact": -20, "cooldown": 900,
+        "emoji": "⚠️", "label": "급변 주의"},
+    2: {"window": "1h",  "candles": 4,  "threshold": -2.5,
+        "roe_impact": -50, "cooldown": 900,
+        "emoji": "🔴", "label": "급락 경고"},
+    3: {"window": "1h",  "candles": 4,  "threshold": -3.5,
+        "roe_impact": -70, "cooldown": 300,
+        "emoji": "🚨", "label": "즉시 대응"},
+    4: {"window": "4h",  "candles": 16, "threshold": -5.0,
+        "roe_impact": -100, "cooldown": 300,
+        "emoji": "💀", "label": "크래시 — 청산 임박"},
 }
 
 # 거래량 급증 배수 기준
 VOLUME_SPIKE_MULTIPLIER = 3.0
-
-# 쿨다운 (초)
-COOLDOWN_SEC = 900  # 15분
 
 
 class CrashDetector:
@@ -76,7 +94,7 @@ class CrashDetector:
         반환:
         - None: 정상 (급락 없음)
         - dict: 급락 감지됨 → 텔레그램 발송 완료 후 결과 반환
-          {level, change_pct, window, volume_spike, message}
+          {level, change_pct, window, volume_spike, roe_impact, message}
         """
         self._total_checks += 1
         data = self._get_cached_data()
@@ -105,9 +123,10 @@ class CrashDetector:
             if change_pct > cfg["threshold"]:
                 continue  # 이 레벨은 정상
 
-            # 쿨다운 확인
+            # 레벨별 쿨다운 확인 (Level 3~4는 5분, Level 1~2는 15분)
+            cooldown = cfg.get("cooldown", 900)
             last = self._last_alert.get(level, 0)
-            if now - last < COOLDOWN_SEC:
+            if now - last < cooldown:
                 continue
 
             # 거래량 스파이크 체크
@@ -173,11 +192,12 @@ class CrashDetector:
     def _build_alert(self, level: int, change_pct: float, current: float,
                       ref_price: float, cfg: dict, vol_spike: dict,
                       volumes: list) -> dict:
-        """알림 메시지 구성"""
+        """알림 메시지 구성 (20x 레버리지 ROE 영향 포함)"""
         ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S KST")
         emoji = cfg["emoji"]
         label = cfg["label"]
         window = cfg["window"]
+        roe_impact = round(change_pct * LEVERAGE, 1)
 
         # 메시지 본문
         lines = [
@@ -188,7 +208,17 @@ class CrashDetector:
             f"📉 {window} 변동: {change_pct:+.2f}%",
             f"💰 현재가: ${current:,.0f}",
             f"📍 기준가: ${ref_price:,.0f} ({window} 전)",
+            f"",
+            f"⚡ 20x 레버리지 ROE 영향: {roe_impact:+.1f}%",
         ]
+
+        # 청산까지 남은 여유 (롱 기준)
+        # 20x → 최대 역행 5%, 현재 이미 change_pct만큼 역행
+        remaining_to_liq = 5.0 + change_pct  # change_pct는 음수
+        if remaining_to_liq > 0:
+            lines.append(f"🎯 롱 청산까지 잔여: {remaining_to_liq:.2f}% (${current * remaining_to_liq / 100:,.0f})")
+        else:
+            lines.append(f"💀 롱 진입가 기준 청산 구간 진입")
 
         # 거래량 정보
         if vol_spike["spike"]:
@@ -196,27 +226,38 @@ class CrashDetector:
         else:
             lines.append(f"📊 거래량: 평균 대비 {vol_spike['ratio']:.1f}배")
 
-        # 레벨별 추가 정보
-        if level >= 3:
+        # 레벨별 대응 가이드
+        if level >= 4:
             lines.extend([
                 f"",
-                f"🚨🚨🚨 크래시 수준 급락 🚨🚨🚨",
-                f"모든 포지션 즉시 점검 필요",
-                f"레버리지 20x 기준 청산 위험 극대",
+                f"💀💀💀 크래시 — 청산 임박 💀💀💀",
+                f"모든 롱 포지션 즉시 점검",
+                f"SL 미설정 포지션은 수동 청산 검토",
+                f"신규 진입 절대 금지",
+            ])
+        elif level >= 3:
+            lines.extend([
+                f"",
+                f"🚨 즉시 대응 필요 (ROE {roe_impact:+.0f}%)",
+                f"롱 포지션 SL → 본전 이동 또는 부분 청산",
+                f"숏 포지션은 TP 점검 (반등 대비)",
+                f"신규 진입 자제",
             ])
         elif level >= 2:
             lines.extend([
                 f"",
-                f"🔴 시장 위험 수준 — 포지션 점검 권고",
-                f"롱 포지션 SL 점검, 신규 진입 자제",
+                f"🔴 포지션 점검 필요 (ROE {roe_impact:+.0f}%)",
+                f"롱 SL 점검, 포지션 사이즈 축소 검토",
+                f"추가 하락 시 Level 3 (ROE -70%) 진입 가능",
             ])
         else:
             lines.extend([
                 f"",
-                f"⚠️ 단기 급락 — 추이 관찰 필요",
+                f"⚠️ 단기 급변 감지 (ROE {roe_impact:+.0f}%)",
+                f"추이 관찰, 연속 하락 시 Level 2 경고",
             ])
 
-        # 추가 컨텍스트: 여러 타임프레임 변동률
+        # 멀티타임프레임 변동률 + ROE
         prices = self._cache_data.get("prices", [])
         if len(prices) >= 5:
             extras = []
@@ -224,7 +265,9 @@ class CrashDetector:
                 n = lv_cfg["candles"]
                 if len(prices) > n:
                     ch = (prices[-1] - prices[-(n+1)]) / prices[-(n+1)] * 100
-                    extras.append(f"  {lv_cfg['window']}: {ch:+.2f}%")
+                    roe = ch * LEVERAGE
+                    marker = " ⬅️" if lv == level else ""
+                    extras.append(f"  {lv_cfg['window']}: {ch:+.2f}% (ROE {roe:+.0f}%){marker}")
             if extras:
                 lines.append(f"")
                 lines.append(f"📈 멀티타임프레임:")
@@ -237,6 +280,7 @@ class CrashDetector:
         return {
             "level": level,
             "change_pct": round(change_pct, 2),
+            "roe_impact": roe_impact,
             "window": window,
             "current_price": current,
             "ref_price": ref_price,
