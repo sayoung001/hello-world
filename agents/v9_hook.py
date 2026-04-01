@@ -135,6 +135,23 @@ class AgentHook:
                 print(f"  ⚠️ 포지션 변환 실패 {getattr(pos, 'symbol', '?')}: {e}")
         return result
 
+    def _send_error(self, context: str, error: Exception):
+        """에이전트 오류를 텔레그램으로 전송 (watchdog 연동)"""
+        import traceback
+        err_msg = (
+            f"⚠️ [Agent 오류] {context}\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"에러: {type(error).__name__}: {str(error)[:200]}\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"봇 운영에는 영향 없음 (Shadow Mode)"
+        )
+        print(f"  {err_msg}")
+        if self.tg:
+            try:
+                self.tg.send(err_msg)
+            except Exception:
+                pass
+
     def on_position_open(self, new_position, all_positions: list):
         """
         포지션 오픈 시 트리거 — 비동기로 분석 실행
@@ -154,7 +171,7 @@ class AgentHook:
                 self._position_analysis_ts[sym] = consensus.timestamp
                 self._send_result(consensus, trigger="진입")
             except Exception as e:
-                print(f"  ⚠️ 에이전트 분석 실패: {e}")
+                self._send_error("진입 분석", e)
 
         thread = threading.Thread(target=_analyze, daemon=True)
         thread.start()
@@ -189,7 +206,7 @@ class AgentHook:
                         self._position_analysis_ts[sym] = consensus.timestamp
                 self._send_result(consensus, trigger="정기분석")
             except Exception as e:
-                print(f"  ⚠️ 정기 에이전트 분석 실패: {e}")
+                self._send_error("정기분석 (4h)", e)
 
         thread = threading.Thread(target=_analyze, daemon=True)
         thread.start()
