@@ -1,7 +1,12 @@
 """
 orchestrator.py — 토론 오케스트레이터
 ======================================
-Market Context Layer (Agent 1~4) → Moderator → Position Layer (Agent 5) 흐름 관리.
+Market Context Layer (Agent 1~6) → Bull/Bear 토론 → Moderator → Position Layer 흐름 관리.
+
+차용 아이디어:
+- TradingAgents: 구조화 리포트 + 선택적 토론
+- AI Hedge Fund: 갈등하는 철학의 에이전트 토론 (Bull vs Bear)
+- FS-ReasoningAgent: Factual vs Subjective 분리 + 시장별 동적 가중치
 """
 
 from __future__ import annotations
@@ -18,33 +23,17 @@ from agents.core.protocol import (
 
 KST = timezone(timedelta(hours=9))
 
-# 토론 시스템 프롬프트 (설계문서 Section 4)
-DISCUSSION_SYSTEM_PROMPT = """당신들은 20배 레버리지 선물 트레이딩에 대해 토론하는 전문가 패널입니다.
-
-핵심 제약:
-- 20배 레버리지 = 약 4% 역행 시 청산
-- 따라서 모든 판단은 "높은 확률"보다 "생존"이 우선
-- 의견이 갈리면 보수적 판단을 우선
-
-토론 규칙:
-1. 각 에이전트는 자신의 분석을 먼저 제시
-2. 다른 에이전트의 분석과 충돌하는 부분을 지적
-3. 특히 "내 분석에서는 괜찮아 보이지만, Agent X의 우려가 맞다면 위험"을 명시
-4. 최종적으로 각자의 신뢰도(0-1)와 함께 포지션별 권고안 제시
-
-20배 기준 리스크 분류:
-- SAFE: 청산가까지 충분한 여유, 시장 환경 우호적
-- CAUTION: 하나 이상의 불확실성 존재, 포지션 축소 권고
-- DANGER: 복수의 위험 신호, 즉시 청산 또는 대폭 축소 권고"""
+# ── 시스템 프롬프트 ──
 
 MODERATOR_PROMPT = """당신은 크립토 선물 트레이딩 전문가 패널의 모더레이터입니다.
-각 에이전트의 분석 결과를 종합하여 최종 컨센서스를 도출합니다.
+각 에이전트의 분석 + Bull/Bear 토론 결과를 종합하여 최종 컨센서스를 도출합니다.
 
 규칙:
-1. Factual 에이전트 (BTC 구조, 상관관계)의 데이터를 기준으로 판단
-2. Subjective 에이전트 (알트 생태계, 매크로)의 의견은 보조 참고
-3. 의견 충돌 시 보수적 판단 우선 (20x 레버리지 생존 원칙)
-4. 반드시 JSON 형식으로 출력
+1. Factual 에이전트 (BTC 구조, 상관관계)는 기초 사실 → 높은 가중치
+2. Subjective 에이전트 (매크로, 알트, 뉴스)는 해석 → 보조 참고
+3. Bull/Bear 토론에서 Bear의 우려가 구체적이면 보수적으로 판단
+4. 의견 충돌 시 20x 레버리지 생존 원칙 적용 (보수적 우선)
+5. 반드시 JSON 형식으로 출력
 
 출력 형식:
 ```json
@@ -54,9 +43,28 @@ MODERATOR_PROMPT = """당신은 크립토 선물 트레이딩 전문가 패널�
   "btc_bias": "bullish|neutral|bearish",
   "confidence": 0.0~1.0,
   "key_warnings": ["경고1", "경고2"],
+  "bull_bear_verdict": "bull_win|bear_win|draw",
   "reasoning": "종합 판단 근거"
 }
 ```"""
+
+BULL_PROMPT = """당신은 강세론자(Bull)입니다. 에이전트 분석 결과를 보고 시장이 왜 괜찮은지,
+현재 포지션을 유지/확대해야 하는 이유를 200자 이내로 강하게 주장하세요.
+단, 근거 없는 낙관은 금지. 데이터에서 긍정 시그널을 찾아 인용하세요."""
+
+BEAR_PROMPT = """당신은 약세론자(Bear)입니다. 에이전트 분석 결과를 보고 왜 위험한지,
+포지션을 축소/청산해야 하는 이유를 200자 이내로 강하게 주장하세요.
+특히 20x 레버리지 환경에서 간과된 리스크를 찾아내세요. 생존이 최우선입니다."""
+
+# ── 동적 가중치: 시장 상황별 Factual/Subjective 가중치 조정 ──
+#    하락장 → Factual 에이전트(BTC 구조, 상관관계) 가중치 ↑
+#    상승장 → 균등
+REGIME_WEIGHTS = {
+    # (factual_weight, subjective_weight) — 합이 1.0
+    "risk-off":  (0.65, 0.35),   # 하락장: Factual 신뢰 ↑
+    "neutral":   (0.55, 0.45),   # 중립: 약간 Factual 우세
+    "risk-on":   (0.50, 0.50),   # 상승장: 균등
+}
 
 
 class Orchestrator:
@@ -64,30 +72,27 @@ class Orchestrator:
     멀티 에이전트 토론 오케스트레이터
 
     실행 흐름:
-    1. Market Context Layer: Agent 1~4 병렬 실행 → 각자 분석
-    2. Moderator: 분석 결과 종합 → MarketConsensus 도출
-    3. Position Layer: Agent 5가 포지션별 판결
-    4. 텔레그램 출력
+    1. Market Context Layer: Agent 1~6 순차 실행 → 각자 분석
+    2. Bull/Bear 토론: LLM이 강세/약세 시각에서 분석 결과를 토론
+    3. Moderator: 토론 결과 + 동적 가중치 → 컨센서스 도출
+    4. Position Layer: Agent 5가 포지션별 판결
     """
 
     def __init__(self):
-        self.context_agents: list[AgentBase] = []   # Agent 1~4
-        self.position_agent: AgentBase | None = None  # Agent 5
+        self.context_agents: list[AgentBase] = []
+        self.position_agent: AgentBase | None = None
         self._last_consensus: MarketConsensus | None = None
 
     def register_context_agent(self, agent: AgentBase):
-        """Market Context Layer에 에이전트 등록"""
         self.context_agents.append(agent)
 
     def register_position_agent(self, agent: AgentBase):
-        """Position Layer에 에이전트 등록"""
         self.position_agent = agent
 
+    # ── Phase 1: Context Layer ──
+
     def run_context_layer(self) -> list[AgentMessage]:
-        """
-        Market Context Layer 실행
-        각 에이전트가 독립적으로 데이터 수집 + 분석 수행
-        """
+        """각 에이전트가 독립적으로 데이터 수집 + 분석"""
         messages: list[AgentMessage] = []
         for agent in self.context_agents:
             try:
@@ -105,37 +110,159 @@ class Orchestrator:
                 ))
         return messages
 
+    # ── Phase 2a: Bull/Bear 토론 ──
+
+    def _run_bull_bear_debate(self, agent_messages: list[AgentMessage]) -> dict:
+        """
+        Bull vs Bear 토론 (AI Hedge Fund 아이디어).
+        각 에이전트 분석을 보고 강세/약세 시각에서 토론.
+        """
+        # 분석 요약 생성
+        summary = self._build_analysis_summary(agent_messages)
+
+        try:
+            import anthropic
+            client = anthropic.Anthropic()
+
+            # Bull 주장
+            bull_resp = client.messages.create(
+                model=DEEP_MODEL, max_tokens=500,
+                system=BULL_PROMPT,
+                messages=[{"role": "user", "content": f"에이전트 분석:\n{summary}"}]
+            )
+            bull_argument = bull_resp.content[0].text.strip()
+
+            # Bear 주장
+            bear_resp = client.messages.create(
+                model=DEEP_MODEL, max_tokens=500,
+                system=BEAR_PROMPT,
+                messages=[{"role": "user", "content": f"에이전트 분석:\n{summary}"}]
+            )
+            bear_argument = bear_resp.content[0].text.strip()
+
+            print(f"  🐂 Bull: {bull_argument[:80]}...")
+            print(f"  🐻 Bear: {bear_argument[:80]}...")
+
+            return {
+                "bull": bull_argument,
+                "bear": bear_argument,
+                "debate_completed": True,
+            }
+        except Exception as e:
+            print(f"  ⚠️ Bull/Bear 토론 실패 (폴백): {e}")
+            return self._rule_based_debate(agent_messages)
+
+    def _rule_based_debate(self, messages: list[AgentMessage]) -> dict:
+        """규칙 기반 Bull/Bear 폴백"""
+        bull_points = []
+        bear_points = []
+
+        for msg in messages:
+            risk = msg.data.get("risk_level", msg.data.get("overall_risk", ""))
+            if risk == "SAFE":
+                bull_points.append(f"{msg.agent_name}: 안전 판단")
+            elif risk == "DANGER":
+                bear_points.append(f"{msg.agent_name}: 위험 감지")
+            if msg.data.get("trend") == "bullish" or msg.data.get("btc_bias") == "bullish":
+                bull_points.append(f"{msg.agent_name}: 상승 트렌드")
+            if msg.data.get("trend") == "bearish" or msg.data.get("btc_bias") == "bearish":
+                bear_points.append(f"{msg.agent_name}: 하락 트렌드")
+            for w in msg.warnings:
+                bear_points.append(f"경고: {w[:50]}")
+
+        # 감성/뉴스 기반
+        for msg in messages:
+            sentiment = msg.data.get("overall_sentiment", "")
+            if sentiment in ("panic", "very_bearish"):
+                bear_points.append(f"{msg.agent_name}: 시장 공포")
+            elif sentiment in ("bullish", "very_bullish"):
+                bull_points.append(f"{msg.agent_name}: 시장 낙관")
+            geo_risk = msg.data.get("geopolitical_risk", "")
+            if geo_risk in ("high", "critical"):
+                bear_points.append(f"{msg.agent_name}: 지정학 리스크 {geo_risk}")
+
+        return {
+            "bull": " | ".join(bull_points[:5]) if bull_points else "긍정 시그널 부족",
+            "bear": " | ".join(bear_points[:5]) if bear_points else "뚜렷한 위험 없음",
+            "debate_completed": False,
+        }
+
+    # ── Phase 2b: 동적 가중치 적용 ──
+
+    def _apply_dynamic_weights(self, messages: list[AgentMessage],
+                                 regime: str = "neutral") -> list[AgentMessage]:
+        """
+        시장 상황별 Factual/Subjective 에이전트 가중치 조정.
+        하락장(risk-off) → Factual 에이전트 confidence 상향
+        """
+        factual_w, subjective_w = REGIME_WEIGHTS.get(regime, (0.55, 0.45))
+
+        weighted = []
+        for msg in messages:
+            analysis_type = getattr(
+                next((a for a in self.context_agents if a.agent_id == msg.agent_id), None),
+                '_analysis_type', 'subjective'
+            )
+
+            weight = factual_w if analysis_type == "factual" else subjective_w
+            # 가중치를 confidence에 반영 (기존 confidence × weight × 2로 정규화)
+            adjusted_conf = min(msg.confidence * weight * 2, 1.0)
+
+            weighted.append(AgentMessage(
+                agent_id=msg.agent_id,
+                agent_name=msg.agent_name,
+                confidence=adjusted_conf,
+                data=msg.data,
+                reasoning=msg.reasoning,
+                warnings=msg.warnings,
+            ))
+
+        return weighted
+
+    # ── Phase 2c: Moderator (종합) ──
+
     def moderate(self, agent_messages: list[AgentMessage]) -> MarketConsensus:
         """
-        Moderator: 에이전트 분석 종합 → 컨센서스 도출
-
-        LLM을 사용하여 충돌하는 의견을 중재하고 최종 판단 생성.
-        LLM 호출 실패 시 규칙 기반 폴백 사용.
+        전체 모더레이션 파이프라인:
+        1. 초기 regime 추정 (규칙 기반)
+        2. 동적 가중치 적용
+        3. Bull/Bear 토론
+        4. LLM 또는 규칙 기반 최종 컨센서스
         """
-        # 에이전트 분석 요약 생성
-        summaries = []
         all_warnings = []
         for msg in agent_messages:
-            summaries.append(
-                f"[{msg.agent_name}] (confidence: {msg.confidence:.2f})\n"
-                f"  분석: {json.dumps(msg.data, ensure_ascii=False, indent=2)}\n"
-                f"  추론: {msg.reasoning}"
-            )
             all_warnings.extend(msg.warnings)
 
-        analysis_text = "\n\n".join(summaries)
+        # 1. 초기 regime 추정
+        estimated_regime = self._estimate_regime(agent_messages)
+        print(f"  📊 추정 regime: {estimated_regime}")
 
-        # LLM 모더레이션 시도
+        # 2. 동적 가중치 적용
+        weighted_messages = self._apply_dynamic_weights(agent_messages, estimated_regime)
+
+        # 3. Bull/Bear 토론
+        print("\n🐂🐻 [Phase 2a] Bull/Bear 토론")
+        debate = self._run_bull_bear_debate(agent_messages)
+
+        # 4. LLM 모더레이션
         try:
-            import anthropic  # noqa: F811
+            import anthropic
             client = anthropic.Anthropic()
+
+            summary = self._build_analysis_summary(weighted_messages)
+            debate_text = (f"\n\n## Bull/Bear 토론\n"
+                           f"🐂 Bull: {debate['bull']}\n"
+                           f"🐻 Bear: {debate['bear']}")
+
             response = client.messages.create(
                 model=DEEP_MODEL,
                 max_tokens=1500,
                 system=MODERATOR_PROMPT,
                 messages=[{"role": "user", "content": (
-                    f"다음 에이전트들의 분석 결과를 종합하여 최종 컨센서스를 도출하세요.\n\n"
-                    f"{analysis_text}"
+                    f"에이전트 분석 (가중치 적용됨):\n{summary}"
+                    f"{debate_text}\n\n"
+                    f"위 분석과 토론을 종합하여 최종 컨센서스를 도출하세요.\n"
+                    f"현재 추정 regime: {estimated_regime}"
                 )}]
             )
             raw = response.content[0].text
@@ -143,7 +270,7 @@ class Orchestrator:
                 raw = raw.split("```json")[1].split("```")[0]
             result = json.loads(raw.strip())
 
-            return MarketConsensus(
+            consensus = MarketConsensus(
                 overall_risk=RiskLevel(result.get("overall_risk", "CAUTION")),
                 market_regime=MarketRegime(result.get("market_regime", "neutral")),
                 btc_bias=result.get("btc_bias", "neutral"),
@@ -151,54 +278,103 @@ class Orchestrator:
                 warnings=result.get("key_warnings", []) + all_warnings,
                 agent_messages=agent_messages,
             )
+            # 토론 결과를 consensus에 첨부
+            consensus.debate = debate
+            consensus.bull_bear_verdict = result.get("bull_bear_verdict", "draw")
+            return consensus
+
         except Exception as e:
             print(f"  ⚠️ LLM 모더레이션 실패, 규칙 기반 폴백: {e}")
-            return self._rule_based_moderate(agent_messages, all_warnings)
+            return self._rule_based_moderate(weighted_messages, all_warnings, debate)
+
+    def _estimate_regime(self, messages: list[AgentMessage]) -> str:
+        """에이전트 분석에서 regime 초기 추정"""
+        danger_count = 0
+        safe_count = 0
+        bearish_signals = 0
+
+        for msg in messages:
+            risk = msg.data.get("risk_level", msg.data.get("overall_risk", ""))
+            if risk == "DANGER":
+                danger_count += 1
+            elif risk == "SAFE":
+                safe_count += 1
+
+            # 감성/뉴스 시그널
+            sentiment = msg.data.get("overall_sentiment", "")
+            if sentiment in ("panic", "very_bearish"):
+                bearish_signals += 2
+            elif sentiment == "bearish":
+                bearish_signals += 1
+
+            # 지정학 리스크
+            geo = msg.data.get("geopolitical_risk", "")
+            if geo in ("high", "critical"):
+                bearish_signals += 2
+
+            # 매크로
+            appetite = msg.data.get("risk_appetite", "")
+            if appetite == "risk-off":
+                bearish_signals += 1
+
+        if danger_count >= 2 or bearish_signals >= 3:
+            return "risk-off"
+        elif safe_count >= len(messages) * 0.6:
+            return "risk-on"
+        return "neutral"
 
     def _rule_based_moderate(self, messages: list[AgentMessage],
-                              warnings: list[str]) -> MarketConsensus:
-        """규칙 기반 폴백 모더레이션 (LLM 실패 시)"""
-        avg_conf = sum(m.confidence for m in messages) / max(len(messages), 1)
+                              warnings: list[str],
+                              debate: dict = None) -> MarketConsensus:
+        """규칙 기반 폴백 (동적 가중치 반영된 messages 사용)"""
+        # 가중치 적용된 confidence로 weighted vote
+        total_weight = sum(m.confidence for m in messages) or 1
+        danger_weight = sum(m.confidence for m in messages
+                            if m.data.get("risk_level") == "DANGER"
+                            or m.data.get("overall_risk") == "DANGER")
+        caution_weight = sum(m.confidence for m in messages
+                              if m.data.get("risk_level") == "CAUTION"
+                              or m.data.get("overall_risk") == "CAUTION")
 
-        # DANGER가 하나라도 있으면 전체 CAUTION 이상
-        has_danger = any(
-            m.data.get("risk_level") == "DANGER" or
-            m.data.get("overall_risk") == "DANGER"
-            for m in messages
-        )
-        has_caution = any(
-            m.data.get("risk_level") == "CAUTION" or
-            m.data.get("overall_risk") == "CAUTION"
-            for m in messages
-        )
+        danger_pct = danger_weight / total_weight
+        caution_pct = caution_weight / total_weight
 
-        if has_danger:
+        if danger_pct >= 0.3:  # 30% 이상이 DANGER
             risk = RiskLevel.DANGER
-        elif has_caution:
+        elif danger_pct + caution_pct >= 0.4:  # 40% 이상이 CAUTION+
             risk = RiskLevel.CAUTION
         else:
             risk = RiskLevel.SAFE
 
-        return MarketConsensus(
+        # BTC bias 추출
+        btc_bias = "neutral"
+        for msg in messages:
+            if "BTC" in msg.agent_name or "btc" in msg.agent_id:
+                btc_bias = msg.data.get("trend", msg.data.get("btc_bias", "neutral"))
+                break
+
+        avg_conf = sum(m.confidence for m in messages) / max(len(messages), 1)
+
+        consensus = MarketConsensus(
             overall_risk=risk,
             market_regime=MarketRegime.NEUTRAL,
-            btc_bias="neutral",
+            btc_bias=btc_bias,
             confidence=avg_conf,
             warnings=warnings,
             agent_messages=messages,
         )
+        if debate:
+            consensus.debate = debate
+        return consensus
+
+    # ── Phase 3: Position Layer ──
 
     def run_position_layer(self, consensus: MarketConsensus,
                            positions: list[PositionInfo]) -> list[PositionVerdict]:
-        """
-        Position Layer 실행
-        Agent 5가 각 포지션에 대해 종합 판결 수행
-        """
         if not self.position_agent:
             print("  ⚠️ 포지션 에이전트 미등록")
             return []
 
-        # 포지션 정보 + 컨센서스를 컨텍스트로 전달
         context = {
             "consensus": {
                 "overall_risk": consensus.overall_risk.value,
@@ -206,6 +382,7 @@ class Orchestrator:
                 "btc_bias": consensus.btc_bias,
                 "confidence": consensus.confidence,
                 "warnings": consensus.warnings,
+                "debate": getattr(consensus, 'debate', {}),
             },
             "positions": [
                 {
@@ -235,12 +412,12 @@ class Orchestrator:
         consensus.position_verdicts = msg.data.get("verdicts", [])
         return consensus.position_verdicts
 
+    # ── 전체 파이프라인 ──
+
     def run(self, positions: list[PositionInfo] | None = None) -> MarketConsensus:
         """
-        전체 파이프라인 실행
-
-        1. Context Layer (Agent 1~4) → 병렬 분석
-        2. Moderator → 컨센서스 도출
+        1. Context Layer (Agent 1~6) → 각자 분석
+        2. Bull/Bear 토론 + 동적 가중치 → 컨센서스
         3. Position Layer (Agent 5) → 포지션별 판결
         """
         print(f"\n{'='*60}")
@@ -252,12 +429,15 @@ class Orchestrator:
         print("\n📊 [Phase 1] Market Context Layer")
         agent_messages = self.run_context_layer()
 
-        # 2. Moderation
-        print("\n🤝 [Phase 2] 컨센서스 도출")
+        # 2. Moderation (Bull/Bear + 동적 가중치 포함)
+        print("\n🤝 [Phase 2] 컨센서스 도출 (Bull/Bear 토론 + 동적 가중치)")
         consensus = self.moderate(agent_messages)
+        debate = getattr(consensus, 'debate', {})
+        verdict = getattr(consensus, 'bull_bear_verdict', 'N/A')
         print(f"  → 종합 리스크: {consensus.overall_risk.value}")
         print(f"  → 시장 상태: {consensus.market_regime.value}")
         print(f"  → BTC 편향: {consensus.btc_bias}")
+        print(f"  → Bull/Bear: {verdict}")
 
         # 3. Position Layer
         if positions:
@@ -270,3 +450,17 @@ class Orchestrator:
 
         self._last_consensus = consensus
         return consensus
+
+    # ── 헬퍼 ──
+
+    @staticmethod
+    def _build_analysis_summary(messages: list[AgentMessage]) -> str:
+        """에이전트 분석 요약 텍스트"""
+        parts = []
+        for msg in messages:
+            parts.append(
+                f"[{msg.agent_name}] (confidence: {msg.confidence:.2f})\n"
+                f"  분석: {json.dumps(msg.data, ensure_ascii=False)[:400]}\n"
+                f"  추론: {msg.reasoning}"
+            )
+        return "\n\n".join(parts)

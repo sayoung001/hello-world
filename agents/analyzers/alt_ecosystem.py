@@ -54,6 +54,7 @@ class AltEcosystemAgent(AgentBase):
     - 섹터별 Rolling 모멘텀 (4h / 24h / 7d)
     - 포지션별 BTC 베타 계산 (개별 코인 리스크)
     - 섹터 로테이션 감지
+    - Altcoin Season Index (BTC 대비 알트 outperformance 비율)
     """
 
     def __init__(self, exchange=None):
@@ -91,6 +92,9 @@ BTC 도미넌스, 섹터 로테이션, 알트코인 분산도를 분석합니다
   "sector_rotation": "섹터 로테이션 설명",
   "alt_beta": BTC 대비 알트 평균 베타,
   "coin_betas": {"SOL": 1.5, "DOGE": 2.1, ...},
+  "alt_season_7d": 0~100 (7일 기준 BTC 대비 outperform %),
+  "alt_season_24h": 0~100 (24h 기준),
+  "alt_season_label": "btc_season|neutral|alt_leaning|alt_season",
   "risk_level": "SAFE|CAUTION|DANGER",
   "confidence": 0.0~1.0,
   "reasoning": "분석 근거"
@@ -151,8 +155,9 @@ BTC 도미넌스, 섹터 로테이션, 알트코인 분산도를 분석합니다
         sector_mom = self._compute_sector_momentum(coins)
         betas = self._compute_coin_betas(coins, btc_prices)
         dominance = self._estimate_dominance_trend(coins, btc_prices)
+        alt_season = self._compute_altcoin_season_index(coins, btc_prices)
 
-        result = {**dispersion, **sector_mom, **betas, **dominance}
+        result = {**dispersion, **sector_mom, **betas, **dominance, **alt_season}
 
         # LLM 보강 분석
         if coins:
@@ -184,6 +189,11 @@ BTC 도미넌스, 섹터 로테이션, 알트코인 분산도를 분석합니다
 - 추세: {result.get('btc_dominance_trend', 'N/A')}
 - 알트 평균 베타: {result.get('alt_beta', 'N/A'):.2f}
 
+## Altcoin Season Index
+- 7일: {result.get('alt_season_7d', 0):.0f}% (BTC 대비 outperform 비율)
+- 24시간: {result.get('alt_season_24h', 0):.0f}%
+- 판정: {result.get('alt_season_label', 'N/A')}
+
 ## 섹터 로테이션
 - 선두: {result.get('leading_sector', 'N/A')}
 - 후미: {result.get('lagging_sector', 'N/A')}
@@ -206,6 +216,13 @@ BTC 도미넌스, 섹터 로테이션, 알트코인 분산도를 분석합니다
             warnings.append(f"⚡ 알트 베타 {result['alt_beta']:.1f}x — 과민반응 구간")
         if result.get("btc_dominance_trend") == "rising":
             warnings.append("₿ BTC 도미넌스 상승 — 알트 약세 주의")
+
+        # Altcoin Season 경고
+        alt_season_label = result.get("alt_season_label", "")
+        if alt_season_label == "btc_season":
+            warnings.append("₿ BTC 시즌 — 알트 롱 진입 주의")
+        elif alt_season_label == "alt_season":
+            warnings.append("🚀 알트 시즌 — 알트 모멘텀 강세")
 
         # 섹터 급락 경고
         for sector, mom in result.get("sector_momentum", {}).items():
@@ -344,6 +361,73 @@ BTC 도미넌스, 섹터 로테이션, 알트코인 분산도를 분석합니다
         # 위험도
         result["risk_level"] = "CAUTION" if result["alt_beta"] > 1.5 else "SAFE"
         result["confidence"] = 0.5
+
+        return result
+
+    # ── Altcoin Season Index ──
+
+    @staticmethod
+    def _compute_altcoin_season_index(coins: dict, btc_prices: list) -> dict:
+        """
+        Altcoin Season Index: BTC 대비 outperform 하는 알트 비율.
+
+        기준:
+        - 75% 이상 → alt_season (알트 시즌)
+        - 50~75% → alt_leaning (알트 우세)
+        - 25~50% → neutral (중립)
+        - 25% 미만 → btc_season (BTC 시즌)
+
+        CMC Altcoin Season Index와 동일한 컨셉이나,
+        실시간 Binance 데이터로 24h/7d 두 구간 측정.
+        """
+        result = {
+            "alt_season_7d": 50.0,
+            "alt_season_24h": 50.0,
+            "alt_season_label": "neutral",
+        }
+
+        if not btc_prices or len(btc_prices) < 24:
+            return result
+
+        btc_change_24h = (btc_prices[-1] / btc_prices[-24] - 1) * 100
+        btc_change_7d = (btc_prices[-1] / btc_prices[0] - 1) * 100 if len(btc_prices) >= 168 else None
+
+        # 24h outperformance 비율
+        outperform_24h = 0
+        total_24h = 0
+        for info in coins.values():
+            ch = info.get("change_24h")
+            if ch is not None:
+                total_24h += 1
+                if ch > btc_change_24h:
+                    outperform_24h += 1
+
+        if total_24h > 0:
+            result["alt_season_24h"] = round(outperform_24h / total_24h * 100, 1)
+
+        # 7d outperformance 비율
+        if btc_change_7d is not None:
+            outperform_7d = 0
+            total_7d = 0
+            for info in coins.values():
+                ch = info.get("change_7d")
+                if ch is not None:
+                    total_7d += 1
+                    if ch > btc_change_7d:
+                        outperform_7d += 1
+            if total_7d > 0:
+                result["alt_season_7d"] = round(outperform_7d / total_7d * 100, 1)
+
+        # 판정 (7d 기준, 24h 보조)
+        idx_7d = result["alt_season_7d"]
+        if idx_7d >= 75:
+            result["alt_season_label"] = "alt_season"
+        elif idx_7d >= 50:
+            result["alt_season_label"] = "alt_leaning"
+        elif idx_7d >= 25:
+            result["alt_season_label"] = "neutral"
+        else:
+            result["alt_season_label"] = "btc_season"
 
         return result
 
