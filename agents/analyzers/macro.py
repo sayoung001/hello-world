@@ -213,16 +213,87 @@ class MacroAgent(AgentBase):
         else:
             return "extreme"   # 극도의 변동성
 
+    # ── 금(PAXG) 안전자산 프록시 ──
+
+    def _collect_gold_proxy(self) -> dict:
+        """
+        PAXG/USDT (금 토큰) → 안전자산 수요 측정.
+        금 상승 + BTC 하락 = risk-off (전쟁, 금리 불안)
+        금 하락 + BTC 상승 = risk-on
+        """
+        try:
+            exchange = self._get_exchange()
+            ohlcv = exchange.fetch_ohlcv("PAXG/USDT", "1d", limit=7)
+            df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
+            gold_7d = float((df["close"].iloc[-1] / df["close"].iloc[0] - 1) * 100)
+            gold_24h = float((df["close"].iloc[-1] / df["close"].iloc[-2] - 1) * 100) if len(df) >= 2 else 0
+
+            # 금-BTC 역상관 체크
+            if gold_7d > 2:
+                signal = "safe_haven_demand"  # 안전자산 쏠림
+            elif gold_7d < -2:
+                signal = "risk_appetite"  # 위험자산 선호
+            else:
+                signal = "neutral"
+
+            return {
+                "price": round(float(df["close"].iloc[-1]), 1),
+                "change_7d": round(gold_7d, 2),
+                "change_24h": round(gold_24h, 2),
+                "signal": signal,
+            }
+        except Exception:
+            return {"signal": "unavailable"}
+
+    # ── 주중/주말 시장 세션 ──
+
+    @staticmethod
+    def _detect_market_session() -> dict:
+        """
+        전통 금융시장 영업일 여부 → BTC 동조 패턴.
+        - 주중 (월~금): BTC가 나스닥과 동조하는 경향
+        - 주말: BTC 독립적 움직임, 유동성 감소 → 스프레드 확대
+        - 미국 공휴일: 유동성 급감 주의
+        """
+        now = datetime.now(KST)
+        weekday = now.weekday()  # 0=월, 6=일
+
+        if weekday >= 5:
+            session = "weekend"
+            note = "주말 — 전통시장 휴장, BTC 유동성 감소, 스프레드 확대 주의"
+            equity_impact = "none"
+        else:
+            session = "weekday"
+            note = "주중 — 전통시장 동조 가능, 미국장 22:30~05:00 KST 주시"
+            equity_impact = "correlated"
+
+        # 월요 갭 (주말 뉴스 반영)
+        if weekday == 0 and now.hour < 12:
+            note += " | 월요 오전 — 주말 뉴스 반영 변동성 주의"
+
+        # 금요 오후 (주말 리스크 회피 매도)
+        if weekday == 4 and now.hour >= 18:
+            note += " | 금요 저녁 — 주말 리스크 회피 매도 가능"
+
+        return {
+            "session": session,
+            "weekday": weekday,
+            "equity_impact": equity_impact,
+            "note": note,
+        }
+
     # ── Risk-on/off 종합 판단 ──
 
     @staticmethod
     def _assess_risk_appetite(fear_greed_value: float | None,
                                vix_level: str,
                                dxy_trend: str,
-                               high_impact_events: int) -> dict:
+                               high_impact_events: int,
+                               gold_signal: str = "neutral",
+                               is_weekend: bool = False) -> dict:
         """
         복합 지표 기반 Risk-on/off 판단.
-        점수 시스템: -10(극 risk-off) ~ +10(극 risk-on)
+        점수 시스템: -12(극 risk-off) ~ +12(극 risk-on)
         """
         score = 0
         reasons = []
@@ -261,6 +332,19 @@ class MacroAgent(AgentBase):
         elif high_impact_events == 1:
             score -= 1
             reasons.append("고임팩트 이벤트 1건 임박")
+
+        # 5. 금(PAXG) 안전자산 시그널 (-2 ~ +1)
+        if gold_signal == "safe_haven_demand":
+            score -= 2
+            reasons.append("금 상승(안전자산 쏠림)")
+        elif gold_signal == "risk_appetite":
+            score += 1
+            reasons.append("금 하락(위험자산 선호)")
+
+        # 6. 주말 유동성 리스크 (-1 ~ 0)
+        if is_weekend:
+            score -= 1
+            reasons.append("주말(유동성↓, 스프레드↑)")
 
         # 결과 분류
         if score >= 3:
@@ -309,7 +393,13 @@ class MacroAgent(AgentBase):
         dxy_data = self._collect_dxy_proxy()
         data["dxy"] = dxy_data
 
-        # 4. BTC 일봉 (매크로 반응 분석)
+        # 4. 금(PAXG) — 안전자산 수요 프록시
+        data["gold"] = self._collect_gold_proxy()
+
+        # 5. 주중/주말 패턴 (증시 영업일 동조)
+        data["market_session"] = self._detect_market_session()
+
+        # 6. BTC 일봉 (매크로 반응 분석)
         try:
             exchange = self._get_exchange()
             ohlcv = exchange.fetch_ohlcv("BTC/USDT", "1d", limit=7)
@@ -337,6 +427,8 @@ class MacroAgent(AgentBase):
         btc_daily = collected_data.get("btc_daily", {})
         events = collected_data.get("upcoming_events", [])
         dxy = collected_data.get("dxy", {})
+        gold = collected_data.get("gold", {})
+        session = collected_data.get("market_session", {})
 
         # VIX 레벨 판단
         realized_vol = dxy.get("realized_vol_30d", 0)
@@ -353,6 +445,8 @@ class MacroAgent(AgentBase):
 
         # 고임팩트 이벤트 카운트
         high_impact = sum(1 for e in events if e.get("impact") == "high" and e.get("days_until", 99) <= 1)
+        gold_signal = gold.get("signal", "neutral")
+        is_weekend = session.get("session") == "weekend"
 
         # 이벤트 정보 포맷
         event_text = ""
@@ -362,6 +456,14 @@ class MacroAgent(AgentBase):
                                f"{e['days_until']}일 후) — {e['note']}\n")
         else:
             event_text = "향후 3일 내 주요 이벤트 없음"
+
+        # 금 정보 포맷
+        gold_text = "데이터 없음"
+        if gold.get("price"):
+            gold_text = (f"PAXG ${gold['price']:,.0f} | "
+                         f"24h {gold.get('change_24h', 0):+.2f}% | "
+                         f"7d {gold.get('change_7d', 0):+.2f}% | "
+                         f"시그널: {gold_signal}")
 
         prompt = f"""다음 데이터를 기반으로 크립토 시장의 매크로 환경을 분석하세요.
 
@@ -375,22 +477,30 @@ class MacroAgent(AgentBase):
 - 추정 트렌드: {dxy.get('dxy_trend', 'N/A')}
 - BTC 주간 변동: {dxy.get('btc_7d_change', 'N/A')}%
 
+## 금 (안전자산 수요)
+- {gold_text}
+
 ## 변동성 (VIX 프록시)
 - BTC 30일 실현 변동성: {realized_vol:.1f}% (연환산)
 - VIX 레벨: {vix_level}
+
+## 시장 세션
+- {session.get('session', 'N/A')}: {session.get('note', '')}
 
 ## BTC 일봉
 - 일별 변동률: {btc_daily.get('daily_changes', 'N/A')}
 - 주간 변동: {btc_daily.get('weekly_change', 'N/A')}%
 - 평균 일일 레인지: {btc_daily.get('avg_daily_range', 'N/A')}%
 
-20배 레버리지 환경에서 고임팩트 이벤트 전후에는 defensive를 권고하세요."""
+20배 레버리지 환경에서 고임팩트 이벤트 전후에는 defensive를 권고하세요.
+금 가격이 급등(안전자산 쏠림)이면 risk-off로 판단하세요."""
 
         result = self.llm_json(prompt, deep=True)
 
         if result.get("parse_error"):
             result = self._fallback_analysis(collected_data, fgi_value, vix_level,
-                                              dxy.get("dxy_trend", "neutral"), high_impact)
+                                              dxy.get("dxy_trend", "neutral"), high_impact,
+                                              gold_signal, is_weekend)
 
         warnings = []
         if result.get("risk_level") == "DANGER":
@@ -399,6 +509,10 @@ class MacroAgent(AgentBase):
             warnings.append("🛡️ 매크로: defensive 모드 권고")
         if vix_level in ("high", "extreme"):
             warnings.append(f"📊 변동성 {vix_level} ({realized_vol:.0f}%)")
+        if gold_signal == "safe_haven_demand":
+            warnings.append(f"🥇 금 상승 ({gold.get('change_7d', 0):+.1f}%) — 안전자산 쏠림")
+        if is_weekend:
+            warnings.append("📅 주말 — 유동성 감소 주의")
 
         for evt in events:
             if evt.get("impact") == "high" and evt.get("days_until", 99) <= 1:
@@ -412,9 +526,11 @@ class MacroAgent(AgentBase):
         )
 
     def _fallback_analysis(self, data: dict, fgi_value: float | None,
-                            vix_level: str, dxy_trend: str, high_impact: int) -> dict:
+                            vix_level: str, dxy_trend: str, high_impact: int,
+                            gold_signal: str = "neutral", is_weekend: bool = False) -> dict:
         """규칙 기반 폴백 (복합 지표 종합)"""
-        assessment = self._assess_risk_appetite(fgi_value, vix_level, dxy_trend, high_impact)
+        assessment = self._assess_risk_appetite(fgi_value, vix_level, dxy_trend, high_impact,
+                                                 gold_signal, is_weekend)
         events = data.get("upcoming_events", [])
         dxy = data.get("dxy", {})
 

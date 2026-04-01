@@ -32,6 +32,7 @@ from typing import Any
 from agents.core.orchestrator import Orchestrator
 from agents.core.protocol import PositionInfo, MarketConsensus, RiskLevel
 from agents.analyzers.btc_structure import BTCStructureAgent
+from agents.analyzers.news_sentiment import NewsSentimentAgent
 from agents.analyzers.position_judge import PositionJudgeAgent
 from agents.output.telegram_formatter import TelegramFormatter
 from agents.memory.store import AnalysisMemory
@@ -86,6 +87,8 @@ class AgentHook:
                     btc_filter=self.btc_filter_instance,
                 )
             )
+            # Agent 6: 뉴스 — 지정학 이슈는 항상 감시 (MVP에도 포함)
+            self._orch.register_context_agent(NewsSentimentAgent())
             self._orch.register_position_agent(PositionJudgeAgent())
         return self._orch
 

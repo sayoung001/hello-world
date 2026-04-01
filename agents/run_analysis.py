@@ -25,6 +25,7 @@ from agents.analyzers.btc_structure import BTCStructureAgent
 from agents.analyzers.macro import MacroAgent
 from agents.analyzers.correlation import CorrelationAgent
 from agents.analyzers.alt_ecosystem import AltEcosystemAgent
+from agents.analyzers.news_sentiment import NewsSentimentAgent
 from agents.analyzers.position_judge import PositionJudgeAgent
 from agents.output.telegram_formatter import TelegramFormatter
 from agents.memory.store import AnalysisMemory
@@ -39,10 +40,11 @@ def build_orchestrator(mvp: bool = False, cg_client=None) -> Orchestrator:
     orch.register_context_agent(BTCStructureAgent(cg_client=cg_client))
 
     if not mvp:
-        # Agent 2~4: 전체 모드
+        # Agent 2~6: 전체 모드
         orch.register_context_agent(MacroAgent(cg_client=cg_client))
         orch.register_context_agent(CorrelationAgent())
         orch.register_context_agent(AltEcosystemAgent())
+        orch.register_context_agent(NewsSentimentAgent())
 
     # Agent 5: 포지션 심판
     orch.register_position_agent(PositionJudgeAgent())
