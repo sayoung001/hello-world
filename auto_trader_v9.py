@@ -55,6 +55,11 @@ except ImportError:
 from dotenv import load_dotenv
 load_dotenv()
 
+try:
+    from agents.v9_hook import AgentHook
+except ImportError:
+    AgentHook = None
+
 KST = timezone(timedelta(hours=9))
 BINANCE_FAPI = "https://fapi.binance.com"
 
@@ -897,6 +902,22 @@ class ConvergenceTrader:
         self._alerted_orders = set()
         self._scan_fails = {}
 
+        # [V9.4] 멀티에이전트 시장 분석 (Shadow Mode)
+        self.agent_hook = None
+        if AgentHook is not None:
+            try:
+                self.agent_hook = AgentHook(
+                    cg_client=self.onchain,
+                    btc_filter=self.btc_trend,
+                    tg=self.tg,
+                    shadow_mode=True,
+                    analysis_interval_h=4,
+                )
+                print("  ✅ 에이전트 시스템 초기화 (Shadow Mode)")
+            except Exception as e:
+                print(f"  ⚠️ 에이전트 초기화 실패 (봇 정상 운영): {e}")
+                self.agent_hook = None
+
         # 사이징 기준 (compound/half/quarter용)
         self._init_balance = self.executor.total_balance()
 
@@ -1159,6 +1180,13 @@ class ConvergenceTrader:
         self._save_positions()
         self.daily_trades += 1
 
+        # [V9.4] 에이전트 분석 트리거 (비동기 — 봇 블로킹 없음)
+        if self.agent_hook:
+            try:
+                self.agent_hook.on_position_open(pos, self.positions)
+            except Exception:
+                pass
+
         # 한글 진입 알람
         kr_dir = "롱 📈" if d == 'long' else "숏 📉"
         sl_pct = sl_dist / ap * 100
@@ -1206,6 +1234,13 @@ class ConvergenceTrader:
     # ── 포지션 관리 ──
 
     def manage_positions(self):
+        # [V9.4] 에이전트 정기 분석 (4시간마다, 내부에서 시간 체크)
+        if self.agent_hook:
+            try:
+                self.agent_hook.periodic_check(self.positions)
+            except Exception:
+                pass
+
         closed = []
         for pos in self.positions:
             price = self.executor.price(pos.symbol)
@@ -1337,6 +1372,13 @@ class ConvergenceTrader:
         self.tg.send(msg)
         closed_list.append(pos)
         self._alerted_orders.discard(f"{pos.symbol}_{pos.direction}")
+
+        # [V9.4] 에이전트 Shadow Mode — 실제 결과 기록
+        if self.agent_hook:
+            try:
+                self.agent_hook.on_position_close(pos, reason, roe * 100)
+            except Exception:
+                pass
 
     # ── 상태 보고 (2시간 간격) ──
 
