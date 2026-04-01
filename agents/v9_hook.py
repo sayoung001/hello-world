@@ -226,17 +226,19 @@ class AgentHook:
         v9의 run()에서 호출:
             self.agent_hook.crash_check()
 
-        내부적으로 60초 캐시 + 15분 쿨다운이 있어
+        내부적으로 60초 캐시 + 레벨별 쿨다운이 있어
         매 루프 호출해도 API 부담 없음.
+
+        Level 3+(ROE -70% 이상) 감지 시 정기분석 타이머를 리셋하여
+        다음 periodic_check()에서 즉시 전체 에이전트 분석이 실행됨.
         """
         try:
             result = self._crash_detector.check()
-            if result and result.get("level", 0) >= 2:
-                # Level 2+ 급락 시 즉시 전체 에이전트 분석도 트리거
-                print(f"  🚨 Level {result['level']} 급락 → 긴급 에이전트 분석 시작")
-                # 현재 분석 주기 리셋 (다음 정기분석까지 대기하지 않음)
+            if result and result.get("level", 0) >= 3:
+                # Level 3+ (ROE -70% 이상) 급락 시 긴급 에이전트 분석 트리거
+                print(f"  🚨 Level {result['level']} 급락 (ROE {result.get('roe_impact', '?')}%) → 긴급 분석")
                 self._last_analysis_time = 0
-        except Exception as e:
+        except Exception:
             # 급락 감지 실패가 봇을 멈추면 안 됨
             pass
 
