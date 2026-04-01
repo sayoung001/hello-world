@@ -37,6 +37,7 @@ from agents.analyzers.position_judge import PositionJudgeAgent
 from agents.output.telegram_formatter import TelegramFormatter
 from agents.memory.store import AnalysisMemory
 from agents.shadow_logger import ShadowLogger
+from agents.crash_detector import CrashDetector
 
 KST = timezone(timedelta(hours=9))
 
@@ -50,6 +51,7 @@ class AgentHook:
     2. 4시간 주기 정기 분석
     3. 포지션 청산 시 실제 결과 기록 (Shadow Mode 정확도 측정)
     4. Shadow Mode (분석 결과만 전송, 개입 없음)
+    5. 실시간 급락 감지 → 즉시 텔레그램 알림 (15초 주기 체크)
 
     Parameters:
         cg_client: CoinGlassClient 인스턴스
@@ -60,7 +62,8 @@ class AgentHook:
     """
 
     def __init__(self, cg_client=None, btc_filter=None, tg=None,
-                 shadow_mode: bool = True, analysis_interval_h: int = 4):
+                 exchange=None, shadow_mode: bool = True,
+                 analysis_interval_h: int = 4):
         self.cg_client = cg_client
         self.btc_filter_instance = btc_filter
         self.tg = tg
@@ -76,6 +79,8 @@ class AgentHook:
         self._orch: Orchestrator | None = None
         # 포지션별 마지막 분석 타임스탬프 (outcome 매칭용)
         self._position_analysis_ts: dict[str, str] = {}
+        # [V9.5] 실시간 급락 감지기
+        self._crash_detector = CrashDetector(exchange=exchange, tg=tg)
 
     def _get_orchestrator(self) -> Orchestrator:
         """오케스트레이터 지연 초기화"""
@@ -213,6 +218,27 @@ class AgentHook:
 
         thread = threading.Thread(target=_analyze, daemon=True)
         thread.start()
+
+    def crash_check(self):
+        """
+        실시간 급락 감지 — v9 메인 루프에서 매 사이클(15초) 호출.
+
+        v9의 run()에서 호출:
+            self.agent_hook.crash_check()
+
+        내부적으로 60초 캐시 + 15분 쿨다운이 있어
+        매 루프 호출해도 API 부담 없음.
+        """
+        try:
+            result = self._crash_detector.check()
+            if result and result.get("level", 0) >= 2:
+                # Level 2+ 급락 시 즉시 전체 에이전트 분석도 트리거
+                print(f"  🚨 Level {result['level']} 급락 → 긴급 에이전트 분석 시작")
+                # 현재 분석 주기 리셋 (다음 정기분석까지 대기하지 않음)
+                self._last_analysis_time = 0
+        except Exception as e:
+            # 급락 감지 실패가 봇을 멈추면 안 됨
+            pass
 
     def on_position_close(self, position, close_reason: str, pnl_pct: float):
         """
