@@ -127,7 +127,7 @@ class Orchestrator:
 
         # LLM 모더레이션 시도
         try:
-            import anthropic
+            import anthropic  # noqa: F811
             client = anthropic.Anthropic()
             response = client.messages.create(
                 model=DEEP_MODEL,

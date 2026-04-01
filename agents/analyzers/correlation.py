@@ -10,7 +10,6 @@ BTC와 타 자산 간 연동성 분석.
 """
 
 from __future__ import annotations
-import ccxt
 import pandas as pd
 import numpy as np
 from typing import Any
@@ -37,10 +36,10 @@ class CorrelationAgent(AgentBase):
             role_description="BTC와 타 자산 간 연동성 분석 (Factual)"
         )
         self._analysis_type = "factual"
-        self.exchange = exchange or ccxt.binance({
-            "enableRateLimit": True,
-            "options": {"defaultType": "future"}
-        })
+        if exchange is None:
+            import ccxt
+            exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
+        self.exchange = exchange
 
     def _get_system_prompt(self) -> str:
         return """당신은 자산 간 상관관계 전문 분석가입니다.

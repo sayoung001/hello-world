@@ -11,7 +11,6 @@ alt_ecosystem.py — Agent 4: 알트코인 생태계 분석가
 """
 
 from __future__ import annotations
-import ccxt
 import pandas as pd
 import numpy as np
 import time
@@ -63,10 +62,10 @@ class AltEcosystemAgent(AgentBase):
             role_description="알트코인 시장 동향 및 분산도 분석 (Subjective)"
         )
         self._analysis_type = "subjective"
-        self.exchange = exchange or ccxt.binance({
-            "enableRateLimit": True,
-            "options": {"defaultType": "future"}
-        })
+        if exchange is None:
+            import ccxt
+            exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
+        self.exchange = exchange
 
     def _get_system_prompt(self) -> str:
         return """당신은 알트코인 생태계 전문 분석가입니다.

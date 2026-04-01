@@ -12,7 +12,10 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any
 
-import anthropic
+try:
+    import anthropic
+except ImportError:
+    anthropic = None  # 지연 초기화 — 실제 LLM 호출 시점에 확인
 
 from agents.core.protocol import AgentMessage, RiskLevel
 
@@ -40,9 +43,11 @@ class AgentBase(ABC):
         self._analysis_type: str = "factual"  # "factual" | "subjective" (FS-ReasoningAgent 차용)
 
     @property
-    def client(self) -> anthropic.Anthropic:
+    def client(self):
         """Anthropic 클라이언트 (지연 초기화)"""
         if self._client is None:
+            if anthropic is None:
+                raise ImportError("anthropic 패키지 필요: pip install anthropic")
             self._client = anthropic.Anthropic(
                 api_key=os.environ.get("ANTHROPIC_API_KEY", "")
             )

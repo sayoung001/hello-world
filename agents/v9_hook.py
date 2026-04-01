@@ -16,6 +16,9 @@ v9_hook.py — auto_trader_v9.py 연동 훅
     # manage_positions() 에서 주기적 호출 (4시간마다)
     self.agent_hook.periodic_check(self.positions)
 
+    # _close() 에서 포지션 청산 직후
+    self.agent_hook.on_position_close(pos, close_reason, pnl_pct)
+
 Shadow Mode: 실제 개입 없이 분석 결과만 텔레그램 전송.
 """
 
@@ -32,6 +35,7 @@ from agents.analyzers.btc_structure import BTCStructureAgent
 from agents.analyzers.position_judge import PositionJudgeAgent
 from agents.output.telegram_formatter import TelegramFormatter
 from agents.memory.store import AnalysisMemory
+from agents.shadow_logger import ShadowLogger
 
 KST = timezone(timedelta(hours=9))
 
@@ -43,7 +47,8 @@ class AgentHook:
     기능:
     1. 포지션 오픈 시 자동 분석 트리거
     2. 4시간 주기 정기 분석
-    3. Shadow Mode (분석 결과만 전송, 개입 없음)
+    3. 포지션 청산 시 실제 결과 기록 (Shadow Mode 정확도 측정)
+    4. Shadow Mode (분석 결과만 전송, 개입 없음)
 
     Parameters:
         cg_client: CoinGlassClient 인스턴스
@@ -62,11 +67,14 @@ class AgentHook:
         self.analysis_interval = analysis_interval_h * 3600
         self._last_analysis_time = 0
         self._memory = AnalysisMemory()
+        self._shadow = ShadowLogger()
         self._formatter = TelegramFormatter(
             os.environ.get("TELEGRAM_BOT_TOKEN", ""),
             os.environ.get("TELEGRAM_CHAT_ID", "")
         )
         self._orch: Orchestrator | None = None
+        # 포지션별 마지막 분석 타임스탬프 (outcome 매칭용)
+        self._position_analysis_ts: dict[str, str] = {}
 
     def _get_orchestrator(self) -> Orchestrator:
         """오케스트레이터 지연 초기화"""
@@ -86,7 +94,6 @@ class AgentHook:
         result = []
         for pos in v9_positions:
             try:
-                # v9 Position은 dataclass로 entry_price, direction, symbol 등을 가짐
                 current = getattr(pos, "current_price", 0) or getattr(pos, "last_price", 0)
                 entry = pos.entry_price
 
@@ -95,7 +102,7 @@ class AgentHook:
                         pnl_pct = (current - entry) / entry * 100
                     else:
                         pnl_pct = (entry - current) / entry * 100
-                    roe_pct = pnl_pct * 20  # 20x 레버리지
+                    roe_pct = pnl_pct * 20
                 else:
                     pnl_pct = 0.0
                     roe_pct = 0.0
@@ -141,11 +148,14 @@ class AgentHook:
                 orch = self._get_orchestrator()
                 consensus = orch.run(positions=positions)
                 self._memory.store(consensus)
+                self._shadow.log_analysis(consensus, trigger="진입")
+                # 포지션별 타임스탬프 기록
+                sym = getattr(new_position, "symbol", "")
+                self._position_analysis_ts[sym] = consensus.timestamp
                 self._send_result(consensus, trigger="진입")
             except Exception as e:
                 print(f"  ⚠️ 에이전트 분석 실패: {e}")
 
-        # 비동기 실행 (봇 메인 루프 블로킹 방지)
         thread = threading.Thread(target=_analyze, daemon=True)
         thread.start()
 
@@ -171,12 +181,50 @@ class AgentHook:
                 orch = self._get_orchestrator()
                 consensus = orch.run(positions=pos_infos)
                 self._memory.store(consensus)
+                self._shadow.log_analysis(consensus, trigger="정기분석")
+                # 모든 포지션의 타임스탬프 갱신
+                for pos in positions:
+                    sym = getattr(pos, "symbol", "")
+                    if sym:
+                        self._position_analysis_ts[sym] = consensus.timestamp
                 self._send_result(consensus, trigger="정기분석")
             except Exception as e:
                 print(f"  ⚠️ 정기 에이전트 분석 실패: {e}")
 
         thread = threading.Thread(target=_analyze, daemon=True)
         thread.start()
+
+    def on_position_close(self, position, close_reason: str, pnl_pct: float):
+        """
+        포지션 청산 시 — 실제 결과를 Shadow Logger에 기록
+
+        v9의 _close()에서 호출:
+            self.agent_hook.on_position_close(pos, reason, roe_spot * 100)
+
+        :param position: 청산된 포지션 객체
+        :param close_reason: "TP", "SL", "SL_본전", "EE_EXIT", "TRAIL" 등
+        :param pnl_pct: 실현 수익률 (%)
+        """
+        sym = getattr(position, "symbol", "")
+        ts = self._position_analysis_ts.pop(sym, "")
+
+        # close_reason → outcome 매핑
+        if "TP" in close_reason or "TRAIL" in close_reason:
+            outcome = "TP"
+        elif "SL" in close_reason:
+            outcome = "SL"
+        elif "EE" in close_reason:
+            outcome = "TIMEOUT"
+        else:
+            outcome = close_reason
+
+        if ts:
+            self._shadow.update_outcome(ts, outcome, pnl_pct)
+            print(f"  [Shadow] {sym} 결과 기록: {outcome} ({pnl_pct:+.2f}%)")
+
+    def get_accuracy_report(self) -> dict:
+        """Shadow Mode 정확도 리포트 조회"""
+        return self._shadow.generate_accuracy_report()
 
     def _send_result(self, consensus: MarketConsensus, trigger: str = ""):
         """분석 결과 전송 (텔레그램 또는 콘솔)"""

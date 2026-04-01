@@ -12,7 +12,6 @@ BTC 가격 구조, 핵심 레벨, 청산 클러스터 분석.
 
 from __future__ import annotations
 import os
-import ccxt
 import pandas as pd
 import numpy as np
 from typing import Any
@@ -41,11 +40,11 @@ class BTCStructureAgent(AgentBase):
         )
         self._analysis_type = "factual"
         self.cg = cg_client
-        self.exchange = exchange or ccxt.binance({
-            "enableRateLimit": True,
-            "options": {"defaultType": "future"}
-        })
-        self.btc_filter = btc_filter  # 기존 BTCFilter 재활용
+        if exchange is None:
+            import ccxt
+            exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
+        self.exchange = exchange
+        self.btc_filter = btc_filter
 
     def _get_system_prompt(self) -> str:
         return """당신은 BTC 가격 구조 전문 분석가입니다.

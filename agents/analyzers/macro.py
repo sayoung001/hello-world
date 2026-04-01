@@ -11,7 +11,6 @@ macro.py — Agent 2: 매크로 분석가
 """
 
 from __future__ import annotations
-import ccxt
 import pandas as pd
 import numpy as np
 from typing import Any
@@ -78,6 +77,7 @@ class MacroAgent(AgentBase):
 
         # 2. BTC 가격 변동 (매크로 이벤트 반응 대용)
         try:
+            import ccxt
             exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
             ohlcv = exchange.fetch_ohlcv("BTC/USDT", "1d", limit=7)
             df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
