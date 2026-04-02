@@ -289,15 +289,14 @@ class BTCTrend7Level:
     -2: BEAR        (EMA20<60, ADX>20)
     -3: CRASH       (EMA20<60, ADX>30, RSI<40, 1h<-1%)
 
-    7Lv_Aggressive 필터:
-      long 차단: BEAR(-2), CRASH(-3)
+    7Lv_Minimal 필터 (백테스트 검증):
+      long 차단: CRASH(-3) 만 — BEAR에서 알트 반등 Long 허용
       short 차단: STRONG_BULL(3) 만
-      → BULL에서 short 허용!
     """
     NAMES = {3:'STRONG_BULL',2:'BULL',1:'MILD_BULL',0:'NEUTRAL',
              -1:'MILD_BEAR',-2:'BEAR',-3:'CRASH'}
-    # 7Lv_Aggressive
-    LONG_BLOCK = {-3}   # BEAR, CRASH
+    # 7Lv_Minimal — CRASH만 Long 차단, BEAR에서 Long 허용 (백테스트 검증: PF +0.09)
+    LONG_BLOCK = {-3}        # CRASH만 (BEAR 해제 → 알트 반등 수익 포착)
     SHORT_BLOCK = {3}        # STRONG_BULL만
 
     def __init__(self, exchange, cache_sec=900):
