@@ -33,6 +33,10 @@ try:
     from coinglass_client import CoinGlassClient
 except ImportError:
     CoinGlassClient = None
+try:
+    from agents.v9_hook import AgentHook
+except ImportError:
+    AgentHook = None
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -56,6 +60,9 @@ CONFIG = {
                         os.environ.get("TELEGRAM_TOKEN_TRADER", "")),
     "TELEGRAM_CHAT_ID": os.environ.get("TELEGRAM_CHAT_ID_SEMI",
                         os.environ.get("TELEGRAM_CHAT_ID", "")),
+    # Watchdog 텔레그램 (에이전트 정기분석 + 급락 알림)
+    "TELEGRAM_TOKEN_WATCHDOG": os.environ.get("TELEGRAM_TOKEN_WATCHDOG", ""),
+    "TELEGRAM_CHAT_ID_WATCHDOG": os.environ.get("TELEGRAM_CHAT_ID_WATCHDOG", ""),
 
     # [8.2] 동적 워치리스트 — $0.1M~$10M 소형 코인 전체 스캔
     "WATCHLIST_MODE": "dynamic",       # "dynamic" or "fixed"
@@ -843,6 +850,31 @@ class ConvergenceTrader:
         # 사이징 기준 (compound/half/quarter용)
         self._init_balance = self.executor.total_balance()
 
+        # [V9.5] 멀티에이전트 시장 분석 (Shadow Mode)
+        self.agent_hook = None
+        if AgentHook is not None:
+            try:
+                # Watchdog 텔레그램 (에이전트 전용)
+                wd_token = self.cfg.get("TELEGRAM_TOKEN_WATCHDOG", "")
+                wd_chat = self.cfg.get("TELEGRAM_CHAT_ID_WATCHDOG", "")
+                if wd_token and wd_chat:
+                    tg_watchdog = Telegram(wd_token, wd_chat)
+                    print("  ✅ Watchdog 텔레그램 연결됨")
+                else:
+                    tg_watchdog = self.tg
+                    print("  ℹ️ Watchdog 텔레그램 미설정 → Semi TG 공유")
+                self.agent_hook = AgentHook(
+                    cg_client=self.onchain,
+                    btc_filter=self.btc_trend,
+                    tg=tg_watchdog,
+                    exchange=self.exchange,
+                    shadow_mode=True,
+                )
+                print("  ✅ 에이전트 시스템 초기화 (Shadow Mode)")
+            except Exception as e:
+                print(f"  ⚠️ 에이전트 초기화 실패 (봇 정상 운영): {e}")
+                self.agent_hook = None
+
         # 시작 알람
         bal = self._init_balance
         mode = "페이퍼" if self.cfg["PAPER_TRADE"] else "실전"
@@ -1184,6 +1216,13 @@ class ConvergenceTrader:
                f"잔고: ${bal:,.0f}")
         self.tg.send(msg)
 
+        # [V9.5] 에이전트 분석 트리거 (비동기)
+        if self.agent_hook:
+            try:
+                self.agent_hook.on_position_open(pos, self.positions)
+            except Exception:
+                pass
+
     # ── 포지션 관리 ──
 
     def manage_positions(self):
@@ -1328,6 +1367,13 @@ class ConvergenceTrader:
         self.tg.send(msg)
         closed_list.append(pos)
         self._alerted_orders.discard(f"{pos.symbol}_{pos.direction}")
+
+        # [V9.5] 에이전트 Shadow Mode — 실제 결과 기록
+        if self.agent_hook:
+            try:
+                self.agent_hook.on_position_close(pos, reason, roe)
+            except Exception:
+                pass
 
     # ── 상태 보고 (2시간 간격) ──
 
@@ -1730,6 +1776,17 @@ class ConvergenceTrader:
             try:
                 now = time.time()
                 now_dt = datetime.now(KST)
+
+                # ── [V9.5] 실시간 급락 감지 + 정기분석 (매 루프) ──
+                if self.agent_hook:
+                    try:
+                        self.agent_hook.crash_check(self.positions)
+                    except Exception:
+                        pass
+                    try:
+                        self.agent_hook.periodic_check(self.positions)
+                    except Exception:
+                        pass
 
                 # ── 포지션 모니터 (30초마다) ──
                 if self.positions:
