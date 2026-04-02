@@ -178,24 +178,32 @@ class NewsSentimentAgent(AgentBase):
             print(f"[뉴스] CryptoCompare 수집 실패: {e}")
         return []
 
-    def _fetch_alternative_me_news(self) -> list[dict]:
-        """Alternative.me 뉴스 (무료)"""
+    def _fetch_fear_greed_index(self) -> dict:
+        """Alternative.me 공포탐욕지수 (무료, 키 불필요)"""
         try:
-            url = "https://api.alternative.me/v1/ticker/news/"
+            url = "https://api.alternative.me/fng/?limit=3&format=json"
             resp = requests.get(url, timeout=10)
             if resp.ok:
-                data = resp.json()
-                result = [
-                    {"title": n.get("title", ""), "source": "alternative.me"}
-                    for n in data.get("data", [])[:10]
-                ]
-                print(f"[뉴스] Alternative.me: {len(result)}건 수집")
-                return result
+                data = resp.json().get("data", [])
+                if data:
+                    current = data[0]
+                    result = {
+                        "value": int(current.get("value", 50)),
+                        "label": current.get("value_classification", "Neutral"),
+                        "timestamp": current.get("timestamp", ""),
+                    }
+                    # 이전 값과 비교 (추세)
+                    if len(data) >= 2:
+                        prev = int(data[1].get("value", 50))
+                        result["prev_value"] = prev
+                        result["change"] = result["value"] - prev
+                    print(f"[뉴스] 공포탐욕지수: {result['value']} ({result['label']})")
+                    return result
             else:
-                print(f"[뉴스] Alternative.me 응답 오류: {resp.status_code}")
+                print(f"[뉴스] 공포탐욕지수 응답 오류: {resp.status_code}")
         except Exception as e:
-            print(f"[뉴스] Alternative.me 수집 실패: {e}")
-        return []
+            print(f"[뉴스] 공포탐욕지수 수집 실패: {e}")
+        return {}
 
     # ── 이슈 분류 & 임팩트 계산 ──
 
@@ -238,9 +246,10 @@ class NewsSentimentAgent(AgentBase):
     # ── 감성 종합 ──
 
     @staticmethod
-    def _compute_sentiment(classified: dict, impact_scores: dict) -> dict:
+    def _compute_sentiment(classified: dict, impact_scores: dict,
+                           fear_greed: dict | None = None) -> dict:
         """
-        카테고리별 임팩트 → 종합 감성 산출.
+        카테고리별 임팩트 + 공포탐욕지수 → 종합 감성 산출.
         부정 카테고리(전쟁, 규제, 해킹)는 감성을 하락시키고,
         긍정 카테고리(채택)는 상승시킴.
         """
@@ -257,6 +266,19 @@ class NewsSentimentAgent(AgentBase):
             sentiment_score = max(min(raw, 1.0), -1.0)
         else:
             sentiment_score = 0.0
+
+        # 공포탐욕지수 반영 (뉴스 키워드 매칭 없을 때 특히 유용)
+        fg = fear_greed or {}
+        fg_value = fg.get("value")
+        if fg_value is not None:
+            # 0~100 → -1~+1 변환 (50=중립)
+            fg_sentiment = (fg_value - 50) / 50
+            if total > 0:
+                # 뉴스 데이터 있으면 30% 반영
+                sentiment_score = sentiment_score * 0.7 + fg_sentiment * 0.3
+            else:
+                # 뉴스 키워드 매칭 없으면 공포탐욕지수가 주력
+                sentiment_score = fg_sentiment * 0.8
 
         # 라벨
         if sentiment_score <= -0.6:
@@ -324,20 +346,20 @@ class NewsSentimentAgent(AgentBase):
         cc_news = self._fetch_cryptocompare_news()
         data["articles"].extend(cc_news)
 
-        # 2. Alternative.me 뉴스 (보조)
-        alt_news = self._fetch_alternative_me_news()
-        data["articles"].extend(alt_news)
+        # 2. 공포탐욕지수 (Alternative.me)
+        data["fear_greed"] = self._fetch_fear_greed_index()
 
         if not data["articles"]:
-            print("[뉴스] ⚠️ 뉴스 수집 실패 — 모든 소스에서 0건. API 상태 확인 필요")
+            print("[뉴스] ⚠️ 뉴스 수집 실패 — CryptoCompare 0건. API 상태 확인 필요")
 
         # 3. 키워드 분류
         classification = self._classify_news(data["articles"])
         data["classified"] = classification["classified"]
         data["impact_scores"] = classification["impact_scores"]
 
-        # 4. 감성 계산
-        sentiment = self._compute_sentiment(data["classified"], data["impact_scores"])
+        # 4. 감성 계산 (공포탐욕지수 반영)
+        sentiment = self._compute_sentiment(
+            data["classified"], data["impact_scores"], data.get("fear_greed", {}))
         data["sentiment"] = sentiment
 
         # 5. Breaking News 추출
@@ -353,6 +375,7 @@ class NewsSentimentAgent(AgentBase):
         impact_scores = collected_data.get("impact_scores", {})
         sentiment = collected_data.get("sentiment", {})
         breaking = collected_data.get("breaking", [])
+        fear_greed = collected_data.get("fear_greed", {})
 
         # LLM 분석 (뉴스 헤드라인 기반 심층 해석)
         headlines = [a.get("title", "") for a in articles[:15] if a.get("title")]
@@ -399,6 +422,11 @@ class NewsSentimentAgent(AgentBase):
 ## 카테고리별 분류
 {classified_text or "분류된 뉴스 없음"}
 
+## 공포탐욕지수 (Fear & Greed Index)
+- 현재: {fear_greed.get('value', 'N/A')} ({fear_greed.get('label', 'N/A')})
+- 전일 대비: {fear_greed.get('change', 'N/A'):+d}p
+{f"- 추세: {'공포 심화' if fear_greed.get('change', 0) < -5 else '공포 완화' if fear_greed.get('change', 0) > 5 else '유지'}" if fear_greed.get('change') is not None else ''}
+
 ## 사전 계산된 감성
 - 감성 점수: {sentiment.get('sentiment_score', 0):.2f}
 - 지정학 리스크: {sentiment.get('geopolitical_risk', 'N/A')}
@@ -421,6 +449,9 @@ class NewsSentimentAgent(AgentBase):
                 result.setdefault("geopolitical_risk", sentiment.get("geopolitical_risk", "low"))
                 result.setdefault("regulatory_risk", sentiment.get("regulatory_risk", "low"))
                 result.setdefault("breaking_news", breaking)
+                if fear_greed:
+                    result["fear_greed_index"] = fear_greed.get("value")
+                    result["fear_greed_label"] = fear_greed.get("label")
             else:
                 result = self._fallback_analysis(sentiment, breaking, impact_scores)
         else:

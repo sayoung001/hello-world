@@ -345,22 +345,13 @@ class TelegramFormatter:
             for chunk in chunks:
                 try:
                     url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-                    # 1차: HTML
-                    resp = requests.post(url, json={
-                        "chat_id": self.chat_id,
-                        "text": chunk,
-                        "parse_mode": "HTML",
-                    }, timeout=10)
-                    if resp.ok:
-                        continue
-                    # HTML 실패 → plain text 폴백
-                    print(f"  [TG] HTML 실패({resp.status_code}), plain 재시도")
+                    # 에이전트 메시지는 plain text (LLM 출력에 HTML 특수문자 포함)
                     resp = requests.post(url, json={
                         "chat_id": self.chat_id,
                         "text": chunk,
                     }, timeout=10)
                     if not resp.ok:
-                        print(f"❌ 텔레그램 plain도 실패: {resp.text[:100]}")
+                        print(f"❌ 텔레그램 전송 실패: {resp.text[:100]}")
                         success = False
                 except Exception as e:
                     print(f"❌ 텔레그램 전송 오류: {e}")
