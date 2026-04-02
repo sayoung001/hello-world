@@ -152,6 +152,12 @@ class NewsSentimentAgent(AgentBase):
             if resp.ok:
                 data = resp.json()
                 articles = data.get("Data", [])
+                # API가 dict를 반환하는 경우 list로 변환
+                if isinstance(articles, dict):
+                    articles = list(articles.values()) if articles else []
+                if not isinstance(articles, list):
+                    print(f"[뉴스] CryptoCompare Data 타입 이상: {type(articles)}")
+                    articles = []
                 result = [
                     {
                         "title": a.get("title", ""),
@@ -162,6 +168,7 @@ class NewsSentimentAgent(AgentBase):
                         "url": a.get("url", ""),
                     }
                     for a in articles[:20]
+                    if isinstance(a, dict)
                 ]
                 print(f"[뉴스] CryptoCompare: {len(result)}건 수집")
                 return result
