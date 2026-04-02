@@ -139,6 +139,7 @@ CONFIG = {
     "MIN_CONFIDENCE": 70,
     "MIN_ADX": 25,
     "MIN_VOLUME_RATIO": 1.5,
+    "BREAKOUT_CLOSE_OUTSIDE": True,   # BB 밖 종가 필수 여부 (False=스퀴즈 구간 돌파만 체크)
     "FIBO_LEVEL": 2.618,
     "SL_RATIO": 1.5,
 
@@ -878,6 +879,7 @@ class ConvergenceTrader:
             'MIN_SQUEEZE_CANDLES': self.cfg["MIN_SQUEEZE_CANDLES"],
             'MIN_CONFIDENCE': self.cfg["MIN_CONFIDENCE"],
             'MIN_ADX': self.cfg["MIN_ADX"],
+            'BREAKOUT_CLOSE_OUTSIDE': self.cfg["BREAKOUT_CLOSE_OUTSIDE"],
             'TP_FIBO_LEVEL': self.cfg["FIBO_LEVEL"]})
 
         # BTC 필터
