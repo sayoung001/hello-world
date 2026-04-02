@@ -36,7 +36,10 @@ ISSUE_CATEGORIES = {
         "weight": 3.0,
         "keywords": ["war", "military", "iran", "missile", "nuclear", "sanction",
                      "invasion", "conflict", "attack", "strike", "전쟁", "군사",
-                     "이란", "미사일", "제재", "침공", "공격", "폭격", "tariff", "관세"],
+                     "이란", "미사일", "제재", "침공", "공격", "폭격", "tariff", "관세",
+                     "trade war", "trade tension", "embargo", "duties", "무역전쟁",
+                     "보복관세", "수출규제", "수입규제", "retaliation", "countermeasure",
+                     "escalation", "geopoliti", "cold war"],
         "desc": "지정학적 리스크 (전쟁, 제재)",
     },
     "regulation": {
@@ -50,7 +53,9 @@ ISSUE_CATEGORIES = {
         "weight": 2.0,
         "keywords": ["fed", "fomc", "rate cut", "rate hike", "inflation",
                      "recession", "bank failure", "금리", "인플레", "경기침체",
-                     "은행 파산", "default", "debt ceiling", "채무한도"],
+                     "은행 파산", "default", "debt ceiling", "채무한도",
+                     "cpi", "ppi", "unemployment", "실업", "gdp", "stagflation",
+                     "quantitative", "liquidity", "유동성", "treasury yield"],
         "desc": "거시경제 충격",
     },
     "exchange_risk": {
@@ -147,7 +152,7 @@ class NewsSentimentAgent(AgentBase):
             if resp.ok:
                 data = resp.json()
                 articles = data.get("Data", [])
-                return [
+                result = [
                     {
                         "title": a.get("title", ""),
                         "body": a.get("body", "")[:500],
@@ -156,10 +161,14 @@ class NewsSentimentAgent(AgentBase):
                         "categories": a.get("categories", ""),
                         "url": a.get("url", ""),
                     }
-                    for a in articles[:20]  # 최근 20개
+                    for a in articles[:20]
                 ]
-        except Exception:
-            pass
+                print(f"[뉴스] CryptoCompare: {len(result)}건 수집")
+                return result
+            else:
+                print(f"[뉴스] CryptoCompare 응답 오류: {resp.status_code} {resp.text[:100]}")
+        except Exception as e:
+            print(f"[뉴스] CryptoCompare 수집 실패: {e}")
         return []
 
     def _fetch_alternative_me_news(self) -> list[dict]:
@@ -169,12 +178,16 @@ class NewsSentimentAgent(AgentBase):
             resp = requests.get(url, timeout=10)
             if resp.ok:
                 data = resp.json()
-                return [
+                result = [
                     {"title": n.get("title", ""), "source": "alternative.me"}
                     for n in data.get("data", [])[:10]
                 ]
-        except Exception:
-            pass
+                print(f"[뉴스] Alternative.me: {len(result)}건 수집")
+                return result
+            else:
+                print(f"[뉴스] Alternative.me 응답 오류: {resp.status_code}")
+        except Exception as e:
+            print(f"[뉴스] Alternative.me 수집 실패: {e}")
         return []
 
     # ── 이슈 분류 & 임팩트 계산 ──
@@ -308,6 +321,9 @@ class NewsSentimentAgent(AgentBase):
         alt_news = self._fetch_alternative_me_news()
         data["articles"].extend(alt_news)
 
+        if not data["articles"]:
+            print("[뉴스] ⚠️ 뉴스 수집 실패 — 모든 소스에서 0건. API 상태 확인 필요")
+
         # 3. 키워드 분류
         classification = self._classify_news(data["articles"])
         data["classified"] = classification["classified"]
@@ -334,6 +350,7 @@ class NewsSentimentAgent(AgentBase):
         # LLM 분석 (뉴스 헤드라인 기반 심층 해석)
         headlines = [a.get("title", "") for a in articles[:15] if a.get("title")]
 
+        # 뉴스가 없어도 LLM에게 최신 상황 분석 요청 (LLM 지식 기반)
         if headlines:
             breaking_text = ""
             for b in breaking[:3]:
@@ -400,7 +417,30 @@ class NewsSentimentAgent(AgentBase):
             else:
                 result = self._fallback_analysis(sentiment, breaking, impact_scores)
         else:
-            result = self._fallback_analysis(sentiment, breaking, impact_scores)
+            # 뉴스 수집 실패 시에도 LLM 지식 기반 분석 시도
+            no_data_prompt = f"""현재 뉴스 API에서 데이터를 수집하지 못했습니다.
+당신의 학습 데이터와 최근 지식을 기반으로 크립토 시장에 영향을 미치는 주요 이슈를 분석해주세요.
+
+{f'''## ⚠️ 긴급: BTC 급락 발생 중
+- 변동: {crash_context.get("change_pct", 0):+.2f}%
+- 현재가: ${crash_context.get("current_price", 0):,.0f}
+최우선: 급락 원인 파악''' if crash_context else ''}
+
+주요 분석 항목:
+1. 현재 글로벌 지정학적 이슈 (전쟁, 관세, 무역갈등)
+2. 주요 규제/정책 변화
+3. 거시경제 이벤트 (금리, CPI, 고용 등)
+
+반드시 JSON 형식으로 출력하세요."""
+            llm_result = self.llm_json(no_data_prompt, deep=True, max_tokens=1500)
+            if not llm_result.get("parse_error"):
+                llm_result.setdefault("confidence", 0.3)  # 뉴스 데이터 없으므로 낮은 신뢰도
+                llm_result.setdefault("reasoning",
+                    (llm_result.get("reasoning", "") + " (뉴스 API 수집 실패, LLM 지식 기반 분석)").strip())
+                result = llm_result
+            else:
+                result = self._fallback_analysis(sentiment, breaking, impact_scores)
+                result["reasoning"] += " | ⚠️ 뉴스 API 수집 실패"
 
         # 경고 생성
         warnings = self._generate_warnings(result, sentiment, breaking)

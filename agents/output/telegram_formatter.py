@@ -28,6 +28,26 @@ ACTION_EMOJI = {
 }
 
 
+def _format_hold(hold_rec) -> str:
+    """hold_recommendation dict → 읽기 쉬운 문자열"""
+    if not hold_rec or not isinstance(hold_rec, dict):
+        return ""
+    remaining = hold_rec.get("remaining_h", 0)
+    optimal = hold_rec.get("optimal_hold_h", 0)
+    urgency = hold_rec.get("urgency", "")
+    current = hold_rec.get("current_hold_h", 0)
+    if optimal == 0:
+        return "즉시 청산 권고"
+    parts = []
+    if remaining > 0:
+        parts.append(f"잔여 {remaining:.0f}h/{optimal:.0f}h")
+    else:
+        parts.append(f"초과 보유 ({current:.0f}h/{optimal:.0f}h)")
+    if urgency == "high":
+        parts.append("⚡긴급")
+    return " ".join(parts)
+
+
 class TelegramFormatter:
     """텔레그램 메시지 포맷터 + 전송"""
 
@@ -83,7 +103,7 @@ class TelegramFormatter:
                     f"{v.get('symbol', '?')} ({v.get('direction', '?')})\n"
                     f"  리스크: {risk_str} | 액션: {action_str}\n"
                     f"  신뢰도: {v.get('confidence', 0):.0%} | "
-                    f"홀딩: {v.get('hold_duration', 'N/A')}\n"
+                    f"홀딩: {_format_hold(v.get('hold_recommendation'))}\n"
                     f"  사유: {v.get('reasoning', '')[:100]}\n"
                 )
             messages.append(pos_text)
@@ -281,16 +301,20 @@ class TelegramFormatter:
                     pos_lines.append(f"  근거: {reasoning[:120]}")
 
                 # SL/TP 조정 권고
-                sl_rec = v.get("sl_recommendation", "")
-                tp_rec = v.get("tp_recommendation", "")
-                if sl_rec and sl_rec != "keep":
-                    pos_lines.append(f"  🔧 SL: {sl_rec}")
-                if tp_rec and tp_rec != "keep":
-                    pos_lines.append(f"  🔧 TP: {tp_rec}")
+                sl_tp = v.get("sl_tp_adjustment", {})
+                if isinstance(sl_tp, dict):
+                    sl_act = sl_tp.get("sl_action", "keep")
+                    tp_act = sl_tp.get("tp_action", "keep")
+                    sl_reason = sl_tp.get("reasoning", "")
+                    if sl_act and sl_act != "keep":
+                        pos_lines.append(f"  🔧 SL: {sl_act} — {sl_reason[:60]}")
+                    if tp_act and tp_act != "keep":
+                        pos_lines.append(f"  🔧 TP: {tp_act}")
 
-                hold = v.get("hold_duration", "")
-                if hold:
-                    pos_lines.append(f"  ⏱️ 홀딩: {hold}")
+                hold_rec = v.get("hold_recommendation", {})
+                hold_str = _format_hold(hold_rec)
+                if hold_str:
+                    pos_lines.append(f"  ⏱️ 홀딩: {hold_str}")
 
                 dissent = v.get("dissent", "")
                 if dissent:
