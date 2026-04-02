@@ -1392,7 +1392,7 @@ class ConvergenceTrader:
         # [V9.4] 에이전트 Shadow Mode — 실제 결과 기록
         if self.agent_hook:
             try:
-                self.agent_hook.on_position_close(pos, reason, roe * 100)
+                self.agent_hook.on_position_close(pos, reason, roe)
             except Exception:
                 pass
 
@@ -2218,7 +2218,10 @@ class ConvergenceTrader:
 
                 # ── [V9.5] 실시간 급락 감지 (매 루프) ──
                 if self.agent_hook:
-                    self.agent_hook.crash_check(self.positions)
+                    try:
+                        self.agent_hook.crash_check(self.positions)
+                    except Exception:
+                        pass
 
                 # ── 포지션 모니터 (30초마다) ──
                 if self.positions:

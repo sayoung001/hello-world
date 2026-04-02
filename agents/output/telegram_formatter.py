@@ -184,7 +184,7 @@ class TelegramFormatter:
                     lines.append(f"📅 매크로 이벤트:")
                     for evt in events[:2]:
                         if isinstance(evt, dict):
-                            lines.append(f"  • {evt.get('name', '')} (D{evt.get('days_until', '?')})")
+                            lines.append(f"  • {evt.get('event', evt.get('name', ''))} (D{evt.get('days_until', '?')})")
                         else:
                             lines.append(f"  • {str(evt)[:60]}")
                     cause_found = True

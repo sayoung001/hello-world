@@ -206,9 +206,11 @@ class AgentHook:
 
     def on_position_open(self, new_position, all_positions: list):
         """포지션 오픈 시 트리거 — 비동기 분석"""
+        pos_snapshot = list(all_positions)  # 스레드 안전 복사
+
         def _analyze():
             try:
-                positions = self._convert_positions(all_positions)
+                positions = self._convert_positions(pos_snapshot)
                 orch = self._get_orchestrator()
                 consensus = orch.run(positions=positions)
                 self._memory.store(consensus)
@@ -274,17 +276,21 @@ class AgentHook:
                 return
 
             # Level 2+: 속보 + 긴급 전체 에이전트 분석
-            if self._emergency_running:
-                return  # 이미 긴급 분석 진행 중
+            with _emergency_lock:
+                if self._emergency_running:
+                    return  # 이미 긴급 분석 진행 중
+                self._emergency_running = True
 
             self._send_brief_alert(crash)
-            self._emergency_running = True
+            # positions 스냅샷 복사 (스레드 안전 — 메인루프에서 변경될 수 있음)
+            pos_snapshot = list(positions) if positions else []
 
             def _emergency():
                 try:
-                    self._run_emergency_analysis(crash, positions or [])
+                    self._run_emergency_analysis(crash, pos_snapshot)
                 finally:
-                    self._emergency_running = False
+                    with _emergency_lock:
+                        self._emergency_running = False
 
             threading.Thread(target=_emergency, daemon=True).start()
 
