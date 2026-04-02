@@ -90,7 +90,8 @@ class CorrelationAgent(AgentBase):
 
         return data
 
-    def analyze(self, collected_data: dict, context: dict | None = None) -> AgentMessage:
+    def analyze(self, collected_data: dict, context: dict | None = None,
+                crash_context: dict | None = None) -> AgentMessage:
         """상관관계 분석 수행"""
         btc_data = collected_data.get("BTC", {})
         btc = btc_data.get("prices", []) if isinstance(btc_data, dict) else btc_data

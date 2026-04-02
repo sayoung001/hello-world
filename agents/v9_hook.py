@@ -329,7 +329,8 @@ class AgentHook:
             orch = self._get_emergency_orchestrator()
             positions = self._convert_positions(v9_positions) if v9_positions else []
 
-            consensus = orch.run(positions=positions)
+            # 급락 컨텍스트를 오케스트레이터에 전달 → 에이전트들이 원인 조사
+            consensus = orch.run(positions=positions, crash_context=crash)
             self._memory.store(consensus)
             self._shadow.log_analysis(consensus, trigger=f"긴급L{crash['level']}")
 

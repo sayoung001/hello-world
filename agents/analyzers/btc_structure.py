@@ -384,7 +384,8 @@ class BTCStructureAgent(AgentBase):
 
         return data
 
-    def analyze(self, collected_data: dict, context: dict | None = None) -> AgentMessage:
+    def analyze(self, collected_data: dict, context: dict | None = None,
+                crash_context: dict | None = None) -> AgentMessage:
         """BTC 구조 분석 수행"""
         btc_4h = collected_data.get("btc_4h", {})
         btc_1h = collected_data.get("btc_1h", {})

@@ -100,7 +100,8 @@ Market Context Layer(BTC 구조, 매크로, 상관관계, 알트 생태계)의 �
         """데이터 수집은 context로 전달받음"""
         return {}
 
-    def analyze(self, collected_data: dict, context: dict | None = None) -> AgentMessage:
+    def analyze(self, collected_data: dict, context: dict | None = None,
+                crash_context: dict | None = None) -> AgentMessage:
         """포지션별 심판 수행"""
         if not context:
             return self._build_message(

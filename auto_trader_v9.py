@@ -115,6 +115,9 @@ CONFIG = {
     "TELEGRAM_TOKEN":   os.environ.get("TELEGRAM_TOKEN_TRADER",
                         os.environ.get("TELEGRAM_TOKEN_MONITOR", "")),
     "TELEGRAM_CHAT_ID": os.environ.get("TELEGRAM_CHAT_ID", ""),
+    # Watchdog 텔레그램 (에이전트 정기분석 + 급락 알림용)
+    "TELEGRAM_TOKEN_WATCHDOG": os.environ.get("TELEGRAM_TOKEN_WATCHDOG", ""),
+    "TELEGRAM_CHAT_ID_WATCHDOG": os.environ.get("TELEGRAM_CHAT_ID_WATCHDOG", ""),
 
     # [V9-3] 22코인 (Tier1 + Tier2, ETH/APT/BCH/DOGE 제외)
     "WATCHLIST": [
@@ -139,6 +142,7 @@ CONFIG = {
     "MIN_CONFIDENCE": 70,
     "MIN_ADX": 25,
     "MIN_VOLUME_RATIO": 1.5,
+    "BREAKOUT_CLOSE_OUTSIDE": True,   # BB 밖 종가 필수 여부 (False=스퀴즈 구간 돌파만 체크)
     "FIBO_LEVEL": 2.618,
     "SL_RATIO": 1.5,
 
@@ -878,6 +882,7 @@ class ConvergenceTrader:
             'MIN_SQUEEZE_CANDLES': self.cfg["MIN_SQUEEZE_CANDLES"],
             'MIN_CONFIDENCE': self.cfg["MIN_CONFIDENCE"],
             'MIN_ADX': self.cfg["MIN_ADX"],
+            'BREAKOUT_CLOSE_OUTSIDE': self.cfg["BREAKOUT_CLOSE_OUTSIDE"],
             'TP_FIBO_LEVEL': self.cfg["FIBO_LEVEL"]})
 
         # BTC 필터
@@ -902,6 +907,16 @@ class ConvergenceTrader:
         self._alerted_orders = set()
         self._scan_fails = {}
 
+        # [V9.5] Watchdog 텔레그램 (에이전트 분석 + 급락 알림 전용)
+        wd_token = self.cfg.get("TELEGRAM_TOKEN_WATCHDOG", "")
+        wd_chat = self.cfg.get("TELEGRAM_CHAT_ID_WATCHDOG", "")
+        if wd_token and wd_chat:
+            self.tg_watchdog = Telegram(wd_token, wd_chat)
+            print("  ✅ Watchdog 텔레그램 연결됨")
+        else:
+            self.tg_watchdog = self.tg  # 미설정 시 트레이더 텔레그램 공유
+            print("  ℹ️ Watchdog 텔레그램 미설정 → 트레이더 TG 공유")
+
         # [V9.4] 멀티에이전트 시장 분석 (Shadow Mode)
         self.agent_hook = None
         if AgentHook is not None:
@@ -909,7 +924,7 @@ class ConvergenceTrader:
                 self.agent_hook = AgentHook(
                     cg_client=self.onchain,
                     btc_filter=self.btc_trend,
-                    tg=self.tg,
+                    tg=self.tg_watchdog,  # watchdog 텔레그램으로 전송
                     exchange=self.exchange,
                     shadow_mode=True,
                     analysis_interval_h=4,

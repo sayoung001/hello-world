@@ -91,12 +91,12 @@ class Orchestrator:
 
     # ── Phase 1: Context Layer ──
 
-    def run_context_layer(self) -> list[AgentMessage]:
+    def run_context_layer(self, crash_context: dict | None = None) -> list[AgentMessage]:
         """각 에이전트가 독립적으로 데이터 수집 + 분석"""
         messages: list[AgentMessage] = []
         for agent in self.context_agents:
             try:
-                msg = agent.run()
+                msg = agent.run(crash_context=crash_context)
                 messages.append(msg)
                 print(f"  ✅ {agent.agent_name} 분석 완료 (confidence: {msg.confidence:.2f})")
             except Exception as e:
@@ -112,7 +112,8 @@ class Orchestrator:
 
     # ── Phase 2a: Bull/Bear 토론 ──
 
-    def _run_bull_bear_debate(self, agent_messages: list[AgentMessage]) -> dict:
+    def _run_bull_bear_debate(self, agent_messages: list[AgentMessage],
+                              crash_context: dict | None = None) -> dict:
         """
         Bull vs Bear 토론 (AI Hedge Fund 아이디어).
         각 에이전트 분석을 보고 강세/약세 시각에서 토론.
@@ -120,15 +121,29 @@ class Orchestrator:
         # 분석 요약 생성
         summary = self._build_analysis_summary(agent_messages)
 
+        # 급락 컨텍스트가 있으면 토론에 반영
+        crash_text = ""
+        if crash_context:
+            crash_text = (
+                f"\n\n## ⚠️ 급락 상황\n"
+                f"BTC {crash_context.get('window', '')} {crash_context.get('change_pct', 0):+.2f}% 급락\n"
+                f"현재가: ${crash_context.get('current_price', 0):,.0f}\n"
+                f"20x ROE 영향: {crash_context.get('roe_impact', 0):+.1f}%\n"
+                f"청산까지: {crash_context.get('remaining_to_liq', 5.0):.2f}%\n"
+                f"이 급락 상황을 반드시 고려하여 토론하세요."
+            )
+
         try:
             import anthropic
             client = anthropic.Anthropic()
+
+            debate_input = f"에이전트 분석:\n{summary}{crash_text}"
 
             # Bull 주장
             bull_resp = client.messages.create(
                 model=DEEP_MODEL, max_tokens=500,
                 system=BULL_PROMPT,
-                messages=[{"role": "user", "content": f"에이전트 분석:\n{summary}"}]
+                messages=[{"role": "user", "content": debate_input}]
             )
             bull_argument = bull_resp.content[0].text.strip()
 
@@ -136,7 +151,7 @@ class Orchestrator:
             bear_resp = client.messages.create(
                 model=DEEP_MODEL, max_tokens=500,
                 system=BEAR_PROMPT,
-                messages=[{"role": "user", "content": f"에이전트 분석:\n{summary}"}]
+                messages=[{"role": "user", "content": debate_input}]
             )
             bear_argument = bear_resp.content[0].text.strip()
 
@@ -221,7 +236,8 @@ class Orchestrator:
 
     # ── Phase 2c: Moderator (종합) ──
 
-    def moderate(self, agent_messages: list[AgentMessage]) -> MarketConsensus:
+    def moderate(self, agent_messages: list[AgentMessage],
+                 crash_context: dict | None = None) -> MarketConsensus:
         """
         전체 모더레이션 파이프라인:
         1. 초기 regime 추정 (규칙 기반)
@@ -235,6 +251,9 @@ class Orchestrator:
 
         # 1. 초기 regime 추정
         estimated_regime = self._estimate_regime(agent_messages)
+        # 급락 시 regime을 risk-off로 강제 보정
+        if crash_context and crash_context.get("level", 0) >= 2:
+            estimated_regime = "risk-off"
         print(f"  📊 추정 regime: {estimated_regime}")
 
         # 2. 동적 가중치 적용
@@ -242,7 +261,7 @@ class Orchestrator:
 
         # 3. Bull/Bear 토론
         print("\n🐂🐻 [Phase 2a] Bull/Bear 토론")
-        debate = self._run_bull_bear_debate(agent_messages)
+        debate = self._run_bull_bear_debate(agent_messages, crash_context=crash_context)
 
         # 4. LLM 모더레이션
         try:
@@ -254,13 +273,26 @@ class Orchestrator:
                            f"🐂 Bull: {debate['bull']}\n"
                            f"🐻 Bear: {debate['bear']}")
 
+            # 급락 컨텍스트를 모더레이터에게 전달
+            crash_instruction = ""
+            if crash_context:
+                crash_instruction = (
+                    f"\n\n## ⚠️ 긴급: 급락 발생 중\n"
+                    f"BTC {crash_context.get('window', '')} {crash_context.get('change_pct', 0):+.2f}% 급락\n"
+                    f"현재가: ${crash_context.get('current_price', 0):,.0f}, "
+                    f"20x ROE 영향: {crash_context.get('roe_impact', 0):+.1f}%\n"
+                    f"청산까지: {crash_context.get('remaining_to_liq', 5.0):.2f}%\n"
+                    f"급락 원인과 향후 전망을 반드시 판단에 반영하세요. "
+                    f"20x 레버리지 생존이 최우선입니다."
+                )
+
             response = client.messages.create(
                 model=DEEP_MODEL,
                 max_tokens=1500,
                 system=MODERATOR_PROMPT,
                 messages=[{"role": "user", "content": (
                     f"에이전트 분석 (가중치 적용됨):\n{summary}"
-                    f"{debate_text}\n\n"
+                    f"{debate_text}{crash_instruction}\n\n"
                     f"위 분석과 토론을 종합하여 최종 컨센서스를 도출하세요.\n"
                     f"현재 추정 regime: {estimated_regime}"
                 )}]
@@ -370,7 +402,8 @@ class Orchestrator:
     # ── Phase 3: Position Layer ──
 
     def run_position_layer(self, consensus: MarketConsensus,
-                           positions: list[PositionInfo]) -> list[PositionVerdict]:
+                           positions: list[PositionInfo],
+                           crash_context: dict | None = None) -> list[PositionVerdict]:
         if not self.position_agent:
             print("  ⚠️ 포지션 에이전트 미등록")
             return []
@@ -408,30 +441,51 @@ class Orchestrator:
             ],
         }
 
+        # 급락 컨텍스트가 있으면 포지션 심판에 전달
+        if crash_context:
+            context["crash"] = {
+                "level": crash_context.get("level", 0),
+                "change_pct": crash_context.get("change_pct", 0),
+                "roe_impact": crash_context.get("roe_impact", 0),
+                "remaining_to_liq": crash_context.get("remaining_to_liq", 5.0),
+                "window": crash_context.get("window", ""),
+            }
+
         msg = self.position_agent.run(context=context)
         consensus.position_verdicts = msg.data.get("verdicts", [])
         return consensus.position_verdicts
 
     # ── 전체 파이프라인 ──
 
-    def run(self, positions: list[PositionInfo] | None = None) -> MarketConsensus:
+    def run(self, positions: list[PositionInfo] | None = None,
+            crash_context: dict | None = None) -> MarketConsensus:
         """
         1. Context Layer (Agent 1~6) → 각자 분석
         2. Bull/Bear 토론 + 동적 가중치 → 컨센서스
         3. Position Layer (Agent 5) → 포지션별 판결
+
+        :param positions: 현재 보유 포지션 리스트
+        :param crash_context: 급락 감지 정보 (긴급 분석 시 CrashDetector에서 전달)
         """
+        is_emergency = crash_context is not None
+        label = "🚨 긴급 멀티 에이전트 분석" if is_emergency else "🔍 멀티 에이전트 시장 분석"
+
         print(f"\n{'='*60}")
-        print(f"🔍 멀티 에이전트 시장 분석 시작")
+        print(f"{label} 시작")
+        if is_emergency:
+            print(f"  급락: BTC {crash_context.get('window', '')} "
+                  f"{crash_context.get('change_pct', 0):+.2f}% "
+                  f"(ROE {crash_context.get('roe_impact', 0):+.0f}%)")
         print(f"{'='*60}")
         start = time.time()
 
-        # 1. Context Layer
+        # 1. Context Layer (급락 컨텍스트 전달)
         print("\n📊 [Phase 1] Market Context Layer")
-        agent_messages = self.run_context_layer()
+        agent_messages = self.run_context_layer(crash_context=crash_context)
 
         # 2. Moderation (Bull/Bear + 동적 가중치 포함)
         print("\n🤝 [Phase 2] 컨센서스 도출 (Bull/Bear 토론 + 동적 가중치)")
-        consensus = self.moderate(agent_messages)
+        consensus = self.moderate(agent_messages, crash_context=crash_context)
         debate = getattr(consensus, 'debate', {})
         verdict = getattr(consensus, 'bull_bear_verdict', 'N/A')
         print(f"  → 종합 리스크: {consensus.overall_risk.value}")
@@ -439,10 +493,12 @@ class Orchestrator:
         print(f"  → BTC 편향: {consensus.btc_bias}")
         print(f"  → Bull/Bear: {verdict}")
 
-        # 3. Position Layer
-        if positions:
-            print(f"\n⚖️ [Phase 3] 포지션 심판 ({len(positions)}개)")
-            self.run_position_layer(consensus, positions)
+        # 3. Position Layer (급락 시에는 포지션 없어도 실행)
+        if positions or is_emergency:
+            n = len(positions) if positions else 0
+            print(f"\n⚖️ [Phase 3] 포지션 심판 ({n}개)")
+            if positions:
+                self.run_position_layer(consensus, positions, crash_context=crash_context)
 
         elapsed = time.time() - start
         print(f"\n✅ 분석 완료 ({elapsed:.1f}초)")

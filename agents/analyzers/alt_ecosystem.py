@@ -144,7 +144,8 @@ BTC 도미넌스, 섹터 로테이션, 알트코인 분산도를 분석합니다
 
         return data
 
-    def analyze(self, collected_data: dict, context: dict | None = None) -> AgentMessage:
+    def analyze(self, collected_data: dict, context: dict | None = None,
+                crash_context: dict | None = None) -> AgentMessage:
         """알트코인 생태계 분석"""
         coins = collected_data.get("coins", {})
         btc_data = collected_data.get("btc", {})
