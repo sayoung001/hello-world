@@ -2208,10 +2208,14 @@ class ConvergenceTrader:
                 now = time.time()
                 now_dt = datetime.now(KST)
 
-                # ── [V9.5] 실시간 급락 감지 + 정기분석 (매 루프) ──
+                # ── [V9.5] 실시간 급락 감지 + 방향 전환 감지 + 정기분석 (매 루프) ──
                 if self.agent_hook:
                     try:
                         self.agent_hook.crash_check(self.positions)
+                    except Exception:
+                        pass
+                    try:
+                        self.agent_hook.trend_check(self.positions)
                     except Exception:
                         pass
                     try:

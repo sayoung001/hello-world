@@ -45,6 +45,7 @@ from agents.output.telegram_formatter import TelegramFormatter
 from agents.memory.store import AnalysisMemory
 from agents.shadow_logger import ShadowLogger
 from agents.crash_detector import CrashDetector
+from agents.trend_reversal_detector import TrendReversalDetector
 
 KST = timezone(timedelta(hours=9))
 
@@ -94,6 +95,8 @@ class AgentHook:
         # [V9.5] 실시간 급락 감지기
         self._crash_detector = CrashDetector(exchange=exchange)
         self._emergency_running = False
+        # [V9.6] BTC 방향 전환 감지기
+        self._trend_detector = TrendReversalDetector(exchange=exchange)
 
     # ── 오케스트레이터 초기화 ──
 
@@ -261,7 +264,27 @@ class AgentHook:
 
         threading.Thread(target=_analyze, daemon=True).start()
 
-    # ── 트리거 3: 급락 감지 → 긴급 6에이전트 분석 ──
+    # ── 트리거 3a: BTC 방향 전환 감지 ──
+
+    def trend_check(self, positions: list | None = None):
+        """
+        BTC 방향 전환 감지 — v9 메인 루프에서 매 사이클(15초) 호출.
+        포지션 방향과 반대로 BTC 추세가 전환되면 텔레그램 알림.
+        """
+        if not positions:
+            return
+        try:
+            pos_snapshot = list(positions)
+            alerts = self._trend_detector.check(pos_snapshot)
+            for alert in alerts:
+                msg = TrendReversalDetector.format_alert(alert)
+                print(f"  [추세전환] {alert['symbol']} — BTC {alert['btc_trend']}")
+                if self.tg:
+                    self.tg.send(msg)
+        except Exception as e:
+            print(f"  ⚠️ 추세 감지 오류: {e}")
+
+    # ── 트리거 3b: 급락 감지 → 긴급 6에이전트 분석 ──
 
     def crash_check(self, positions: list | None = None):
         """
