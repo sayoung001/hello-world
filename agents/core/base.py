@@ -102,19 +102,22 @@ class AgentBase(ABC):
         ...
 
     @abstractmethod
-    def analyze(self, collected_data: dict, context: dict | None = None) -> AgentMessage:
+    def analyze(self, collected_data: dict, context: dict | None = None,
+                crash_context: dict | None = None) -> AgentMessage:
         """
         분석 수행 (Deep LLM 사용)
 
         :param collected_data: collect_data()의 결과
         :param context: 다른 에이전트의 분석 결과 (토론 시)
+        :param crash_context: 급락 감지 정보 (긴급 분석 시)
         """
         ...
 
-    def run(self, context: dict | None = None) -> AgentMessage:
+    def run(self, context: dict | None = None,
+            crash_context: dict | None = None) -> AgentMessage:
         """전체 파이프라인 실행: 데이터 수집 → 분석 → 메시지 생성"""
         data = self.collect_data()
-        return self.analyze(data, context)
+        return self.analyze(data, context, crash_context=crash_context)
 
     def _build_message(self, data: dict, confidence: float,
                        reasoning: str = "", warnings: list[str] | None = None) -> AgentMessage:

@@ -421,7 +421,8 @@ class MacroAgent(AgentBase):
 
         return data
 
-    def analyze(self, collected_data: dict, context: dict | None = None) -> AgentMessage:
+    def analyze(self, collected_data: dict, context: dict | None = None,
+                crash_context: dict | None = None) -> AgentMessage:
         """매크로 환경 분석"""
         fear_greed = collected_data.get("fear_greed", {})
         btc_daily = collected_data.get("btc_daily", {})
@@ -465,8 +466,19 @@ class MacroAgent(AgentBase):
                          f"7d {gold.get('change_7d', 0):+.2f}% | "
                          f"시그널: {gold_signal}")
 
-        prompt = f"""다음 데이터를 기반으로 크립토 시장의 매크로 환경을 분석하세요.
+        # 급락 컨텍스트
+        crash_section = ""
+        if crash_context:
+            crash_section = f"""
+## ⚠️ 긴급: BTC 급락 발생 중
+- BTC {crash_context.get('window', '')} 변동: {crash_context.get('change_pct', 0):+.2f}%
+- 현재가: ${crash_context.get('current_price', 0):,.0f}
+- 20x ROE 영향: {crash_context.get('roe_impact', 0):+.1f}%
+이 급락이 매크로 이벤트(FOMC, CPI, 지정학 등)와 관련 있는지 반드시 분석하세요.
+"""
 
+        prompt = f"""다음 데이터를 기반으로 크립토 시장의 매크로 환경을 분석하세요.
+{crash_section}
 ## 공포탐욕지수
 {f"값: {fgi_value:.0f}" if fgi_value else "데이터 없음"}
 

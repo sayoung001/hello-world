@@ -322,8 +322,9 @@ class NewsSentimentAgent(AgentBase):
 
         return data
 
-    def analyze(self, collected_data: dict, context: dict | None = None) -> AgentMessage:
-        """뉴스/이슈 종합 분석"""
+    def analyze(self, collected_data: dict, context: dict | None = None,
+                crash_context: dict | None = None) -> AgentMessage:
+        """뉴스/이슈 종합 분석 (급락 시 원인 조사 모드 활성화)"""
         articles = collected_data.get("articles", [])
         classified = collected_data.get("classified", {})
         impact_scores = collected_data.get("impact_scores", {})
@@ -347,8 +348,24 @@ class NewsSentimentAgent(AgentBase):
                     for item in items[:3]:
                         classified_text += f"- {item['title']}\n"
 
-            prompt = f"""다음 크립토 뉴스를 분석하여 시장 영향을 평가하세요.
+            # 급락 컨텍스트가 있으면 원인 조사 모드
+            crash_section = ""
+            if crash_context:
+                crash_section = f"""
+## ⚠️ 긴급: BTC 급락 발생 중
+- BTC {crash_context.get('window', '')} 변동: {crash_context.get('change_pct', 0):+.2f}%
+- 현재가: ${crash_context.get('current_price', 0):,.0f}
+- 기준가: ${crash_context.get('ref_price', 0):,.0f}
+- 20x ROE 영향: {crash_context.get('roe_impact', 0):+.1f}%
+- 청산까지: {crash_context.get('remaining_to_liq', 5.0):.2f}%
 
+**최우선 임무: 이 급락의 원인을 반드시 파악하세요.**
+뉴스, 지정학적 이슈, 규제, 해킹, 고래 매도 등에서 급락 트리거를 찾으세요.
+원인을 찾지 못하면 "기술적 매도 압력" 또는 "레버리지 청산 캐스케이드"로 추정하세요.
+"""
+
+            prompt = f"""다음 크립토 뉴스를 분석하여 시장 영향을 평가하세요.
+{crash_section}
 ## 최신 헤드라인 (최근 24시간)
 {chr(10).join(f'- {h}' for h in headlines[:10])}
 
@@ -364,12 +381,13 @@ class NewsSentimentAgent(AgentBase):
 - 규제 리스크: {sentiment.get('regulatory_risk', 'N/A')}
 
 ## 분석 요청
-1. 현재 시장을 지배하는 주요 서사(narrative) 식별
+1. {'이 급락의 직접적 원인/트리거 식별' if crash_context else '현재 시장을 지배하는 주요 서사(narrative) 식별'}
 2. 지정학적 이슈(전쟁, 제재, 관세)가 크립토에 미치는 영향
 3. 이미 가격에 반영된 뉴스 vs 새로운 리스크 구분
 4. 20배 레버리지 환경에서 주의할 점
+{'5. 급락이 단기 조정인지, 추세 전환의 시작인지 판단' if crash_context else ''}
 
-반드시 JSON 형식으로 출력하세요."""
+반드시 JSON 형식으로 출력하세요.{' crash_cause 필드에 급락 원인을 명시하세요.' if crash_context else ''}"""
 
             result = self.llm_json(prompt, deep=True, max_tokens=2000)
 
