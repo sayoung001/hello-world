@@ -225,13 +225,25 @@ Market Context Layer(BTC 구조, 매크로, 상관관계, 알트 생태계)의 �
             else:
                 risk, action = "SAFE", "hold"
 
+            # 신뢰도: 데이터 충실도 기반 (PNL, 청산거리, 홀딩시간이 유효할수록 높음)
+            data_quality = 0.4  # 기본 (규칙 기반)
+            if p.get("pnl_pct", 0) != 0:
+                data_quality += 0.15  # 실시간 PNL 있음
+            if p.get("liquidation_distance_pct", 5.0) != 5.0:
+                data_quality += 0.15  # 청산거리 유효
+            if p.get("hold_candles", 0) > 0:
+                data_quality += 0.1   # 홀딩시간 유효
+            # 극단 스코어일수록 판단 확신 높음
+            extremity = abs(score - 50) / 50  # 0~1 (50에서 멀수록 확신)
+            conf = min(data_quality + extremity * 0.2, 0.95)
+
             verdicts.append({
                 "symbol": p["symbol"],
                 "direction": p["direction"],
                 "risk_level": risk,
                 "risk_score": score,
                 "action": action,
-                "confidence": 0.5 + (score / 200),  # 위험할수록 확신
+                "confidence": round(conf, 2),
                 "hold_recommendation": hold_rec,
                 "sl_tp_adjustment": sl_tp,
                 "reasoning": self._format_reasoning(p, score, mkt_risk, btc_bias),

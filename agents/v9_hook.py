@@ -143,8 +143,18 @@ class AgentHook:
         result = []
         for pos in v9_positions:
             try:
-                current = getattr(pos, "current_price", 0) or getattr(pos, "last_price", 0)
                 entry = pos.entry_price
+
+                # 현재가: exchange에서 실시간 조회 (Position 객체에는 current_price 없음)
+                current = 0.0
+                try:
+                    if self.exchange:
+                        ticker = self.exchange.fetch_ticker(pos.symbol)
+                        current = float(ticker.get("last", 0))
+                except Exception:
+                    pass
+                if not current:
+                    current = getattr(pos, "current_price", 0) or getattr(pos, "last_price", 0)
 
                 if current and entry:
                     if pos.direction == "long":
