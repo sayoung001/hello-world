@@ -28,6 +28,24 @@ ACTION_EMOJI = {
 }
 
 
+def _split_message(text: str, max_len: int = 4000) -> list[str]:
+    """텔레그램 메시지 분할 — 줄바꿈 기준으로 잘라 문장 중간 잘림 방지"""
+    if len(text) <= max_len:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= max_len:
+            chunks.append(text)
+            break
+        # max_len 이내에서 마지막 줄바꿈 찾기
+        cut = text.rfind("\n", 0, max_len)
+        if cut <= 0:
+            cut = max_len  # 줄바꿈 없으면 그냥 자르기
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    return chunks
+
+
 def _format_hold(hold_rec) -> str:
     """hold_recommendation dict → 읽기 쉬운 문자열"""
     if not hold_rec or not isinstance(hold_rec, dict):
@@ -85,7 +103,7 @@ class TelegramFormatter:
             for msg in consensus.agent_messages:
                 agent_text += (
                     f"\n🤖 {msg.agent_name} (신뢰도: {msg.confidence:.0%})\n"
-                    f"  {msg.reasoning[:150]}\n"
+                    f"  {msg.reasoning[:300]}\n"
                 )
                 if msg.warnings:
                     for w in msg.warnings[:2]:
@@ -104,7 +122,7 @@ class TelegramFormatter:
                     f"  리스크: {risk_str} | 액션: {action_str}\n"
                     f"  신뢰도: {v.get('confidence', 0):.0%} | "
                     f"홀딩: {_format_hold(v.get('hold_recommendation'))}\n"
-                    f"  사유: {v.get('reasoning', '')[:100]}\n"
+                    f"  사유: {v.get('reasoning', '')[:200]}\n"
                 )
             messages.append(pos_text)
 
@@ -253,9 +271,9 @@ class TelegramFormatter:
             bull_arg = debate.get('bull', '')
             bear_arg = debate.get('bear', '')
             if bull_arg:
-                lines.append(f"  🐂 Bull: {bull_arg[:120]}")
+                lines.append(f"  🐂 Bull: {bull_arg[:250]}")
             if bear_arg:
-                lines.append(f"  🐻 Bear: {bear_arg[:120]}")
+                lines.append(f"  🐻 Bear: {bear_arg[:250]}")
             if verdict:
                 verdict_label = {"bull_win": "강세론 우세", "bear_win": "약세론 우세", "draw": "팽팽"}
                 lines.append(f"  → 토론 결과: {verdict_label.get(verdict, verdict)}")
@@ -298,7 +316,7 @@ class TelegramFormatter:
 
                 reasoning = v.get("reasoning", "")
                 if reasoning:
-                    pos_lines.append(f"  근거: {reasoning[:120]}")
+                    pos_lines.append(f"  근거: {reasoning[:200]}")
 
                 # SL/TP 조정 권고
                 sl_tp = v.get("sl_tp_adjustment", {})
@@ -340,8 +358,8 @@ class TelegramFormatter:
         messages = self.format_consensus(consensus)
         success = True
         for msg in messages:
-            # 4000자 분할
-            chunks = [msg[i:i+4000] for i in range(0, len(msg), 4000)]
+            # 4000자 분할 (줄바꿈 기준으로 잘라 문장 중간 잘림 방지)
+            chunks = _split_message(msg, 4000)
             for chunk in chunks:
                 try:
                     url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
