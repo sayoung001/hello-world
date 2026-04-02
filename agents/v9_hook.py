@@ -225,24 +225,23 @@ class AgentHook:
 
     # ── 트리거 2: 정기 분석 (4h) ──
 
-    def periodic_check(self, positions: list):
-        """주기적 분석 (4시간마다)"""
+    def periodic_check(self, positions: list | None = None):
+        """주기적 분석 (4시간마다) — 포지션 없어도 시장 상황 분석"""
         now = time.time()
         if now - self._last_analysis_time < self.analysis_interval:
             return
         self._last_analysis_time = now
 
-        if not positions:
-            return
+        pos_snapshot = list(positions) if positions else []
 
         def _analyze():
             try:
-                pos_infos = self._convert_positions(positions)
+                pos_infos = self._convert_positions(pos_snapshot)
                 orch = self._get_orchestrator()
                 consensus = orch.run(positions=pos_infos)
                 self._memory.store(consensus)
                 self._shadow.log_analysis(consensus, trigger="정기분석")
-                for pos in positions:
+                for pos in pos_snapshot:
                     sym = getattr(pos, "symbol", "")
                     if sym:
                         self._position_analysis_ts[sym] = consensus.timestamp

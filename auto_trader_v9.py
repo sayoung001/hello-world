@@ -1250,13 +1250,6 @@ class ConvergenceTrader:
     # ── 포지션 관리 ──
 
     def manage_positions(self):
-        # [V9.4] 에이전트 정기 분석 (4시간마다, 내부에서 시간 체크)
-        if self.agent_hook:
-            try:
-                self.agent_hook.periodic_check(self.positions)
-            except Exception:
-                pass
-
         closed = []
         for pos in self.positions:
             price = self.executor.price(pos.symbol)
@@ -2216,10 +2209,14 @@ class ConvergenceTrader:
                 now = time.time()
                 now_dt = datetime.now(KST)
 
-                # ── [V9.5] 실시간 급락 감지 (매 루프) ──
+                # ── [V9.5] 실시간 급락 감지 + 정기분석 (매 루프) ──
                 if self.agent_hook:
                     try:
                         self.agent_hook.crash_check(self.positions)
+                    except Exception:
+                        pass
+                    try:
+                        self.agent_hook.periodic_check(self.positions)
                     except Exception:
                         pass
 
