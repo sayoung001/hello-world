@@ -99,32 +99,46 @@ class TelegramFormatter:
 
         # === 에이전트별 분석 요약 ===
         if consensus.agent_messages:
-            agent_text = f"\n{'─'*30}\n📋 에이전트별 분석\n{'─'*30}\n"
             for msg in consensus.agent_messages:
-                agent_text += (
+                agent_block = (
+                    f"\n{'─'*30}\n📋 에이전트별 분석\n{'─'*30}\n"
                     f"\n🤖 {msg.agent_name} (신뢰도: {msg.confidence:.0%})\n"
-                    f"  {msg.reasoning[:300]}\n"
+                    f"  {msg.reasoning}\n"
                 )
                 if msg.warnings:
-                    for w in msg.warnings[:2]:
-                        agent_text += f"  ⚠️ {w}\n"
-            messages.append(agent_text)
+                    for w in msg.warnings[:3]:
+                        agent_block += f"  ⚠️ {w}\n"
+                messages.append(agent_block)
 
-        # === 포지션별 판결 ===
+        # === 포지션별 판결 (각 포지션 별도 메시지) ===
         if consensus.position_verdicts:
-            pos_text = f"\n{'─'*30}\n⚖️ 포지션 판결\n{'─'*30}\n"
+            pos_header = f"\n{'─'*30}\n⚖️ 포지션 판결\n{'─'*30}\n"
+            pos_blocks = []
             for v in consensus.position_verdicts:
                 risk_str = v.get("risk_level", "N/A")
                 action_str = ACTION_EMOJI.get(v.get("action", ""), v.get("action", ""))
-                pos_text += (
+                block = (
                     f"\n{'🟢' if risk_str == 'SAFE' else '🟡' if risk_str == 'CAUTION' else '🔴'} "
                     f"{v.get('symbol', '?')} ({v.get('direction', '?')})\n"
                     f"  리스크: {risk_str} | 액션: {action_str}\n"
                     f"  신뢰도: {v.get('confidence', 0):.0%} | "
                     f"홀딩: {_format_hold(v.get('hold_recommendation'))}\n"
-                    f"  사유: {v.get('reasoning', '')[:200]}\n"
+                    f"  사유: {v.get('reasoning', '')}\n"
                 )
-            messages.append(pos_text)
+                dissent = v.get("dissent", "")
+                if dissent:
+                    block += f"  💬 반대의견: {dissent}\n"
+                pos_blocks.append(block)
+
+            # 포지션 수에 따라 분할
+            current_msg = pos_header
+            for block in pos_blocks:
+                if len(current_msg) + len(block) > 3500:
+                    messages.append(current_msg)
+                    current_msg = f"⚖️ 포지션 판결 (계속)\n"
+                current_msg += block
+            if current_msg.strip():
+                messages.append(current_msg)
 
         return messages
 
@@ -271,9 +285,9 @@ class TelegramFormatter:
             bull_arg = debate.get('bull', '')
             bear_arg = debate.get('bear', '')
             if bull_arg:
-                lines.append(f"  🐂 Bull: {bull_arg[:250]}")
+                lines.append(f"  🐂 Bull: {bull_arg}")
             if bear_arg:
-                lines.append(f"  🐻 Bear: {bear_arg[:250]}")
+                lines.append(f"  🐻 Bear: {bear_arg}")
             if verdict:
                 verdict_label = {"bull_win": "강세론 우세", "bear_win": "약세론 우세", "draw": "팽팽"}
                 lines.append(f"  → 토론 결과: {verdict_label.get(verdict, verdict)}")
@@ -316,7 +330,7 @@ class TelegramFormatter:
 
                 reasoning = v.get("reasoning", "")
                 if reasoning:
-                    pos_lines.append(f"  근거: {reasoning[:200]}")
+                    pos_lines.append(f"  근거: {reasoning}")
 
                 # SL/TP 조정 권고
                 sl_tp = v.get("sl_tp_adjustment", {})
@@ -336,7 +350,7 @@ class TelegramFormatter:
 
                 dissent = v.get("dissent", "")
                 if dissent:
-                    pos_lines.append(f"  💬 반대의견: {dissent[:80]}")
+                    pos_lines.append(f"  💬 반대의견: {dissent}")
 
             pos_lines.append(f"{'━'*30}")
             messages.append("\n".join(pos_lines))
