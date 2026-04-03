@@ -20,10 +20,10 @@ KST = timezone(timedelta(hours=9))
 class CoinGlassClient:
     BASE_URL = "https://open-api-v4.coinglass.com/api"
     
-    def __init__(self, api_key: str, rate_limit: int = 75):
+    def __init__(self, api_key: str, rate_limit: int = 30):
         """
         :param api_key: CoinGlass API 키
-        :param rate_limit: 분당 최대 호출 수 (Startup=80, 안전마진 두고 75)
+        :param rate_limit: 분당 최대 호출 수 (v9+semi 동시 실행 고려하여 30으로 축소)
         """
         self.api_key = api_key
         self.rate_limit = rate_limit
@@ -77,10 +77,23 @@ class CoinGlassClient:
         url = f"{self.BASE_URL}{endpoint}"
         try:
             res = requests.get(url, headers=self.headers, params=params, timeout=10)
+
+            # 429 Too Many Requests → 60초 대기 후 재시도 1회
+            if res.status_code == 429:
+                print(f"⏳ CoinGlass 429 → 60초 대기 후 재시도: {endpoint}")
+                time.sleep(60)
+                res = requests.get(url, headers=self.headers, params=params, timeout=10)
+
             data = res.json()
-            
+
             if str(data.get('code')) != '0':
-                print(f"⚠️ CoinGlass API 오류: {endpoint} → {data.get('msg', 'Unknown')}")
+                msg = data.get('msg', 'Unknown')
+                # Too Many Requests는 반복 출력 방지 (캐시에 None 저장)
+                if 'Too Many' in str(msg):
+                    if ttl > 0:
+                        self._cache[cache_key] = (time.time(), None)
+                else:
+                    print(f"⚠️ CoinGlass API 오류: {endpoint} → {msg}")
                 return None
             
             result = data.get('data')
