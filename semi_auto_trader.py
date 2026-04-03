@@ -869,6 +869,7 @@ class ConvergenceTrader:
                     tg=tg_watchdog,
                     exchange=self.exchange,
                     shadow_mode=True,
+                    analysis_interval_h=4,
                 )
                 print("  ✅ 에이전트 시스템 초기화 (Shadow Mode)")
             except Exception as e:

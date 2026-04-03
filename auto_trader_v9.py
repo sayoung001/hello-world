@@ -1891,13 +1891,49 @@ class ConvergenceTrader:
 
     # ── 런타임 거래소 동기화 (핵심!) ──
 
+    def _calc_smart_sl_tp(self, symbol: str, direction: str, entry: float) -> tuple:
+        """
+        수동 포지션 SL/TP 계산 — 기존 포지션의 평균 비율 참고.
+        기존 포지션이 없으면 ATR 기반 기본값 사용.
+        """
+        # 기존 포지션들의 SL/TP 비율 수집
+        sl_ratios = []
+        tp_ratios = []
+        for p in self.positions:
+            if p.entry_price > 0 and p.stop_loss > 0:
+                sl_dist = abs(p.entry_price - p.stop_loss) / p.entry_price
+                sl_ratios.append(sl_dist)
+            if p.entry_price > 0 and p.take_profit > 0:
+                tp_dist = abs(p.take_profit - p.entry_price) / p.entry_price
+                tp_ratios.append(tp_dist)
+
+        # 평균 비율 사용, 없으면 기본값
+        if sl_ratios:
+            avg_sl = sum(sl_ratios) / len(sl_ratios)
+        else:
+            avg_sl = 0.02 * self.cfg.get("SL_RATIO", 1.5)  # ~3%
+
+        if tp_ratios:
+            avg_tp = sum(tp_ratios) / len(tp_ratios)
+        else:
+            avg_tp = 0.05  # 5%
+
+        if direction == "long":
+            sl = entry * (1 - avg_sl)
+            tp = entry * (1 + avg_tp)
+        else:
+            sl = entry * (1 + avg_sl)
+            tp = entry * (1 - avg_tp)
+
+        return round(sl, 8), round(tp, 8)
+
     def runtime_sync(self):
         """
         5분마다 거래소 실제 포지션과 비교.
         거래소 SL/TP가 자동 체결되면 봇이 모르는 문제를 해결.
         봇에는 있는데 거래소에 없으면 → "거래소에서 청산됨" 처리.
         """
-        if self.cfg["PAPER_TRADE"] or not self.positions:
+        if self.cfg["PAPER_TRADE"]:
             return
 
         try:
@@ -1968,6 +2004,76 @@ class ConvergenceTrader:
             if removed:
                 self._save_positions()
                 print(f"  런타임 동기화: {len(removed)}개 포지션 거래소 청산 감지")
+
+            # ── 거래소에 있는데 봇에 없음 → 수동 포지션 감지 ──
+            bot_keys_now = {f"{self._norm_sym(p.symbol)}_{p.direction}" for p in self.positions}
+            for key, ex_info in ex_active.items():
+                if key in bot_keys_now:
+                    continue
+                sym = ex_info['sym']; side = ex_info['side']
+                contracts = ex_info['contracts']
+                ep = ex_info['entry_price']
+                if ep <= 0:
+                    continue
+
+                # 기존 포지션 SL/TP 비율 참고
+                sl_p, tp_p = self._calc_smart_sl_tp(sym, side, ep)
+
+                # SL/TP 주문 이미 있는지 확인
+                has_sl, has_tp = False, False
+                try:
+                    orders = self.executor._get_open_orders_raw(sym)
+                    for oo in (orders or []):
+                        sp = float(oo.get('stopPrice', 0))
+                        if sp <= 0:
+                            continue
+                        otype = str(oo.get('type', oo.get('origType', ''))).upper()
+                        if 'STOP' in otype and 'PROFIT' not in otype:
+                            has_sl = True; sl_p = sp
+                        elif 'PROFIT' in otype:
+                            has_tp = True; tp_p = sp
+                except Exception:
+                    pass
+
+                lock_dist = abs(tp_p - ep) * (self.cfg["LOCK_FIBO"] / 8.0)
+                lock_roe = lock_dist / ep * 100 if self.cfg["LOCK_FIBO"] > 0 else 0
+
+                pos = Position(
+                    symbol=sym, direction=side,
+                    entry_price=ep, quantity=contracts,
+                    stop_loss=sl_p, take_profit=tp_p,
+                    atr=ep * 0.01, entry_time=datetime.now(KST).isoformat(),
+                    confidence=0, reasons=['수동진입'],
+                    original_sl=sl_p, lock_trigger_roe=lock_roe,
+                    profile=self.profile_name)
+                self.positions.append(pos)
+                self._save_positions()
+
+                # SL/TP 주문 없으면 설정
+                if not has_sl or not has_tp:
+                    try:
+                        ps = 'LONG' if side == 'long' else 'SHORT'
+                        self.executor._place_sl_tp(sym, side, contracts, sl_p, tp_p, ps)
+                    except Exception as e:
+                        print(f"  ⚠️ 수동포지션 SL/TP 설정 실패: {e}")
+
+                sl_dist = abs(ep - sl_p) / ep * 100
+                tp_dist = abs(tp_p - ep) / ep * 100
+                self.tg.send(
+                    f"👤 수동 포지션 감지!\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"{side.upper()} {sym}\n"
+                    f"진입: {ep:,.6f} | 수량: {contracts}\n"
+                    f"{'🆕 ' if not has_sl else ''}SL: {sl_p:,.6f} ({sl_dist:.1f}%)\n"
+                    f"{'🆕 ' if not has_tp else ''}TP: {tp_p:,.6f} ({tp_dist:.1f}%)\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"에이전트 분석에 포함됩니다")
+
+                if self.agent_hook:
+                    try:
+                        self.agent_hook.on_position_open(pos, {})
+                    except Exception:
+                        pass
 
         except Exception as e:
             print(f"  런타임 동기화 실패: {e}")
@@ -2260,8 +2366,8 @@ class ConvergenceTrader:
                     self.verify_all_orders()
                     last_verify = now
 
-                # ── 거래소 동기화 (5분마다) — SL/TP 자동 청산 감지 ──
-                if now - last_sync >= 300 and self.positions:
+                # ── 거래소 동기화 (5분마다) — SL/TP 자동 청산 + 수동 포지션 감지 ──
+                if now - last_sync >= 300:
                     self.runtime_sync()
                     last_sync = now
 
