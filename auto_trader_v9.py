@@ -1896,10 +1896,12 @@ class ConvergenceTrader:
         수동 포지션 SL/TP 계산 — 기존 포지션의 평균 비율 참고.
         기존 포지션이 없으면 ATR 기반 기본값 사용.
         """
-        # 기존 포지션들의 SL/TP 비율 수집
+        # 기존 봇 포지션들의 SL/TP 비율 수집 (수동진입/복구 제외)
         sl_ratios = []
         tp_ratios = []
         for p in self.positions:
+            if '수동진입' in (p.reasons or []) or '복구' in (p.reasons or []):
+                continue
             if p.entry_price > 0 and p.stop_loss > 0:
                 sl_dist = abs(p.entry_price - p.stop_loss) / p.entry_price
                 sl_ratios.append(sl_dist)
@@ -1925,6 +1927,9 @@ class ConvergenceTrader:
             sl = entry * (1 + avg_sl)
             tp = entry * (1 - avg_tp)
 
+        print(f"  [Smart SL/TP] {symbol} {direction} 진입:{entry:.6f}")
+        print(f"    참고 포지션: {len(sl_ratios)}개 | SL:{avg_sl*100:.2f}% TP:{avg_tp*100:.2f}%")
+        print(f"    → SL:{sl:.6f} TP:{tp:.6f}")
         return round(sl, 8), round(tp, 8)
 
     def runtime_sync(self):
@@ -2056,13 +2061,29 @@ class ConvergenceTrader:
                 self.positions.append(pos)
                 self._save_positions()
 
-                # SL/TP 주문 없으면 설정
-                if not has_sl or not has_tp:
+                # SL/TP 주문 없는 것만 개별 설정 (기존 주문 보호)
+                ps = 'LONG' if side == 'long' else 'SHORT'
+                sl_side = 'sell' if side == 'long' else 'buy'
+                if not has_sl:
                     try:
-                        ps = 'LONG' if side == 'long' else 'SHORT'
-                        self.executor._place_sl_tp(sym, side, contracts, sl_p, tp_p, ps)
+                        sl_rounded = self.executor.rnd_price(sym, sl_p)
+                        self.executor.ex.create_order(
+                            sym, "STOP_MARKET", sl_side, contracts,
+                            params={"stopPrice": sl_rounded, "positionSide": ps,
+                                    "closePosition": True, "priceProtect": "TRUE"})
+                        print(f"  ✅ 수동포지션 SL 설정: {sym} @ {sl_rounded}")
                     except Exception as e:
-                        print(f"  ⚠️ 수동포지션 SL/TP 설정 실패: {e}")
+                        print(f"  ⚠️ 수동포지션 SL 설정 실패: {e}")
+                if not has_tp:
+                    try:
+                        tp_rounded = self.executor.rnd_price(sym, tp_p)
+                        self.executor.ex.create_order(
+                            sym, "TAKE_PROFIT_MARKET", sl_side, contracts,
+                            params={"stopPrice": tp_rounded, "positionSide": ps,
+                                    "closePosition": True, "priceProtect": "TRUE"})
+                        print(f"  ✅ 수동포지션 TP 설정: {sym} @ {tp_rounded}")
+                    except Exception as e:
+                        print(f"  ⚠️ 수동포지션 TP 설정 실패: {e}")
 
                 sl_dist = abs(ep - sl_p) / ep * 100
                 tp_dist = abs(tp_p - ep) / ep * 100
