@@ -1940,12 +1940,19 @@ class ConvergenceTrader:
             ex_positions = self.exchange.fetch_positions()
             # 거래소 활성 포지션 키 수집
             ex_keys = set()
+            ex_active = {}
             for p in ex_positions:
                 contracts = abs(float(p.get('contracts', 0)))
                 if contracts <= 0: continue
                 sym = self._norm_sym(p.get('symbol', ''))
                 side = p.get('side', '').lower()
-                ex_keys.add(f"{sym}_{side}")
+                key = f"{sym}_{side}"
+                ex_keys.add(key)
+                ex_active[key] = {
+                    'sym': sym, 'side': side,
+                    'entry_price': float(p.get('entryPrice', 0)),
+                    'contracts': contracts,
+                }
 
             # 봇 포지션 중 거래소에 없는 것 찾기
             removed = []
