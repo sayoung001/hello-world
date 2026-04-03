@@ -143,9 +143,16 @@ class TrendReversalDetector:
             if not adverse:
                 continue
 
-            # 진입가 대비 현재 변화
+            # 진입가 대비 현재 변화 — 해당 코인의 현재가 조회
             entry = getattr(pos, "entry_price", 0)
-            current_price = closes[-1]
+            current_price = 0
+            try:
+                if self.exchange:
+                    ticker = self.exchange.fetch_ticker(symbol)
+                    current_price = float(ticker.get("last", 0))
+            except Exception:
+                pass
+
             if entry and current_price:
                 if direction == "long":
                     change_pct = (current_price - entry) / entry * 100
