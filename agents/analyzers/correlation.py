@@ -175,8 +175,8 @@ class CorrelationAgent(AgentBase):
             "btc_eth_ratio_trend": "stable",
             "pair_correlations": {},
             "alt_synchronization": 0.5,
-            "risk_level": "CAUTION",
-            "confidence": 0.4,
+            "risk_level": "SAFE",
+            "confidence": 0.3,
             "reasoning": "데이터 기반 상관관계 계산",
         }
 

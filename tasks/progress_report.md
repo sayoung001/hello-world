@@ -1,4 +1,4 @@
-# Phase A + B 구현 진행 보고서
+# Phase A + B + C 구현 진행 보고서
 
 > 작성일: 2026-04-16
 > 작성자: Claude Code
@@ -254,15 +254,179 @@ transformers==5.5.4      # Phase A: 임베딩 백엔드
 
 ---
 
-## 다음 단계 (Phase C: 적응형 메모리)
+## Phase C: 적응형 메모리 시스템 (완료)
 
-1. `memory/trading_brain.py` — 규칙 저장소 + 감쇠 엔진
-2. `memory/reflection_engine.py` — 거래 결과 → LLM 분석 → 규칙 생성
-3. `memory/rule_store.py` — 규칙 CRUD + ChromaDB 연동
-4. `memory/decay_engine.py` — 시간 감쇠 + 성과 기반 가중치 조정
+### 5. 메모리 모듈 (`agents/memory/`)
+
+| 파일 | 역할 | 상태 |
+|------|------|------|
+| `agents/memory/__init__.py` | 모듈 패키지 초기화 (모듈 설명 포함) | 완료 |
+| `agents/memory/rule_store.py` | 트레이딩 규칙 CRUD + JSON 영속 + ChromaDB 벡터 검색 (선택) | 완료 |
+| `agents/memory/decay_engine.py` | 시간 감쇠 (70일 반감기) + 성과 기반 가중치 조정 | 완료 |
+| `agents/memory/trading_brain.py` | 규칙 조회/자문 + 코인별·패턴별 승률 추적 | 완료 |
+| `agents/memory/reflection_engine.py` | 거래 종료 → LLM/규칙 기반 분석 → 규칙 자동 생성 | 완료 |
+
+### 각 모듈 설계
+
+#### RuleStore (규칙 저장소)
+- `TradingRule`: rule_id, condition, action, confidence, weight, hits/misses, active
+- 이중 저장: 메모리 dict (빠른 접근) + JSON 파일 (영속성)
+- ChromaDB 연동 선택적 (시맨틱 벡터 기반 유사 규칙 검색)
+- CRUD: add, get, update, record_hit, record_miss, deactivate
+- 검색: `search_by_condition()` — ChromaDB 시맨틱 검색 / 텍스트 매칭 폴백
+
+#### DecayEngine (감쇠 엔진)
+- 시간 감쇠: `weight = base × exp(-λ × days)`, λ=0.01 (70일 반감기)
+- 성과 조정: `weight × (적중률 / 0.5)`, 클램프 [0.5, 1.5]
+- 비활성화: weight < 0.1 → `active=False`
+- 최소 샘플 5건 이상일 때만 성과 조정 적용
+- `decay_all()`: 24시간 주기 일괄 실행 권장
+
+#### TradingBrain (트레이딩 브레인)
+- `consult(signal, market_state)`: 규칙 검색 → 자문 생성
+- 출력: applicable_rules, coin_winrate, pattern_winrate, brain_confidence, advice
+- 코인별 승률 추적: `_coin_stats[symbol]` (wins/losses/total_roe)
+- 패턴별 승률 추적: `_pattern_stats[gap_bin]` (GAP 구간별)
+- 종합 신뢰도: 규칙 평균 + 코인 승률 + 패턴 승률 반영
+- `run_maintenance()`: 24시간 주기 감쇠 적용
+
+#### ReflectionEngine (반성 엔진)
+- `reflect(trade_record)`: 거래 종료 후 자동 분석
+- LLM 모드: Claude Haiku로 교훈 도출 → JSON 파싱 → 규칙 생성
+- 규칙 기반 폴백 (LLM 없을 때): 5가지 패턴 매칭
+  - 패턴 1: SL 히트 + 방향 정확 → SL 확대 권장
+  - 패턴 2: 빠른 TP (20캔들 이내) → 트레일링 고려
+  - 패턴 3: 장기 횡보 타임아웃 → 기록만
+  - 패턴 4: BTC 고위험 + 큰 손실 → 포지션 축소
+  - 패턴 5: 일반 수익/손실 → 기록만
+
+### 메모리 시스템 아키텍처
+```
+거래 종료 이벤트
+  → ReflectionEngine.reflect(trade) → 교훈 도출 + 규칙 생성
+  → RuleStore.add() → JSON 파일 저장 (+ ChromaDB 벡터)
+
+시그널 발생
+  → TradingBrain.consult(signal) → RuleStore.search_by_condition()
+  → applicable_rules + coin_winrate + pattern_winrate
+  → brain_confidence + advice 텍스트
+
+24시간 주기
+  → TradingBrain.run_maintenance() → DecayEngine.decay_all()
+  → 오래된 규칙 가중치 감쇠 + 성과 미달 규칙 비활성화
+```
+
+---
+
+## 에이전트 위험 편향 수정
+
+### 발견된 문제
+사용자 보고: "에이전트가 항상 위험하다고 판단하는 것 같다"
+
+### 원인 분석 (6개 구조적 편향)
+
+| 파일 | 편향 유형 | 수정 내용 |
+|------|----------|----------|
+| `agents/core/orchestrator.py` | 시스템 프롬프트 Bear 편향 | "Bear의 우려가 구체적이면 보수적 판단" → "양측 근거 공정 평가 (Bear 편향 주의)" |
+| `agents/core/orchestrator.py` | 기본값 CAUTION | `overall_risk` 기본값 "CAUTION" → "SAFE" |
+| `agents/core/orchestrator.py` | DANGER 임계값 너무 낮음 | danger_pct ≥ 0.30 → ≥ 0.45, danger+caution ≥ 0.40 → ≥ 0.55 |
+| `agents/core/orchestrator.py` | risk-off 판단 너무 쉬움 | danger_count ≥ 2 → ≥ 3, bearish ≥ 3 → ≥ 4, safe 비율 0.6 → 0.4 |
+| `agents/analyzers/news_sentiment.py` | 부정 뉴스 1.2배 가중 | `neg_score × 1.2` → `neg_score × 1.0` (동등 가중) |
+| `agents/analyzers/correlation.py` | 데이터 부족 시 CAUTION | 기본 risk_level "CAUTION" → "SAFE", confidence 0.4 → 0.3 |
+| `agents/analyzers/position_judge.py` | DANGER 신뢰도 부풀림 | DANGER confidence 0.85 → 0.75 (SAFE와 동등화) |
+
+---
+
+## Phase C 테스트 결과
+
+### Phase C 테스트 (tests/test_phase_c.py)
+
+실행 일시: 2026-04-16
+
+**총 50건: PASS 50, FAIL 0**
+
+LLM 없이 규칙 기반 폴백으로 전체 로직 검증.
+
+| 카테고리 | PASS | 주요 검증 항목 |
+|----------|------|----------------|
+| TradingRule | 6 | 생성, hit_rate, effective_confidence, sample_size, to_text, 직렬화 |
+| RuleStore | 10 | 초기화, add, get, update, hit/miss, deactivate, active_rules, search, stats, 영속성 |
+| DecayEngine | 10 | 초기화, should_run, 30일 감쇠, 70일 반감기, 적중률 보너스/패널티, 일괄 감쇠, 비활성화, preview |
+| TradingBrain | 10 | 초기화, consult keys/rules/confidence, 시장 상태, 승률 업데이트, stats, top_coins, maintenance |
+| ReflectionEngine | 10 | 초기화, SL 히트/규칙 생성, 빠른 TP, 타임아웃, BTC 위험/규칙, 일반 수익, stats, store 반영 |
+| 통합 테스트 | 4 | 반성→규칙 생성, 자문 반영, 승률 업데이트, store 공유 |
+
+### Phase C 상세 테스트 결과
+
+| 테스트 | 결과 | 세부사항 |
+|--------|------|----------|
+| rule_create | PASS | id=test001, conf=0.7 |
+| rule_hit_rate | PASS | hit_rate=0.80 (8/10) |
+| rule_effective_conf | PASS | effective=0.630 (0.7×0.9) |
+| rule_sample_size | PASS | sample_size=10 |
+| rule_to_text | PASS | "조건: ETH 수렴 후 롱..." |
+| rule_serialization | PASS | roundtrip OK, keys=11 |
+| store_init | PASS | empty store, count=0 |
+| store_add | PASS | added 2 rules, count=2 |
+| store_get | PASS | fetched rule OK |
+| store_update | PASS | conf=0.8, weight=0.95 |
+| store_hit_miss | PASS | hits=2, misses=1 |
+| store_deactivate | PASS | active=False |
+| store_active_rules | PASS | active=1, total=2 |
+| store_search | PASS | 텍스트 매칭 검색 정상 |
+| store_stats | PASS | total=2, active=1 |
+| store_persistence | PASS | reloaded count=2 |
+| decay_init | PASS | lambda=0.01 |
+| decay_should_run | PASS | 첫 실행 → True |
+| decay_30days | PASS | 30일: 0.7408 |
+| decay_70days_halflife | PASS | 70일: 0.4966 < 0.55 |
+| decay_perf_boost | PASS | 적중률 80% → 1.4851 > 0.9900 |
+| decay_perf_penalty | PASS | 적중률 10% → 0.4950 < 0.9900 |
+| decay_all_run | PASS | decayed=0, deactivated=1 |
+| decay_deactivate_old | PASS | 300일 규칙: active=False, weight=0.0498 |
+| decay_should_not_run | PASS | 방금 실행 → False |
+| decay_preview | PASS | preview 동작 확인 |
+| brain_init | PASS | rule_store + decay_engine 초기화 |
+| brain_consult_keys | PASS | 5개 키 반환 |
+| brain_consult_rules | PASS | applicable_rules=1 |
+| brain_consult_confidence | PASS | brain_confidence=0.54 |
+| brain_consult_market | PASS | 시장 상태 포함 자문 |
+| brain_winrate_updated | PASS | ETH winrate=0.6667 (2W/1L) |
+| brain_pattern_winrate | PASS | pattern_winrate=0.6667 |
+| brain_stats | PASS | coins=2, rules=2 |
+| brain_top_coins | PASS | [ETHUSDT, BTCUSDT] |
+| brain_maintenance | PASS | 감쇠 실행 |
+| reflection_init | PASS | rule_store 연결 |
+| reflection_sl_hit | PASS | "방향은 맞았으나 SL이 너무 타이트" |
+| reflection_sl_rule_created | PASS | 1개 규칙 자동 생성 |
+| reflection_fast_tp | PASS | "빠른 목표 도달" |
+| reflection_timeout | PASS | "장기 횡보 후 타임아웃" |
+| reflection_btc_danger | PASS | "BTC 레벨 5에서 큰 손실" |
+| reflection_btc_rule | PASS | 1개 규칙 자동 생성 |
+| reflection_normal_win | PASS | "정상 수익 거래" |
+| reflection_stats | PASS | reflections=5, rules=3 |
+| reflection_store_populated | PASS | store에 3개 규칙 생성됨 |
+| integ_reflect | PASS | 반성 → 1개 규칙 생성 |
+| integ_consult_after_reflect | PASS | 반성 규칙이 자문에 반영됨 |
+| integ_winrate_reflect | PASS | 손실 기록 → winrate=0.0000 |
+| integ_shared_store | PASS | brain과 reflection이 같은 store 공유 |
+
+---
+
+## 누적 테스트 요약
+
+| Phase | 총 | PASS | FAIL | 비고 |
+|-------|-----|------|------|------|
+| A (RAG + Vision) | 28 | 25 | 3 | HuggingFace 네트워크 차단 (GCE 정상 예상) |
+| B (리스크 에이전트) | 48 | 48 | 0 | |
+| C (적응형 메모리) | 50 | 50 | 0 | |
+| **합계** | **126** | **123** | **3** | |
+
+---
 
 ## 다음 단계 (Phase D: 통합)
 
 1. Vision + RAG + Memory → enriched_state 생성
 2. Risk Pipeline → auto_trader_v9.py 연동
-3. 백테스트 검증 (Walk-Forward 3윈도우)
+3. 메모리 시스템 → auto_trader_v9.py 거래 종료 후 자동 반성
+4. 백테스트 검증 (Walk-Forward 3윈도우)

@@ -262,7 +262,7 @@ class NewsSentimentAgent(AgentBase):
         # -1 ~ +1 정규화 (부정이 더 큰 영향)
         total = neg_score + pos_score
         if total > 0:
-            raw = (pos_score - neg_score * 1.2) / max(total, 1)
+            raw = (pos_score - neg_score) / max(total, 1)  # 1.2배 부정 가중치 제거
             sentiment_score = max(min(raw, 1.0), -1.0)
         else:
             sentiment_score = 0.0
