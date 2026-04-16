@@ -54,7 +54,7 @@ class AgentBase(ABC):
         return self._client
 
     def llm_call(self, prompt: str, system: str = "", deep: bool = False,
-                 max_tokens: int = 2000) -> str:
+                 max_tokens: int = 4096) -> str:
         """
         LLM 호출 (Quick/Deep 자동 분리)
 
@@ -75,7 +75,7 @@ class AgentBase(ABC):
         return response.content[0].text
 
     def llm_json(self, prompt: str, system: str = "", deep: bool = False,
-                 max_tokens: int = 2000) -> dict:
+                 max_tokens: int = 4096) -> dict:
         """LLM 호출 후 JSON 파싱"""
         raw = self.llm_call(prompt, system, deep, max_tokens)
         # JSON 블록 추출
