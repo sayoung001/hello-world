@@ -1,6 +1,6 @@
-# Phase A + B + C + D 구현 진행 보고서
+# Phase A + B + C + D + E 구현 진행 보고서
 
-> 작성일: 2026-04-16
+> 작성일: 2026-04-16 (Phase E 추가: 2026-04-19)
 > 작성자: Claude Code
 > 기반: plan_vision_rag_risk_agent.md
 
@@ -534,15 +534,15 @@ SOLUSDT 롱 GAP 0.4% × 3회 (SL/TP/TP)
 
 ---
 
-## 누적 테스트 요약 (최종)
+## 누적 테스트 요약 (Phase D 시점)
 
 | Phase | 총 | PASS | FAIL | 비고 |
 |-------|-----|------|------|------|
-| A (RAG + Vision) | 28 | 25 | 3 | HuggingFace 네트워크 차단 (GCE 정상 예상) |
+| A (RAG + Vision) | 28 | 25 | 3 | HuggingFace 네트워크 차단 |
 | B (리스크 에이전트) | 48 | 48 | 0 | |
 | C (적응형 메모리) | 50 | 50 | 0 | |
 | D (통합 레이어) | 45 | 45 | 0 | |
-| **합계** | **171** | **168** | **3** | |
+| **소계** | **171** | **168** | **3** | |
 
 ---
 
@@ -621,10 +621,105 @@ leverage = result["recommended_leverage"] if result else 20
 
 ---
 
-## 다음 단계 (Phase E 후보)
+## Phase E: LLM API 최적화 + Walk-Forward 프레임워크 (완료)
 
-1. **실데이터 통합 테스트** — GCE 서버에서 HuggingFace 임베딩 + ChromaDB 동작 검증
-2. **Walk-Forward 백테스트** — 리스크 파이프라인이 PF 1.14 → 1.3+ 개선 가능한지 검증 (3윈도우)
-3. **LLM API 키 적용** — 실제 Claude Haiku 호출 → 반성 품질 평가 (규칙 기반 vs LLM 비교)
+### 7. LLM API 최적화
+
+| 파일 | 변경 내용 | 상태 |
+|------|----------|------|
+| `agents/core/base.py` | 글로벌 비용 추적 싱글턴 + 프롬프트 캐싱 + 모델별/에이전트별 집계 | 완료 |
+| `risk/risk_agent.py` | LLM 호출 `deep=True` → `deep=False` (Sonnet → Haiku) | 완료 |
+| `agents/core/orchestrator.py` | Bull/Bear 토론 DEEP→QUICK 모델 + 비용 추적 import + 캐싱 | 완료 |
+
+#### 비용 추적 시스템
+```python
+_usage_stats = {
+    "calls": 0,           # 총 API 호출 수
+    "input_tokens": 0,    # 입력 토큰 누적
+    "output_tokens": 0,   # 출력 토큰 누적
+    "cache_read_tokens": 0,   # 캐시 읽기 토큰
+    "cache_write_tokens": 0,  # 캐시 쓰기 토큰
+    "estimated_cost_usd": 0.0, # 추정 비용 (USD)
+    "errors": 0,          # 에러 횟수
+    "by_model": {...},    # 모델별 집계
+    "by_agent": {...},    # 에이전트별 집계
+}
+```
+
+#### 프롬프트 캐싱
+- 모든 시스템 프롬프트에 `cache_control: {"type": "ephemeral"}` 적용
+- 캐시 읽기: 비용 10%, 캐시 쓰기: 비용 125%
+- `cache_system` 파라미터로 제어 (기본 True)
+
+#### 모델 배분 최적화
+
+| 호출처 | 변경 전 | 변경 후 | 절감 |
+|--------|---------|---------|------|
+| Bull/Bear 토론 (2회) | Sonnet | Haiku | ~73% |
+| RiskAgent LLM 분석 | Sonnet | Haiku | ~73% |
+| HedgeAgent LLM 분석 | Sonnet | Haiku | ~73% |
+| Moderator 토론 정리 | Sonnet | Sonnet 유지 | 0% (품질 유지) |
+| AnalystAgent 분석 | Sonnet | Sonnet 유지 | 0% (품질 유지) |
+
+**예상 비용 절감: ~33%** (시뮬레이션 기반: $9.45 → $6.37 per 500 calls)
+
+### 8. Walk-Forward 백테스트 프레임워크
+
+| 파일 | 역할 | 상태 |
+|------|------|------|
+| `backtests/walk_forward.py` | 3윈도우 Walk-Forward 검증 + Baseline/Enhanced/Memory 비교 | 완료 |
+
+#### 윈도우 설정
+```
+Window 1: Train 2024-07~2025-03 → Val 2025-04~06 → Test 2025-07~09
+Window 2: Train 2024-10~2025-06 → Val 2025-07~09 → Test 2025-10~12
+Window 3: Train 2025-01~2025-09 → Val 2025-10~12 → Test 2026-01~03
+```
+
+#### 평가 모드 3종
+1. **Baseline**: 고정 SL 기반 PF/승률/SL히트율 계산
+2. **Enhanced**: RiskPipeline 필터 → 레버리지 조정/시그널 거부 → PF 개선 측정
+3. **Memory Enhanced**: Brain+Reflection 학습 루프 → train 학습 후 test 적용
+
+#### CLI
+```bash
+python backtests/walk_forward.py --data signals.csv --level production --output report.md
+```
+
+### Phase E 테스트 결과 (tests/test_phase_e.py)
+
+실행 일시: 2026-04-19
+
+**총 7 함수 (36 서브테스트): PASS 36, FAIL 0**
+
+| 카테고리 | PASS | 주요 검증 항목 |
+|----------|------|----------------|
+| 비용 추적기 | 10 | 초기화, 호출수, 토큰, 캐시, 비용, 모델별, 에이전트별, 다중호출, 비용맵, reset |
+| 프롬프트 캐싱 | 3 | cache_system 파라미터, 기본값 True, llm_json 전달 |
+| 모델 배분 | 6 | QUICK/DEEP 모델명, RiskAgent Haiku, HedgeAgent Haiku, 오케스트레이터 Haiku, 추적 import |
+| 파이프라인+추적 | 3 | 파이프라인 실행, LLM 추적, API 없이 폴백 |
+| WF 프레임워크 | 7 | 3윈도우, Train<Val<Test 순서, 시그널 레벨 4종, 프로덕션 설정, 레버리지 20 |
+| WF 미니 실행 | 5 | 데이터 로드, 필터, baseline PF, enhanced PF, 리포트 생성 |
+| 비용 효율 | 2 | 33% 절감 시뮬레이션, Haiku<Sonnet 비용 |
+
+---
+
+## 누적 테스트 요약 (최종)
+
+| Phase | 총 | PASS | FAIL | 비고 |
+|-------|-----|------|------|------|
+| A (RAG + Vision) | 28 | 25 | 3 | HuggingFace 네트워크 차단 (GCE 정상 예상) |
+| B (리스크 에이전트) | 48 | 48 | 0 | |
+| C (적응형 메모리) | 50 | 50 | 0 | |
+| D (통합 레이어) | 45 | 45 | 0 | |
+| E (LLM 최적화 + WF) | 36 | 36 | 0 | |
+| **합계** | **207** | **204** | **3** | |
+
+---
+
+## 다음 단계
+
+1. **실데이터 Walk-Forward 실행** — GCE/Windows 서버에서 `signals_all_labeled.csv` (370만 행) 투입 → Baseline vs Enhanced vs Memory PF 비교
+2. **LLM API 키 적용** — 실제 Claude Haiku 호출 → 반성 품질 평가 (규칙 기반 vs LLM 비교)
+3. **Shadow Mode 운영** — auto_trader_v9.py에 `risk_check()` 추가 후 실제 개입 없이 권고만 로깅 → 정확도 측정
 4. **Phase 4 RL 연계** — `rl/agent/sl_agent.py`에 EnrichedStateBuilder의 피처를 state로 주입
-5. **Shadow Mode 운영** — auto_trader_v9.py에 `risk_check()` 추가 후 실제 개입 없이 권고만 로깅 → 정확도 측정

@@ -135,24 +135,27 @@ class Orchestrator:
 
         try:
             import anthropic
+            from agents.core.base import QUICK_MODEL, _track_usage
             client = anthropic.Anthropic()
 
             debate_input = f"에이전트 분석:\n{summary}{crash_text}"
 
-            # Bull 주장
             bull_resp = client.messages.create(
-                model=DEEP_MODEL, max_tokens=500,
-                system=BULL_PROMPT,
+                model=QUICK_MODEL, max_tokens=500,
+                system=[{"type": "text", "text": BULL_PROMPT,
+                         "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": debate_input}]
             )
+            _track_usage(QUICK_MODEL, "bull_agent", bull_resp)
             bull_argument = bull_resp.content[0].text.strip()
 
-            # Bear 주장
             bear_resp = client.messages.create(
-                model=DEEP_MODEL, max_tokens=500,
-                system=BEAR_PROMPT,
+                model=QUICK_MODEL, max_tokens=500,
+                system=[{"type": "text", "text": BEAR_PROMPT,
+                         "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": debate_input}]
             )
+            _track_usage(QUICK_MODEL, "bear_agent", bear_resp)
             bear_argument = bear_resp.content[0].text.strip()
 
             print(f"  🐂 Bull: {bull_argument[:80]}...")
@@ -266,6 +269,7 @@ class Orchestrator:
         # 4. LLM 모더레이션
         try:
             import anthropic
+            from agents.core.base import _track_usage
             client = anthropic.Anthropic()
 
             summary = self._build_analysis_summary(weighted_messages)
@@ -273,7 +277,6 @@ class Orchestrator:
                            f"🐂 Bull: {debate['bull']}\n"
                            f"🐻 Bear: {debate['bear']}")
 
-            # 급락 컨텍스트를 모더레이터에게 전달
             crash_instruction = ""
             if crash_context:
                 crash_instruction = (
@@ -289,7 +292,8 @@ class Orchestrator:
             response = client.messages.create(
                 model=DEEP_MODEL,
                 max_tokens=1500,
-                system=MODERATOR_PROMPT,
+                system=[{"type": "text", "text": MODERATOR_PROMPT,
+                         "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": (
                     f"에이전트 분석 (가중치 적용됨):\n{summary}"
                     f"{debate_text}{crash_instruction}\n\n"
@@ -297,6 +301,7 @@ class Orchestrator:
                     f"현재 추정 regime: {estimated_regime}"
                 )}]
             )
+            _track_usage(DEEP_MODEL, "moderator", response)
             raw = response.content[0].text
             if "```json" in raw:
                 raw = raw.split("```json")[1].split("```")[0]

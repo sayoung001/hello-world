@@ -278,7 +278,7 @@ class RiskAgent(AgentBase):
                 '"reasoning": "", "confidence": 0.0~1.0}'
             )
 
-            result = self.llm_json("\n".join(parts), deep=True,
+            result = self.llm_json("\n".join(parts), deep=False,
                                     max_tokens=config.RISK_MAX_TOKENS)
             if result.get("parse_error"):
                 return None
