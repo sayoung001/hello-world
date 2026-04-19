@@ -30,6 +30,10 @@ import os
 import sys
 import time
 import argparse
+import math
+import io
+import contextlib
+import multiprocessing as mp
 from datetime import datetime
 from collections import defaultdict
 from typing import Any
@@ -47,6 +51,115 @@ from agents.memory.rule_store import RuleStore
 from agents.memory.trading_brain import TradingBrain
 from agents.memory.reflection_engine import ReflectionEngine
 from agents.enriched_state import EnrichedStateBuilder
+
+DEFAULT_WORKERS = min(24, mp.cpu_count() or 1)
+
+
+def _split_chunks(lst: list, n: int) -> list[list]:
+    """리스트를 n개 청크로 분할"""
+    if n <= 0 or not lst:
+        return [lst] if lst else []
+    size = math.ceil(len(lst) / n)
+    return [lst[i:i + size] for i in range(0, len(lst), size)]
+
+
+def _extract_market_data_from_dict(row: dict) -> dict:
+    """시그널 dict에서 MarketState 필드 추출 (워커용)"""
+    return {
+        "btc_price": float(row.get("btc_price", 0)),
+        "btc_level": int(row.get("btc_level", 0)),
+        "btc_atr_pct": float(row.get("atr_pct", row.get("btc_atr_pct", 0))),
+        "fear_greed": int(row.get("fear_greed", row.get("fgi", 50))),
+        "funding_rate": float(row.get("funding_rate", 0)),
+        "btc_rsi": float(row.get("btc_rsi", 50)),
+        "btc_change_24h": float(row.get("btc_change_24h", 0)),
+    }
+
+
+def _eval_enhanced_chunk(args):
+    """Enhanced 평가 워커 (멀티프로세싱)"""
+    chunk, leverage_default = args
+
+    accepted, rejected, lev_adj = [], [], []
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        pipeline = RiskPipeline()
+        for signal in chunk:
+            market_data = _extract_market_data_from_dict(signal)
+            ctx = PipelineContext(
+                signal=signal,
+                market_state=MarketState(**market_data),
+            )
+            try:
+                decision = pipeline.evaluate(ctx)
+                risk_level = decision.risk_level.value
+                lev = decision.leverage_recommendation.recommended_leverage
+                if risk_level in ("low", "medium"):
+                    accepted.append({
+                        **signal,
+                        "adjusted_leverage": lev,
+                        "risk_level": risk_level,
+                    })
+                    lev_adj.append(lev)
+                else:
+                    rejected.append({
+                        **signal,
+                        "risk_level": risk_level,
+                        "original_exit": signal.get("exit_type", ""),
+                        "original_roe": signal.get("realized_roe", 0),
+                    })
+            except Exception:
+                accepted.append({
+                    **signal,
+                    "adjusted_leverage": leverage_default,
+                    "risk_level": "unknown",
+                })
+                lev_adj.append(leverage_default)
+
+    return accepted, rejected, lev_adj
+
+
+def _eval_memory_test_chunk(args):
+    """Memory 테스트 평가 워커 (멀티프로세싱)"""
+    chunk, leverage_default = args
+    # chunk: list of (signal_dict, market_data_dict, brain_conf)
+
+    accepted, rejected, brain_filtered_count = [], [], 0
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        pipeline = RiskPipeline()
+        for signal, market_data, brain_conf in chunk:
+            if brain_conf < 0.25:
+                brain_filtered_count += 1
+                rejected.append({**signal, "risk_level": "brain_low"})
+                continue
+
+            ctx = PipelineContext(
+                signal=signal,
+                market_state=MarketState(**market_data),
+            )
+            try:
+                decision = pipeline.evaluate(ctx)
+                risk_level = decision.risk_level.value
+                lev = decision.leverage_recommendation.recommended_leverage
+                if risk_level in ("low", "medium"):
+                    accepted.append({
+                        **signal,
+                        "adjusted_leverage": lev,
+                        "risk_level": risk_level,
+                        "brain_confidence": brain_conf,
+                    })
+                else:
+                    rejected.append({**signal, "risk_level": risk_level})
+            except Exception:
+                accepted.append({
+                    **signal,
+                    "adjusted_leverage": leverage_default,
+                    "risk_level": "unknown",
+                })
+
+    return accepted, rejected, brain_filtered_count
+
 
 # ─────────────────────────────────────
 # Walk-Forward 윈도우 정의
@@ -96,7 +209,8 @@ class WalkForwardBacktest:
     def __init__(self, data_path: str, level: str = "production",
                  modes: tuple[str, ...] = ("baseline", "enhanced", "memory"),
                  max_signals_per_window: int | None = None,
-                 sample_seed: int = 42):
+                 sample_seed: int = 42,
+                 workers: int = DEFAULT_WORKERS):
         if pd is None:
             raise ImportError("pandas 필요: pip install pandas")
         self.data_path = data_path
@@ -105,6 +219,7 @@ class WalkForwardBacktest:
         self.modes = tuple(m.strip() for m in modes)
         self.max_signals_per_window = max_signals_per_window
         self.sample_seed = sample_seed
+        self._workers = max(1, workers)
         self.results: list[dict] = []
 
     def load_data(self) -> pd.DataFrame:
@@ -229,47 +344,35 @@ class WalkForwardBacktest:
         }
 
     def _evaluate_enhanced(self, signals: pd.DataFrame) -> dict:
-        """B) Enhanced — 리스크 파이프라인 필터"""
+        """B) Enhanced — 리스크 파이프라인 필터 (병렬)"""
         if signals.empty:
             return self._empty_result("enhanced")
 
-        pipeline = RiskPipeline()
-        accepted = []
-        rejected = []
-        leverage_adjustments = []
+        records = signals.to_dict("records")
+        t0 = time.time()
 
-        for _, row in signals.iterrows():
-            signal = row.to_dict()
-            market_data = self._extract_market_data(row)
-
-            ctx = PipelineContext(
-                signal=signal,
-                market_state=MarketState(**market_data),
+        if self._workers > 1 and len(records) >= self._workers:
+            chunks = _split_chunks(records, self._workers)
+            print(f"    Enhanced 병렬 평가: {len(records):,}건 / "
+                  f"{len(chunks)} 워커 ({self._workers} 프로세스)")
+            with mp.Pool(processes=self._workers) as pool:
+                results = pool.map(
+                    _eval_enhanced_chunk,
+                    [(chunk, LEVERAGE) for chunk in chunks],
+                )
+            accepted, rejected, leverage_adjustments = [], [], []
+            for a, r, la in results:
+                accepted.extend(a)
+                rejected.extend(r)
+                leverage_adjustments.extend(la)
+        else:
+            accepted, rejected, leverage_adjustments = _eval_enhanced_chunk(
+                (records, LEVERAGE)
             )
 
-            try:
-                decision = pipeline.evaluate(ctx)
-                risk_level = decision.risk_level.value
-                leverage = decision.leverage_recommendation.recommended_leverage
-
-                if risk_level in ("low", "medium"):
-                    accepted.append({
-                        **signal,
-                        "adjusted_leverage": leverage,
-                        "risk_level": risk_level,
-                    })
-                    leverage_adjustments.append(leverage)
-                else:
-                    rejected.append({
-                        **signal,
-                        "risk_level": risk_level,
-                        "original_exit": row.get("exit_type", ""),
-                        "original_roe": row.get("realized_roe", 0),
-                    })
-            except Exception:
-                accepted.append({**signal, "adjusted_leverage": LEVERAGE,
-                                 "risk_level": "unknown"})
-                leverage_adjustments.append(LEVERAGE)
+        elapsed = time.time() - t0
+        print(f"    Enhanced 완료: {elapsed:.1f}초 "
+              f"({len(records)/max(elapsed,0.001):,.0f} 시그널/초)")
 
         accepted_df = pd.DataFrame(accepted) if accepted else pd.DataFrame()
         rejected_df = pd.DataFrame(rejected) if rejected else pd.DataFrame()
@@ -280,17 +383,14 @@ class WalkForwardBacktest:
         tp = accepted_df[accepted_df["exit_type"] == "TP"]
         sl = accepted_df[accepted_df["exit_type"] == "SL"]
 
-        # 레버리지 조정 반영 ROE
-        adjusted_roe = 0
-        for _, r in accepted_df.iterrows():
-            lev = r.get("adjusted_leverage", LEVERAGE)
-            base_pnl = r.get("realized_roe", 0) / LEVERAGE  # PnL%
-            adjusted_roe += base_pnl * lev
+        # 레버리지 조정 반영 ROE (벡터화)
+        lev_col = accepted_df["adjusted_leverage"].fillna(LEVERAGE)
+        roe_col = accepted_df["realized_roe"].fillna(0)
+        adjusted_roe = ((roe_col / LEVERAGE) * lev_col).sum()
 
         win_roe = tp["realized_roe"].sum() if len(tp) > 0 else 0
         loss_roe = abs(sl["realized_roe"].sum()) if len(sl) > 0 else 1
 
-        # 거부된 시그널 분석
         rejected_would_sl = 0
         rejected_would_tp = 0
         if not rejected_df.empty:
@@ -326,7 +426,7 @@ class WalkForwardBacktest:
     def _evaluate_with_memory(self, train: pd.DataFrame,
                                val: pd.DataFrame,
                                test: pd.DataFrame) -> dict:
-        """C) Enhanced + Memory — 학습 루프"""
+        """C) Enhanced + Memory — 학습 루프 (병렬 파이프라인)"""
         if test.empty:
             return self._empty_result("memory_enhanced")
 
@@ -339,95 +439,90 @@ class WalkForwardBacktest:
             brain = TradingBrain(rule_store=store)
             reflection = ReflectionEngine(rule_store=store)
             builder = EnrichedStateBuilder(brain=brain)
-            pipeline = RiskPipeline()
 
-            # 학습 단계: train 시그널로 메모리 학습
-            for _, row in train.iterrows():
-                trade_record = {
-                    "symbol": row.get("symbol", ""),
-                    "direction": row.get("direction", ""),
-                    "exit_type": row.get("exit_type", ""),
-                    "roe": row.get("realized_roe", 0),
-                    "gap": float(row.get("gap", 0)),
-                    "confidence": row.get("confidence", 0),
-                    "adx": float(row.get("adx", 0)),
-                    "hold_candles": int(row.get("hold_candles", 0)),
-                    "direction_correct": bool(row.get("direction_correct", False)),
-                    "market_state": self._extract_market_data(row),
-                }
-                reflection.reflect(trade_record)
-                brain.record_trade_result(
-                    row.get("symbol", ""),
-                    row.get("direction", ""),
-                    float(row.get("gap", 0)),
-                    row.get("exit_type", ""),
-                    row.get("realized_roe", 0),
-                )
+            # ── Phase 1: 학습 (순차, 공유 상태 필요) ──
+            t0 = time.time()
+            train_records = train.to_dict("records")
+            with contextlib.redirect_stdout(io.StringIO()):
+                for rec in train_records:
+                    trade_record = {
+                        "symbol": rec.get("symbol", ""),
+                        "direction": rec.get("direction", ""),
+                        "exit_type": rec.get("exit_type", ""),
+                        "roe": rec.get("realized_roe", 0),
+                        "gap": float(rec.get("gap", 0)),
+                        "confidence": rec.get("confidence", 0),
+                        "adx": float(rec.get("adx", 0)),
+                        "hold_candles": int(rec.get("hold_candles", 0)),
+                        "direction_correct": bool(rec.get("direction_correct", False)),
+                        "market_state": _extract_market_data_from_dict(rec),
+                    }
+                    reflection.reflect(trade_record)
+                    brain.record_trade_result(
+                        rec.get("symbol", ""),
+                        rec.get("direction", ""),
+                        float(rec.get("gap", 0)),
+                        rec.get("exit_type", ""),
+                        rec.get("realized_roe", 0),
+                    )
 
+            train_elapsed = time.time() - t0
             print(f"  학습 완료: {store.count}개 규칙, "
-                  f"{brain.get_stats()['coins_tracked']}개 코인")
+                  f"{brain.get_stats()['coins_tracked']}개 코인 ({train_elapsed:.1f}초)")
 
-            # 테스트 단계: 리스크 파이프라인 + 메모리 자문
-            accepted = []
-            rejected = []
-            brain_filtered = 0
-
-            for _, row in test.iterrows():
-                signal = row.to_dict()
-                market_data = self._extract_market_data(row)
-
+            # ── Phase 2: Brain 자문 사전 계산 (순차, 빠름) ──
+            t1 = time.time()
+            test_items = []
+            for rec in test.to_dict("records"):
                 enriched = builder.build(
-                    signal=signal,
-                    market_data=market_data,
+                    signal=rec,
+                    market_data=_extract_market_data_from_dict(rec),
                 )
-                brain_advice = enriched.get("brain_advice", {})
-                brain_conf = brain_advice.get("brain_confidence", 0.5)
+                brain_conf = enriched.get("brain_advice", {}).get(
+                    "brain_confidence", 0.5
+                )
+                market_data = _extract_market_data_from_dict(rec)
+                test_items.append((rec, market_data, brain_conf))
 
-                # Brain 신뢰도가 매우 낮으면 거부
-                if brain_conf < 0.25:
-                    brain_filtered += 1
-                    rejected.append({
-                        **signal,
-                        "risk_level": "brain_low",
-                    })
-                    continue
+            consult_elapsed = time.time() - t1
+            print(f"  Brain 자문 완료: {len(test_items):,}건 ({consult_elapsed:.1f}초)")
 
-                ctx = enriched["pipeline_context"]
-                try:
-                    decision = pipeline.evaluate(ctx)
-                    risk_level = decision.risk_level.value
-                    leverage = decision.leverage_recommendation.recommended_leverage
+            # ── Phase 3: 파이프라인 평가 (병렬) ──
+            t2 = time.time()
+            if self._workers > 1 and len(test_items) >= self._workers:
+                chunks = _split_chunks(test_items, self._workers)
+                print(f"    Memory 병렬 평가: {len(test_items):,}건 / "
+                      f"{len(chunks)} 워커 ({self._workers} 프로세스)")
+                with mp.Pool(processes=self._workers) as pool:
+                    results = pool.map(
+                        _eval_memory_test_chunk,
+                        [(chunk, LEVERAGE) for chunk in chunks],
+                    )
+                accepted, rejected, brain_filtered = [], [], 0
+                for a, r, bf in results:
+                    accepted.extend(a)
+                    rejected.extend(r)
+                    brain_filtered += bf
+            else:
+                accepted, rejected, brain_filtered = _eval_memory_test_chunk(
+                    (test_items, LEVERAGE)
+                )
 
-                    if risk_level in ("low", "medium"):
-                        accepted.append({
-                            **signal,
-                            "adjusted_leverage": leverage,
-                            "risk_level": risk_level,
-                            "brain_confidence": brain_conf,
-                        })
-                    else:
-                        rejected.append({
-                            **signal,
-                            "risk_level": risk_level,
-                        })
-                except Exception:
-                    accepted.append({
-                        **signal,
-                        "adjusted_leverage": LEVERAGE,
-                        "risk_level": "unknown",
-                    })
+            eval_elapsed = time.time() - t2
+            print(f"    Memory 평가 완료: {eval_elapsed:.1f}초 "
+                  f"({len(test_items)/max(eval_elapsed,0.001):,.0f} 시그널/초)")
 
-                # 테스트 중에도 학습 (온라인 학습)
+            # ── Phase 4: Brain 일괄 업데이트 (순차, 빠름) ──
+            for rec, _, _ in test_items:
                 brain.record_trade_result(
-                    row.get("symbol", ""),
-                    row.get("direction", ""),
-                    float(row.get("gap", 0)),
-                    row.get("exit_type", ""),
-                    row.get("realized_roe", 0),
+                    rec.get("symbol", ""),
+                    rec.get("direction", ""),
+                    float(rec.get("gap", 0)),
+                    rec.get("exit_type", ""),
+                    rec.get("realized_roe", 0),
                 )
 
             accepted_df = pd.DataFrame(accepted) if accepted else pd.DataFrame()
-            rejected_df = pd.DataFrame(rejected) if rejected else pd.DataFrame()
 
             if accepted_df.empty:
                 return self._empty_result("memory_enhanced")
@@ -435,11 +530,9 @@ class WalkForwardBacktest:
             tp = accepted_df[accepted_df["exit_type"] == "TP"]
             sl = accepted_df[accepted_df["exit_type"] == "SL"]
 
-            adjusted_roe = 0
-            for _, r in accepted_df.iterrows():
-                lev = r.get("adjusted_leverage", LEVERAGE)
-                base_pnl = r.get("realized_roe", 0) / LEVERAGE
-                adjusted_roe += base_pnl * lev
+            lev_col = accepted_df["adjusted_leverage"].fillna(LEVERAGE)
+            roe_col = accepted_df["realized_roe"].fillna(0)
+            adjusted_roe = ((roe_col / LEVERAGE) * lev_col).sum()
 
             win_roe = tp["realized_roe"].sum() if len(tp) > 0 else 0
             loss_roe = abs(sl["realized_roe"].sum()) if len(sl) > 0 else 1
@@ -586,6 +679,10 @@ def main():
         "--seed", type=int, default=42,
         help="샘플링 random_state (기본 42)",
     )
+    parser.add_argument(
+        "--workers", type=int, default=DEFAULT_WORKERS,
+        help=f"병렬 워커 수 (기본: {DEFAULT_WORKERS}, CPU 코어 수 기반)",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.data):
@@ -607,8 +704,10 @@ def main():
         max_signals_per_window=(args.max_signals_per_window
                                  if args.max_signals_per_window > 0 else None),
         sample_seed=args.seed,
+        workers=args.workers,
     )
     print(f"  모드: {modes}")
+    print(f"  워커: {bt._workers} 프로세스")
     if args.max_signals_per_window > 0:
         print(f"  시그널 제한: {args.max_signals_per_window}/윈도우")
     df = bt.load_data()
