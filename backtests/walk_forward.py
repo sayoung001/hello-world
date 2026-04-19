@@ -93,12 +93,18 @@ class WalkForwardBacktest:
     C) Enhanced+Memory: B + TradingBrain 자문 반영 (학습 루프)
     """
 
-    def __init__(self, data_path: str, level: str = "production"):
+    def __init__(self, data_path: str, level: str = "production",
+                 modes: tuple[str, ...] = ("baseline", "enhanced", "memory"),
+                 max_signals_per_window: int | None = None,
+                 sample_seed: int = 42):
         if pd is None:
             raise ImportError("pandas 필요: pip install pandas")
         self.data_path = data_path
         self.level = level
         self.level_config = SIGNAL_LEVELS[level]
+        self.modes = tuple(m.strip() for m in modes)
+        self.max_signals_per_window = max_signals_per_window
+        self.sample_seed = sample_seed
         self.results: list[dict] = []
 
     def load_data(self) -> pd.DataFrame:
@@ -156,16 +162,30 @@ class WalkForwardBacktest:
         print(f"  Test:  {len(test_signals):,}건 "
               f"({test_start} ~ {test_end})")
 
-        # A) Baseline (기존 방식)
-        baseline = self._evaluate_baseline(test_signals)
+        # 시그널 샘플링 (비용/시간 제어)
+        if self.max_signals_per_window and len(test_signals) > self.max_signals_per_window:
+            test_signals = test_signals.sample(
+                n=self.max_signals_per_window,
+                random_state=self.sample_seed,
+            ).sort_values("timestamp").reset_index(drop=True)
+            print(f"  → Test 샘플링: {len(test_signals):,}건 (max={self.max_signals_per_window})")
+        if self.max_signals_per_window and len(train_signals) > self.max_signals_per_window:
+            train_signals = train_signals.sample(
+                n=self.max_signals_per_window,
+                random_state=self.sample_seed,
+            ).sort_values("timestamp").reset_index(drop=True)
+            print(f"  → Train 샘플링: {len(train_signals):,}건")
 
-        # B) Enhanced (리스크 파이프라인 필터)
-        enhanced = self._evaluate_enhanced(test_signals)
-
-        # C) Enhanced + Memory (학습 루프 — train에서 학습 후 test)
-        memory_enhanced = self._evaluate_with_memory(
-            train_signals, val_signals, test_signals
-        )
+        baseline = (self._evaluate_baseline(test_signals)
+                    if "baseline" in self.modes
+                    else self._empty_result("baseline"))
+        enhanced = (self._evaluate_enhanced(test_signals)
+                    if "enhanced" in self.modes
+                    else self._empty_result("enhanced"))
+        memory_enhanced = (self._evaluate_with_memory(
+                               train_signals, val_signals, test_signals)
+                           if "memory" in self.modes
+                           else self._empty_result("memory_enhanced"))
 
         result = {
             "window": window["name"],
@@ -554,6 +574,18 @@ def main():
         "--output", type=str, default="",
         help="결과 마크다운 저장 경로 (기본: stdout)",
     )
+    parser.add_argument(
+        "--mode", type=str, default="baseline,enhanced,memory",
+        help="실행 모드 (쉼표 구분): baseline,enhanced,memory 중 하나 이상",
+    )
+    parser.add_argument(
+        "--max-signals-per-window", type=int, default=0,
+        help="윈도우별 시그널 최대 개수 (0=전체). memory 모드 비용 제한용",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="샘플링 random_state (기본 42)",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.data):
@@ -561,7 +593,24 @@ def main():
         print(f"  환경변수 LABELED_SIGNALS_PATH를 설정하거나 --data 옵션 사용")
         sys.exit(1)
 
-    bt = WalkForwardBacktest(data_path=args.data, level=args.level)
+    modes = tuple(m.strip() for m in args.mode.split(",") if m.strip())
+    valid_modes = {"baseline", "enhanced", "memory"}
+    bad = [m for m in modes if m not in valid_modes]
+    if bad:
+        print(f"  ❌ 잘못된 모드: {bad}. 사용 가능: {sorted(valid_modes)}")
+        sys.exit(1)
+
+    bt = WalkForwardBacktest(
+        data_path=args.data,
+        level=args.level,
+        modes=modes,
+        max_signals_per_window=(args.max_signals_per_window
+                                 if args.max_signals_per_window > 0 else None),
+        sample_seed=args.seed,
+    )
+    print(f"  모드: {modes}")
+    if args.max_signals_per_window > 0:
+        print(f"  시그널 제한: {args.max_signals_per_window}/윈도우")
     df = bt.load_data()
     bt.run_all_windows(df)
 

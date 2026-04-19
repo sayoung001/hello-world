@@ -5,3 +5,16 @@ ccxt>=4.0.0
 python-dotenv>=1.0.0
 requests>=2.28.0
 anthropic>=0.40.0
+
+# Phase A: RAG + Vision
+chromadb>=1.5.0
+sentence-transformers>=5.0.0
+mplfinance>=0.12.10
+torch>=2.0.0
+transformers>=4.40.0
+
+# Phase B~E: 리스크 에이전트 + 메모리 + 백테스트
+pydantic>=2.10.0
+
+# 개발/테스트
+pytest>=8.0.0
