@@ -10,6 +10,7 @@ import json
 import os
 import time
 import hashlib
+import threading
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -99,6 +100,7 @@ class RuleStore:
     def __init__(self, rules_path: str = "", embedder=None, vectorstore=None):
         self.rules_path = rules_path or DEFAULT_RULES_PATH
         self._rules: dict[str, TradingRule] = {}
+        self._lock = threading.Lock()
         self._embedder = embedder       # rag.embedder.Embedder (선택)
         self._vectorstore = vectorstore  # rag.vectorstore.VectorStoreManager (선택)
         self._load()
@@ -117,11 +119,13 @@ class RuleStore:
             print(f"[RuleStore] 규칙 로드 실패: {e}")
 
     def _save(self):
-        """파일로 규칙 저장"""
+        """파일로 규칙 저장 (스레드 안전)"""
         os.makedirs(os.path.dirname(self.rules_path) or ".", exist_ok=True)
         data = [r.to_dict() for r in self._rules.values()]
-        with open(self.rules_path, "w", encoding="utf-8") as f:
+        tmp_path = self.rules_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, self.rules_path)
 
     def add(self, condition: str, action: str, confidence: float = 0.5,
             source: str = "reflection", metadata: dict | None = None) -> TradingRule:
@@ -138,8 +142,9 @@ class RuleStore:
             source=source,
             metadata=metadata,
         )
-        self._rules[rule_id] = rule
-        self._save()
+        with self._lock:
+            self._rules[rule_id] = rule
+            self._save()
 
         # ChromaDB 벡터 추가 (선택)
         if self._embedder and self._vectorstore:
@@ -163,28 +168,31 @@ class RuleStore:
 
     def update(self, rule_id: str, **kwargs) -> bool:
         """규칙 필드 업데이트"""
-        rule = self._rules.get(rule_id)
-        if not rule:
-            return False
-        for k, v in kwargs.items():
-            if hasattr(rule, k):
-                setattr(rule, k, v)
-        self._save()
-        return True
+        with self._lock:
+            rule = self._rules.get(rule_id)
+            if not rule:
+                return False
+            for k, v in kwargs.items():
+                if hasattr(rule, k):
+                    setattr(rule, k, v)
+            self._save()
+            return True
 
     def record_hit(self, rule_id: str):
         """규칙 적중 기록"""
-        rule = self._rules.get(rule_id)
-        if rule:
-            rule.hits += 1
-            self._save()
+        with self._lock:
+            rule = self._rules.get(rule_id)
+            if rule:
+                rule.hits += 1
+                self._save()
 
     def record_miss(self, rule_id: str):
         """규칙 실패 기록"""
-        rule = self._rules.get(rule_id)
-        if rule:
-            rule.misses += 1
-            self._save()
+        with self._lock:
+            rule = self._rules.get(rule_id)
+            if rule:
+                rule.misses += 1
+                self._save()
 
     def deactivate(self, rule_id: str):
         """규칙 비활성화"""

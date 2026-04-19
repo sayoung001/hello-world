@@ -1055,8 +1055,9 @@ class ConvergenceTrader:
                 result['vol_surge'] = self._calc_vol_surge(df)
 
                 oc = self.onchain.get_all(sym)
-                result.update({'onchain': oc, 'adx_value': adx,
-                               'volume_ratio': vr, 'rsi': rsi})
+                gap_pct_val = result.get('details', {}).get('gap_pct', 0)
+                result.update({'onchain': oc, 'adx_value': adx, 'adx': adx,
+                               'gap': gap_pct_val, 'volume_ratio': vr, 'rsi': rsi})
                 signals.append(result)
                 time.sleep(0.08)
                 self._scan_fails[sym] = 0
@@ -1106,6 +1107,21 @@ class ConvergenceTrader:
             if not self.btc_trend.is_squeeze:
                 print(f"  BTC squeeze 아님: {sym} 대기 (gap:{self.btc_trend.gap_pct:.3f}%)")
                 return
+
+        # [Phase F] 진입 전 리스크 평가
+        if self.agent_hook is not None:
+            try:
+                risk_result = self.agent_hook.risk_check(
+                    signal=signal,
+                    positions=[p.__dict__ for p in self.positions] if self.positions else [],
+                    account_balance=self.executor.total_balance(),
+                )
+                if risk_result and not risk_result.get("approved", True):
+                    print(f"  🛑 리스크 차단: {sym} {d} — "
+                          f"레벨: {risk_result.get('risk_level', '?')}")
+                    return
+            except Exception as e:
+                print(f"  [Phase F] risk_check 오류 (진입 계속): {e}")
 
         # [V8-3] CasTrail 통일 (그룹 없음)
         # SL 계산

@@ -84,8 +84,8 @@ def _track_usage(model: str, agent_id: str, response):
     cache_write = getattr(usage, "cache_creation_input_tokens", 0)
 
     costs = _COST_PER_1K.get(model, {"input": 0.003, "output": 0.015})
-    # 캐시 읽기는 10% 비용, 캐시 쓰기는 125% 비용
-    effective_input = (inp - cache_read) * 1.0 + cache_read * 0.1 + cache_write * 1.25
+    # cache_write는 inp에 포함됨 → 중복 차감 후 개별 요율 적용
+    effective_input = (inp - cache_read - cache_write) * 1.0 + cache_read * 0.1 + cache_write * 1.25
     cost = (effective_input * costs["input"] + out * costs["output"]) / 1000
 
     _usage_stats["calls"] += 1

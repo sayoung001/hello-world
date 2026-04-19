@@ -56,7 +56,8 @@ class TradingBrain:
         """
         symbol = signal.get("symbol", "")
         direction = signal.get("direction", "")
-        gap = signal.get("gap", 0)
+        gap = signal.get("gap", 0) or signal.get("gap_pct", 0) or \
+              signal.get("details", {}).get("gap_pct", 0)
 
         # 관련 규칙 검색
         query = f"{symbol} {direction} GAP {gap:.1f}"
@@ -191,7 +192,7 @@ class TradingBrain:
             parts.append(f"{symbol} 최근 승률: {coin_wr:.0%}")
 
         if pattern_wr != 0.5:
-            gap = signal.get("gap", 0)
+            gap = signal.get("gap", 0) or signal.get("gap_pct", 0)
             parts.append(f"GAP {gap:.1f}% 구간 승률: {pattern_wr:.0%}")
 
         if not parts:

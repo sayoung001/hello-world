@@ -227,6 +227,13 @@ class ReflectionEngine:
         elif exit_type == "Timeout" and hold > 96:
             key_factor = "장기 횡보 후 타임아웃"
             lesson = f"{symbol}: 수렴 이탈 후 추세 미형성"
+            rule = self.rule_store.add(
+                condition=f"{symbol} GAP {gap:.1f}% {direction} — 96캔들 이상 횡보 패턴",
+                action="스퀴즈 캔들 수 ≥ 15 또는 GAP ≤ 0.3% 시 진입 보류 고려",
+                confidence=0.4,
+                source="reflection",
+            )
+            rules_created.append(rule)
 
         # 패턴 4: BTC 레벨 높을 때 큰 손실
         elif roe < -50 and mkt.get("btc_level", 0) >= 4:

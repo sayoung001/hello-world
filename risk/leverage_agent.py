@@ -97,12 +97,21 @@ class LeverageAgent(AgentBase):
         risk_factors = []
         penalties = []
 
-        # 1. ATR% → 레버리지 매핑
+        # 1. ATR% → 레버리지 매핑 (선형 보간)
         atr = market.btc_atr_pct
-        for threshold, lev in sorted(config.LEVERAGE_ATR_MAP.items()):
-            if atr <= threshold:
-                leverage = lev
-                break
+        thresholds = sorted(config.LEVERAGE_ATR_MAP.items())
+        if atr <= thresholds[0][0]:
+            leverage = thresholds[0][1]
+        elif atr >= thresholds[-1][0]:
+            leverage = thresholds[-1][1]
+        else:
+            for i in range(len(thresholds) - 1):
+                t_lo, lev_lo = thresholds[i]
+                t_hi, lev_hi = thresholds[i + 1]
+                if t_lo < atr <= t_hi:
+                    ratio = (atr - t_lo) / (t_hi - t_lo)
+                    leverage = int(round(lev_lo + (lev_hi - lev_lo) * ratio))
+                    break
         if atr > 2.0:
             risk_factors.append(f"높은 변동성 ATR {atr:.1f}%")
 

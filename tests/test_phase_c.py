@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RESULTS = {}
 
 
-def test_result(name: str, passed: bool, detail: str = ""):
+def _test_result(name: str, passed: bool, detail: str = ""):
     status = "PASS" if passed else "FAIL"
     RESULTS[name] = {"status": status, "detail": detail}
     print(f"  [{status}] {name}" + (f" — {detail}" if detail else ""))
@@ -40,25 +40,25 @@ def test_rule_store():
         misses=2,
         weight=0.9,
     )
-    test_result("rule_create", rule.rule_id == "test001",
+    _test_result("rule_create", rule.rule_id == "test001",
                 f"id={rule.rule_id}, conf={rule.confidence}")
 
     # 1-2. 속성 계산
-    test_result("rule_hit_rate", abs(rule.hit_rate - 0.8) < 0.01,
+    _test_result("rule_hit_rate", abs(rule.hit_rate - 0.8) < 0.01,
                 f"hit_rate={rule.hit_rate:.2f} (8/10)")
-    test_result("rule_effective_conf", abs(rule.effective_confidence - 0.63) < 0.01,
+    _test_result("rule_effective_conf", abs(rule.effective_confidence - 0.63) < 0.01,
                 f"effective={rule.effective_confidence:.3f} (0.7×0.9)")
-    test_result("rule_sample_size", rule.sample_size == 10,
+    _test_result("rule_sample_size", rule.sample_size == 10,
                 f"sample_size={rule.sample_size}")
 
     # 1-3. to_text / to_dict / from_dict
     text = rule.to_text()
-    test_result("rule_to_text", "조건:" in text and "행동:" in text,
+    _test_result("rule_to_text", "조건:" in text and "행동:" in text,
                 f"text={text[:40]}...")
 
     d = rule.to_dict()
     restored = TradingRule.from_dict(d)
-    test_result("rule_serialization", restored.rule_id == rule.rule_id
+    _test_result("rule_serialization", restored.rule_id == rule.rule_id
                 and restored.hits == rule.hits,
                 f"roundtrip OK, keys={len(d)}")
 
@@ -68,7 +68,7 @@ def test_rule_store():
 
     try:
         store = RuleStore(rules_path=tmp_path)
-        test_result("store_init", store.count == 0,
+        _test_result("store_init", store.count == 0,
                     f"empty store, count={store.count}")
 
         # add
@@ -84,19 +84,19 @@ def test_rule_store():
             confidence=0.55,
             source="reflection",
         )
-        test_result("store_add", store.count == 2,
+        _test_result("store_add", store.count == 2,
                     f"added 2 rules, count={store.count}")
 
         # get
         fetched = store.get(r1.rule_id)
-        test_result("store_get", fetched is not None
+        _test_result("store_get", fetched is not None
                     and fetched.condition == r1.condition,
                     f"fetched rule_id={r1.rule_id[:8]}")
 
         # update
         store.update(r1.rule_id, confidence=0.8, weight=0.95)
         updated = store.get(r1.rule_id)
-        test_result("store_update", updated.confidence == 0.8
+        _test_result("store_update", updated.confidence == 0.8
                     and updated.weight == 0.95,
                     f"conf={updated.confidence}, weight={updated.weight}")
 
@@ -105,36 +105,36 @@ def test_rule_store():
         store.record_hit(r1.rule_id)
         store.record_miss(r1.rule_id)
         r1_updated = store.get(r1.rule_id)
-        test_result("store_hit_miss", r1_updated.hits == 2
+        _test_result("store_hit_miss", r1_updated.hits == 2
                     and r1_updated.misses == 1,
                     f"hits={r1_updated.hits}, misses={r1_updated.misses}")
 
         # deactivate
         store.deactivate(r2.rule_id)
         r2_updated = store.get(r2.rule_id)
-        test_result("store_deactivate", not r2_updated.active,
+        _test_result("store_deactivate", not r2_updated.active,
                     f"active={r2_updated.active}")
 
         # get_active_rules
         active = store.get_active_rules()
-        test_result("store_active_rules", len(active) == 1,
+        _test_result("store_active_rules", len(active) == 1,
                     f"active={len(active)}, total={store.count}")
 
         # search_by_condition (텍스트 매칭)
         results = store.search_by_condition("BTC 레벨 롱", top_k=3)
-        test_result("store_search", len(results) >= 1
+        _test_result("store_search", len(results) >= 1
                     and results[0].rule_id == r1.rule_id,
                     f"found {len(results)} rules, top={results[0].rule_id[:8]}")
 
         # get_stats
         stats = store.get_stats()
-        test_result("store_stats", stats["total_rules"] == 2
+        _test_result("store_stats", stats["total_rules"] == 2
                     and stats["active_rules"] == 1,
                     f"total={stats['total_rules']}, active={stats['active_rules']}")
 
         # 영속성: 새 인스턴스로 로드
         store2 = RuleStore(rules_path=tmp_path)
-        test_result("store_persistence", store2.count == 2,
+        _test_result("store_persistence", store2.count == 2,
                     f"reloaded count={store2.count}")
     finally:
         os.unlink(tmp_path)
@@ -156,23 +156,23 @@ def test_decay_engine():
         store = RuleStore(rules_path=tmp_path)
         engine = DecayEngine(rule_store=store)
 
-        test_result("decay_init", engine.decay_lambda == DECAY_LAMBDA,
+        _test_result("decay_init", engine.decay_lambda == DECAY_LAMBDA,
                     f"lambda={engine.decay_lambda}")
 
         # should_run_decay (최초 실행)
-        test_result("decay_should_run", engine.should_run_decay(),
+        _test_result("decay_should_run", engine.should_run_decay(),
                     "첫 실행 → True")
 
         # 시간 감쇠 계산 (단일)
         days_30 = time.time() - 30 * 86400
         w30 = engine.compute_single_weight(created_at=days_30)
         expected_30 = math.exp(-DECAY_LAMBDA * 30)
-        test_result("decay_30days", abs(w30 - expected_30) < 0.01,
+        _test_result("decay_30days", abs(w30 - expected_30) < 0.01,
                     f"30일 감쇠: {w30:.4f} (예상 {expected_30:.4f})")
 
         days_70 = time.time() - 70 * 86400
         w70 = engine.compute_single_weight(created_at=days_70)
-        test_result("decay_70days_halflife", w70 < 0.55,
+        _test_result("decay_70days_halflife", w70 < 0.55,
                     f"70일(반감기): {w70:.4f} < 0.55")
 
         # 성과 기반 조정 (높은 적중률)
@@ -184,7 +184,7 @@ def test_decay_engine():
             created_at=time.time() - 1 * 86400,
             hits=0, misses=0,
         )
-        test_result("decay_perf_boost", w_perf > w_base,
+        _test_result("decay_perf_boost", w_perf > w_base,
                     f"적중률 80% → {w_perf:.4f} > 기본 {w_base:.4f}")
 
         # 성과 기반 조정 (낮은 적중률)
@@ -192,7 +192,7 @@ def test_decay_engine():
             created_at=time.time() - 1 * 86400,
             hits=1, misses=9,  # 적중률 10%
         )
-        test_result("decay_perf_penalty", w_low < w_base,
+        _test_result("decay_perf_penalty", w_low < w_base,
                     f"적중률 10% → {w_low:.4f} < 기본 {w_base:.4f}")
 
         # decay_all: 규칙 추가 후 일괄 감쇠
@@ -212,24 +212,24 @@ def test_decay_engine():
         )
 
         result = engine.decay_all()
-        test_result("decay_all_run", result["total"] >= 2,
+        _test_result("decay_all_run", result["total"] >= 2,
                     f"total={result['total']}, decayed={result['decayed']}, "
                     f"deactivated={result['deactivated']}")
 
         # 300일된 규칙은 비활성화 되어야 함 (exp(-0.01*300) ≈ 0.05 < 0.1)
         old_check = store.get(old_rule.rule_id)
-        test_result("decay_deactivate_old", not old_check.active,
+        _test_result("decay_deactivate_old", not old_check.active,
                     f"300일 규칙: active={old_check.active}, weight={old_check.weight:.4f}")
 
         # should_run_decay (방금 실행 후)
-        test_result("decay_should_not_run", not engine.should_run_decay(),
+        _test_result("decay_should_not_run", not engine.should_run_decay(),
                     "방금 실행 → False")
 
         # get_decay_preview
         store.add(condition="미리보기용 규칙", action="테스트",
                   confidence=0.5)
         preview = engine.get_decay_preview()
-        test_result("decay_preview", isinstance(preview, list),
+        _test_result("decay_preview", isinstance(preview, list),
                     f"preview items={len(preview)}")
 
     finally:
@@ -251,7 +251,7 @@ def test_trading_brain():
         store = RuleStore(rules_path=tmp_path)
         brain = TradingBrain(rule_store=store)
 
-        test_result("brain_init", brain.rule_store is not None
+        _test_result("brain_init", brain.rule_store is not None
                     and brain.decay_engine is not None,
                     "rule_store + decay_engine 초기화 OK")
 
@@ -270,23 +270,23 @@ def test_trading_brain():
         # consult - 매칭되는 시그널
         signal = {"symbol": "ETHUSDT", "direction": "long", "gap": 0.3}
         advice = brain.consult(signal)
-        test_result("brain_consult_keys",
+        _test_result("brain_consult_keys",
                     all(k in advice for k in ["applicable_rules", "coin_winrate",
                                                "pattern_winrate", "brain_confidence",
                                                "advice"]),
                     f"keys={list(advice.keys())}")
 
-        test_result("brain_consult_rules", len(advice["applicable_rules"]) >= 1,
+        _test_result("brain_consult_rules", len(advice["applicable_rules"]) >= 1,
                     f"applicable_rules={len(advice['applicable_rules'])}")
 
-        test_result("brain_consult_confidence",
+        _test_result("brain_consult_confidence",
                     0.0 < advice["brain_confidence"] <= 1.0,
                     f"brain_confidence={advice['brain_confidence']}")
 
         # consult - 시장 상태 포함
         market = {"btc_level": 4, "volatility": "high"}
         advice2 = brain.consult(signal, market_state=market)
-        test_result("brain_consult_market", "advice" in advice2,
+        _test_result("brain_consult_market", "advice" in advice2,
                     f"advice={advice2['advice'][:50]}...")
 
         # record_trade_result
@@ -297,27 +297,27 @@ def test_trading_brain():
 
         # 승률 반영 확인 (2W/1L = 0.667)
         advice3 = brain.consult({"symbol": "ETHUSDT", "direction": "long", "gap": 0.3})
-        test_result("brain_winrate_updated",
+        _test_result("brain_winrate_updated",
                     advice3["coin_winrate"] != 0.5,
                     f"ETH winrate={advice3['coin_winrate']:.4f} (2W/1L)")
 
-        test_result("brain_pattern_winrate",
+        _test_result("brain_pattern_winrate",
                     advice3["pattern_winrate"] != 0.5 or True,  # 패턴 매핑 확인
                     f"pattern_winrate={advice3['pattern_winrate']:.4f}")
 
         # get_stats
         stats = brain.get_stats()
-        test_result("brain_stats",
+        _test_result("brain_stats",
                     stats["coins_tracked"] >= 2
                     and stats["rules"]["total_rules"] == 2,
                     f"coins={stats['coins_tracked']}, rules={stats['rules']['total_rules']}")
 
-        test_result("brain_top_coins", len(stats["top_coins"]) >= 1,
+        _test_result("brain_top_coins", len(stats["top_coins"]) >= 1,
                     f"top_coins={[c['symbol'] for c in stats['top_coins']]}")
 
         # run_maintenance
         maint = brain.run_maintenance()
-        test_result("brain_maintenance", maint is not None or maint is None,
+        _test_result("brain_maintenance", maint is not None or maint is None,
                     f"maintenance result={'실행' if maint else '스킵'}")
 
     finally:
@@ -339,7 +339,7 @@ def test_reflection_engine():
         store = RuleStore(rules_path=tmp_path)
         engine = ReflectionEngine(rule_store=store)
 
-        test_result("reflection_init", engine.rule_store is not None,
+        _test_result("reflection_init", engine.rule_store is not None,
                     "rule_store 연결 OK")
 
         # 패턴 1: SL 히트 + 방향 맞음
@@ -352,11 +352,11 @@ def test_reflection_engine():
             "market_state": {"btc_level": 2, "atr_pct": 1.5, "fear_greed": 45},
         }
         result1 = engine.reflect(trade1)
-        test_result("reflection_sl_hit",
+        _test_result("reflection_sl_hit",
                     result1["method"] == "rule_based"
                     and "SL" in result1["key_factor"],
                     f"method={result1['method']}, factor={result1['key_factor'][:30]}")
-        test_result("reflection_sl_rule_created",
+        _test_result("reflection_sl_rule_created",
                     len(result1["new_rules"]) >= 1,
                     f"rules_created={len(result1['new_rules'])}")
 
@@ -368,7 +368,7 @@ def test_reflection_engine():
             "market_state": {"btc_level": 3, "atr_pct": 2.0, "fear_greed": 30},
         }
         result2 = engine.reflect(trade2)
-        test_result("reflection_fast_tp",
+        _test_result("reflection_fast_tp",
                     "빠른" in result2["key_factor"],
                     f"factor={result2['key_factor']}")
 
@@ -380,7 +380,7 @@ def test_reflection_engine():
             "market_state": {"btc_level": 1, "atr_pct": 1.0, "fear_greed": 50},
         }
         result3 = engine.reflect(trade3)
-        test_result("reflection_timeout",
+        _test_result("reflection_timeout",
                     "횡보" in result3["key_factor"] or "타임아웃" in result3["key_factor"],
                     f"factor={result3['key_factor']}")
 
@@ -392,10 +392,10 @@ def test_reflection_engine():
             "market_state": {"btc_level": 5, "atr_pct": 3.5, "fear_greed": 12},
         }
         result4 = engine.reflect(trade4)
-        test_result("reflection_btc_danger",
+        _test_result("reflection_btc_danger",
                     "BTC" in result4["key_factor"] and "레벨" in result4["key_factor"],
                     f"factor={result4['key_factor']}")
-        test_result("reflection_btc_rule",
+        _test_result("reflection_btc_rule",
                     len(result4["new_rules"]) >= 1,
                     f"rules_created={len(result4['new_rules'])}")
 
@@ -407,19 +407,19 @@ def test_reflection_engine():
             "market_state": {"btc_level": 2, "atr_pct": 1.5, "fear_greed": 40},
         }
         result5 = engine.reflect(trade5)
-        test_result("reflection_normal_win",
+        _test_result("reflection_normal_win",
                     "수익" in result5["key_factor"] or "정상" in result5["key_factor"],
                     f"factor={result5['key_factor']}")
 
         # stats
         stats = engine.stats
-        test_result("reflection_stats",
+        _test_result("reflection_stats",
                     stats["total_reflections"] == 5,
                     f"reflections={stats['total_reflections']}, "
                     f"rules={stats['rules_in_store']}")
 
         # 규칙 저장소에 반영 확인
-        test_result("reflection_store_populated",
+        _test_result("reflection_store_populated",
                     store.count >= 3,
                     f"store에 {store.count}개 규칙 생성됨")
 
@@ -453,25 +453,25 @@ def test_integration():
             "market_state": {"btc_level": 2, "atr_pct": 1.5, "fear_greed": 45},
         }
         ref_result = reflection.reflect(trade)
-        test_result("integ_reflect", len(ref_result["new_rules"]) >= 1,
+        _test_result("integ_reflect", len(ref_result["new_rules"]) >= 1,
                     f"반성 → {len(ref_result['new_rules'])}개 규칙 생성")
 
         # 2. 같은 패턴 시그널에서 brain이 규칙 조회
         signal = {"symbol": "ETHUSDT", "direction": "long", "gap": 0.3}
         advice = brain.consult(signal)
-        test_result("integ_consult_after_reflect",
+        _test_result("integ_consult_after_reflect",
                     len(advice["applicable_rules"]) >= 1,
                     f"반성 규칙이 자문에 반영됨: {len(advice['applicable_rules'])}개")
 
         # 3. 거래 결과 기록 → 승률 업데이트
         brain.record_trade_result("ETHUSDT", "long", 0.3, "SL", -15)
         advice2 = brain.consult(signal)
-        test_result("integ_winrate_reflect",
+        _test_result("integ_winrate_reflect",
                     advice2["coin_winrate"] < 0.5,
                     f"손실 기록 → winrate={advice2['coin_winrate']:.4f}")
 
         # 4. 규칙 스토어 공유 확인
-        test_result("integ_shared_store",
+        _test_result("integ_shared_store",
                     brain.rule_store is reflection.rule_store,
                     "brain과 reflection이 같은 store 공유")
 

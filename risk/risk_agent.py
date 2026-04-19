@@ -19,6 +19,14 @@ from risk.models import (
 from risk import config
 
 
+def _safe_risk_level(value: str) -> RiskLevel:
+    """LLM 출력의 대소문자 불일치에 안전한 RiskLevel 변환"""
+    try:
+        return RiskLevel(str(value).lower().strip())
+    except ValueError:
+        return RiskLevel.MEDIUM
+
+
 class RiskAgent(AgentBase):
     """
     포지션별 리스크 평가 + SL/TP/사이징 제안.
@@ -74,7 +82,7 @@ class RiskAgent(AgentBase):
         for pa in data.get("position_assessments", []):
             position_assessments.append(PositionRiskAssessment(
                 symbol=pa.get("symbol", ""),
-                risk_level=RiskLevel(pa.get("risk_level", "medium")),
+                risk_level=_safe_risk_level(pa.get("risk_level", "medium")),
                 sl_suggestion=float(pa.get("sl_suggestion", 0)),
                 tp_suggestion=float(pa.get("tp_suggestion", 0)),
                 sizing_mult=float(pa.get("sizing_mult", 1.0)),
@@ -83,7 +91,7 @@ class RiskAgent(AgentBase):
             ))
 
         return RiskAssessment(
-            portfolio_risk=RiskLevel(data.get("portfolio_risk", "medium")),
+            portfolio_risk=_safe_risk_level(data.get("portfolio_risk", "medium")),
             position_assessments=position_assessments,
             max_drawdown_pct=float(data.get("max_drawdown_pct", 0)),
             total_risk_score=float(data.get("total_risk_score", 50)),
@@ -187,7 +195,7 @@ class RiskAgent(AgentBase):
 
         # 청산 거리
         if pos.entry_price > 0 and pos.current_price > 0:
-            max_adverse = 100.0 / pos.leverage
+            max_adverse = 100.0 / max(1, pos.leverage)
             if pos.direction == "long":
                 current_move = (pos.current_price - pos.entry_price) / pos.entry_price * 100
             else:

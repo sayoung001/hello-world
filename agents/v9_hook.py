@@ -138,6 +138,7 @@ class AgentHook:
         self._state_builder = EnrichedStateBuilder(brain=self._brain)
         # 포지션별 진입 시 스냅샷 저장 (청산 시 반성 자료)
         self._entry_snapshots: dict[str, dict] = {}
+        self._snapshot_lock = threading.Lock()
 
     # ── 오케스트레이터 초기화 ──
 
@@ -517,12 +518,13 @@ class AgentHook:
             # 3. 진입 스냅샷 저장 (청산 시 반성 자료)
             sym = signal.get("symbol", "")
             if sym:
-                self._entry_snapshots[sym] = {
-                    "signal": dict(signal),
-                    "market_state": dict(market_data or {}),
-                    "decision_risk": decision.risk_level.value,
-                    "entry_time": time.time(),
-                }
+                with self._snapshot_lock:
+                    self._entry_snapshots[sym] = {
+                        "signal": dict(signal),
+                        "market_state": dict(market_data or {}),
+                        "decision_risk": decision.risk_level.value,
+                        "entry_time": time.time(),
+                    }
 
             # 4. 응답 구성
             brain = enriched.get("brain_advice", {})
@@ -569,7 +571,8 @@ class AgentHook:
                         pass
 
                 # 진입 스냅샷 복구
-                snapshot = self._entry_snapshots.pop(sym, {})
+                with self._snapshot_lock:
+                    snapshot = self._entry_snapshots.pop(sym, {})
                 signal = snapshot.get("signal", {})
                 market = snapshot.get("market_state", {})
 
