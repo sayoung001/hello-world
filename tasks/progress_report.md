@@ -1,4 +1,4 @@
-# Phase A + B + C 구현 진행 보고서
+# Phase A + B + C + D 구현 진행 보고서
 
 > 작성일: 2026-04-16
 > 작성자: Claude Code
@@ -424,9 +424,207 @@ LLM 없이 규칙 기반 폴백으로 전체 로직 검증.
 
 ---
 
-## 다음 단계 (Phase D: 통합)
+## Phase D: 통합 레이어 (완료)
 
-1. Vision + RAG + Memory → enriched_state 생성
-2. Risk Pipeline → auto_trader_v9.py 연동
-3. 메모리 시스템 → auto_trader_v9.py 거래 종료 후 자동 반성
-4. 백테스트 검증 (Walk-Forward 3윈도우)
+### 6. 통합 모듈
+
+| 파일 | 역할 | 상태 |
+|------|------|------|
+| `agents/enriched_state.py` | Vision + RAG + Memory → `PipelineContext` 통합 빌더 | 완료 |
+| `agents/v9_hook.py` 확장 | `risk_check()` 메서드 추가 + 자동 반성 루프 | 완료 |
+
+### EnrichedStateBuilder 설계
+
+```
+signal + positions + market_data + (선택) vision_analysis
+  ↓
+EnrichedStateBuilder.build()
+  ↓
+{
+  "pipeline_context": PipelineContext,  # Risk Pipeline 입력
+  "brain_advice": dict,                 # TradingBrain.consult() 결과
+  "rag_features": dict,                 # RAG 수치 피처 (승률/SL히트율 등)
+  "vision_features": dict,              # Vision 수치 피처 (정합도/리스크)
+  "rag_text": str,                       # LLM 프롬프트용 자연어 컨텍스트
+}
+```
+
+**핵심 특징**:
+- 외부 모듈 없이도 빈 입력으로 정상 작동 (지연 로딩)
+- v9 Position 객체 / dict 양방향 변환 지원
+- PnL/ROE 자동 계산 (20x 레버리지 반영)
+
+### v9_hook 확장 (Phase D)
+
+#### 초기화 시 자동 구성
+```python
+hook = AgentHook(
+    enable_risk_pipeline=True,   # Phase B 리스크 파이프라인
+    enable_memory=True,          # Phase C 메모리 시스템
+)
+# 자동 구성:
+# - RiskPipeline (Analyst→Risk→Hedge→Leverage)
+# - RuleStore + TradingBrain + ReflectionEngine
+# - EnrichedStateBuilder (Brain 주입)
+```
+
+#### 새로운 API
+
+| 메서드 | 트리거 | 동작 |
+|--------|--------|------|
+| `risk_check(signal, positions, market_data, ...)` | 진입 전 | 리스크 파이프라인 실행 + 진입 스냅샷 저장 |
+| `on_position_close(pos, reason, pnl_pct)` 확장 | 청산 시 | Shadow 기록 + **자동 반성 → 규칙 생성** |
+| `get_brain_advice(signal, market_state)` | 임의 | Brain 자문만 조회 |
+| `get_memory_stats()` | 임의 | 브레인 + 반성 통계 |
+
+#### 자동 학습 루프
+```
+진입: risk_check()
+  → PipelineContext 빌드 + 리스크 판단 + 스냅샷 저장
+
+청산: on_position_close()
+  → 스냅샷 복구 + ReflectionEngine.reflect() → 규칙 생성
+  → TradingBrain.record_trade_result() → 승률 업데이트
+  → (선택) 텔레그램 보고 "🧠 [Reflection] ..."
+
+다음 진입: risk_check()
+  → Brain 자문에 방금 생성된 규칙 반영 → 자문 신뢰도↑
+```
+
+### Phase D 테스트 결과 (tests/test_phase_d.py)
+
+실행 일시: 2026-04-19
+
+**총 45건: PASS 45, FAIL 0**
+
+| 카테고리 | PASS | 주요 검증 항목 |
+|----------|------|----------------|
+| EnrichedStateBuilder (최소) | 7 | 빈 초기화, PipelineContext 생성, 시장/시그널 전달, 빈 피처 |
+| EnrichedStateBuilder (포지션) | 6 | dict/객체 변환, PnL/ROE 자동 계산, 총 노출 집계 |
+| Builder + Brain 통합 | 4 | Brain keys, 규칙 반환, 승률 반영, summary |
+| v9_hook 초기화 | 7 | 모듈 import, RiskPipeline/Brain/Reflection/Builder 생성 |
+| risk_check 동작 | 8 | 정상/위기 시장 판단, 레버리지 조정, 스냅샷 저장 |
+| 자동 반성 루프 | 5 | 스냅샷 소비, 규칙 생성, brain 업데이트, 다중 거래 |
+| 학습 루프 | 4 | 초기 자문, 규칙 학습, 승률 변화, 메모리 통계 |
+| 비활성화 플래그 | 4 | risk_pipeline/memory OFF, None 반환 |
+
+### 시나리오별 검증
+
+#### 시나리오 A: 정상 시장 진입
+```
+입력: ETHUSDT 롱 GAP 0.3%, BTC $95K level 1, ATR 1.2%, FGI 50
+결과: risk=low, urgency=low, leverage=15x, approved=True
+소요: <0.3초
+```
+
+#### 시나리오 B: 위기 시장 + 손실 포지션
+```
+입력: AVAXUSDT + SOLUSDT(-$20), BTC $82K level 5, ATR 3.8%, FGI 10, 연속손실 3
+결과: risk=critical, urgency=high, leverage=10x
+소요: <0.1초
+```
+
+#### 시나리오 C: 자동 학습 사이클 (3거래)
+```
+SOLUSDT 롱 GAP 0.4% × 3회 (SL/TP/TP)
+→ 반성 3회 실행 (rule_based)
+→ SOL 승률 0.5000 → 0.6667 (2W/1L)
+→ 다음 시그널 자문에 반영
+```
+
+---
+
+## 누적 테스트 요약 (최종)
+
+| Phase | 총 | PASS | FAIL | 비고 |
+|-------|-----|------|------|------|
+| A (RAG + Vision) | 28 | 25 | 3 | HuggingFace 네트워크 차단 (GCE 정상 예상) |
+| B (리스크 에이전트) | 48 | 48 | 0 | |
+| C (적응형 메모리) | 50 | 50 | 0 | |
+| D (통합 레이어) | 45 | 45 | 0 | |
+| **합계** | **171** | **168** | **3** | |
+
+---
+
+## auto_trader_v9.py 연동 가이드
+
+### 기존 AgentHook 사용처 (변경 없음)
+```python
+# auto_trader_v9.py 내부 (이미 연동됨)
+self.agent_hook = AgentHook(self.cg_client, self.btc_trend, self.tg,
+                            exchange=self.exchange)
+self.agent_hook.crash_check(self.positions)       # 매 15초
+self.agent_hook.on_position_open(pos, ...)         # 진입 시
+self.agent_hook.periodic_check(self.positions)    # 4시간 주기
+self.agent_hook.on_position_close(pos, reason, pnl)  # 청산 시 (자동 반성 포함)
+```
+
+### 신규 연동 (진입 전 리스크 체크)
+```python
+# auto_trader_v9.py의 try_enter() 직전에 추가
+result = self.agent_hook.risk_check(
+    signal=signal_dict,
+    positions=self.positions,
+    market_data={
+        "btc_price": btc_price,
+        "btc_level": btc_level,
+        "btc_atr_pct": btc_atr,
+        "fear_greed": fgi,
+        "funding_rate": funding,
+    },
+    account_balance=self.balance,
+    recent_losses=self.consecutive_losses,
+)
+if result and not result["approved"]:
+    print(f"  [리스크 거부] {result['risk_level']}: {result['brain_advice']}")
+    return  # 진입 스킵
+# 레버리지 조정
+leverage = result["recommended_leverage"] if result else 20
+```
+
+### 데이터 흐름 (Phase A+B+C+D 통합)
+```
+┌─────────────────────────────────────────────────────────┐
+│  auto_trader_v9.py (기존)                               │
+│  - convergence_strategy.py → signal 생성                │
+│  - BTC 필터 / CoinGlass / exchange                      │
+└───────────────┬─────────────────────────────────────────┘
+                │ signal + positions + market_data
+                ▼
+┌─────────────────────────────────────────────────────────┐
+│  EnrichedStateBuilder (Phase D)                         │
+│  - Vision AI 피처 (선택)                                │
+│  - RAG 컨텍스트 (선택)                                  │
+│  - Brain 자문 (Phase C)                                 │
+│  → PipelineContext                                      │
+└───────────────┬─────────────────────────────────────────┘
+                │ PipelineContext
+                ▼
+┌─────────────────────────────────────────────────────────┐
+│  RiskPipeline (Phase B)                                 │
+│  Analyst → Risk → Hedge → Leverage                      │
+│  → RiskDecision                                         │
+└───────────────┬─────────────────────────────────────────┘
+                │ approved? + leverage + hedge
+                ▼
+         진입 / 거부 / 레버리지 조정
+
+              (청산 시)
+                ▼
+┌─────────────────────────────────────────────────────────┐
+│  ReflectionEngine (Phase C)                             │
+│  → 규칙 생성/갱신                                       │
+│  → Brain 승률 업데이트                                  │
+│  → 텔레그램 학습 보고                                   │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 다음 단계 (Phase E 후보)
+
+1. **실데이터 통합 테스트** — GCE 서버에서 HuggingFace 임베딩 + ChromaDB 동작 검증
+2. **Walk-Forward 백테스트** — 리스크 파이프라인이 PF 1.14 → 1.3+ 개선 가능한지 검증 (3윈도우)
+3. **LLM API 키 적용** — 실제 Claude Haiku 호출 → 반성 품질 평가 (규칙 기반 vs LLM 비교)
+4. **Phase 4 RL 연계** — `rl/agent/sl_agent.py`에 EnrichedStateBuilder의 피처를 state로 주입
+5. **Shadow Mode 운영** — auto_trader_v9.py에 `risk_check()` 추가 후 실제 개입 없이 권고만 로깅 → 정확도 측정

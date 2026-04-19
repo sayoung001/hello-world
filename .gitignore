@@ -8,3 +8,5 @@ build/
 .ipynb_checkpoints/
 data/shadow_logs/
 data/memory/
+agents/data/memory/
+agents/data/shadow_logs/
