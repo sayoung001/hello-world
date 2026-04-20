@@ -1,6 +1,6 @@
-# Phase A + B + C + D + E 구현 진행 보고서
+# Phase A + B + C + D + E + F 구현 진행 보고서
 
-> 작성일: 2026-04-16 (Phase E 추가: 2026-04-19)
+> 작성일: 2026-04-16 (Phase E: 2026-04-19, Phase F: 2026-04-20)
 > 작성자: Claude Code
 > 기반: plan_vision_rag_risk_agent.md
 
@@ -704,16 +704,128 @@ python backtests/walk_forward.py --data signals.csv --level production --output 
 
 ---
 
+## Phase F: 3-Cycle 코드 리뷰 결함 수정 (완료)
+
+> 구현일: 2026-04-20
+> 커밋: `f84e8fc`
+
+### 배경
+
+Phase A~E 완료 후 전체 코드 3-cycle 리뷰 (전체→중분류→소분류→기초 × 3회) 실시.
+7 CRITICAL, 8 HIGH, 6 MEDIUM 이슈 발견. Phase F에서 CRITICAL + HIGH 전체 수정.
+
+### 발견된 핵심 문제
+
+**가장 심각한 발견**: Phase B~E 리스크 파이프라인이 완전 구현되었으나, `auto_trader_v9.py`의 `try_enter()`에서 **한 번도 호출되지 않았음**. `risk_check()` 메서드가 정의만 되고 실제 진입 흐름에 연결되지 않은 상태.
+
+### 수정 내역 (10건, 8개 파일)
+
+#### CRITICAL 수정
+
+| 코드 | 파일 | 수정 내용 |
+|------|------|----------|
+| **C1** | `auto_trader_v9.py` | `risk_check()`을 `try_enter()`에 연결 — BTC 필터 이후, SL 계산 이전에 삽입. high/critical 시 진입 차단 |
+| **C2/C3** | `auto_trader_v9.py` | 시그널 dict에 `gap`, `adx` 최상위 필드 추가 — `details.gap_pct`/`adx_value` 외에 Memory/Brain이 읽는 필드 통일 |
+| **C4** | `agents/memory/rule_store.py` | `threading.Lock` 추가 + atomic write (`tmp → os.replace`). add/update/record_hit/record_miss 모두 잠금 |
+| **C5** | `risk/risk_agent.py` | 청산거리 계산에서 `max(1, pos.leverage)` 방어 — leverage=0 시 ZeroDivisionError 방지 |
+| **C7** | `risk/leverage_agent.py` | ATR→레버리지 매핑: 단계 함수 → **선형 보간** 변환. ATR 1.0 경계에서 20x→15x 급변 제거 |
+
+#### HIGH 수정
+
+| 코드 | 파일 | 수정 내용 |
+|------|------|----------|
+| **H1** | `risk/risk_agent.py` | `_safe_risk_level()` 함수 추가 — LLM이 "HIGH", "Medium" 등 대소문자 불일치 출력 시 `.lower().strip()` 정규화 + 잘못된 값 → MEDIUM 폴백 |
+| **H5** | `agents/core/base.py` | 캐시 비용 공식 수정: `(inp - cache_read)` → `(inp - cache_read - cache_write)`. cache_write 토큰이 inp에 이미 포함되어 이중 계산됨 |
+
+#### 추가 수정
+
+| 항목 | 파일 | 수정 내용 |
+|------|------|----------|
+| Pattern 3 타임아웃 | `agents/memory/reflection_engine.py` | 패턴 3 (96캔들+ 타임아웃) 감지 시 규칙 생성 누락 → `rule_store.add()` 추가 |
+| _entry_snapshots Lock | `agents/v9_hook.py` | `_snapshot_lock` 추가 — `risk_check()` (메인 스레드)와 `_reflect_on_close()` (daemon 스레드) 간 경쟁 방지 |
+| gap 필드 폴백 | `agents/memory/trading_brain.py` | `signal.get("gap")` → `gap \|\| gap_pct \|\| details.gap_pct` 순차 탐색. 기존에는 항상 0 반환 |
+| test_result 리네임 | `tests/test_phase_a~d.py` | `test_result()` → `_test_result()` — pytest가 fixture로 오인식하여 전체 테스트 실패 |
+
+### C1 상세: risk_check() 연결 (핵심)
+
+```python
+# auto_trader_v9.py try_enter() 내부 (BTC 필터 이후, SL 계산 이전)
+if self.agent_hook is not None:
+    risk_result = self.agent_hook.risk_check(
+        signal=signal,
+        positions=[p.__dict__ for p in self.positions],
+        account_balance=self.executor.total_balance(),
+    )
+    if risk_result and not risk_result.get("approved", True):
+        print(f"  🛑 리스크 차단: {sym} {d} — 레벨: {risk_result['risk_level']}")
+        return
+```
+
+**안전 설계**:
+- `agent_hook`이 None이면 스킵 (에이전트 미초기화 시)
+- `risk_check()` 자체 예외 시 `try/except`로 잡고 진입 계속 (봇 중단 방지)
+- `risk_result`가 None이면 스킵 (리스크 파이프라인 비활성화 시)
+- `approved` 키 없으면 기본 True (안전한 방향)
+
+### C7 상세: ATR→레버리지 선형 보간
+
+```
+기존 (단계 함수):
+  ATR 0.99% → 20x
+  ATR 1.01% → 15x  ← 급변! (0.02% 차이로 5x 변동)
+
+수정 (선형 보간):
+  ATR 0.5% → 20x
+  ATR 1.0% → 20x
+  ATR 1.5% → 18x  ← 연속적
+  ATR 2.0% → 15x
+  ATR 2.5% → 14x  ← 연속적
+  ATR 3.0% → 12x
+```
+
+### H5 상세: 캐시 비용 공식 수정
+
+```
+Anthropic API에서 cache_write 토큰은 input_tokens에 포함됨.
+
+기존 (잘못된):
+  effective = (inp - cache_read) × 1.0 + cache_read × 0.1 + cache_write × 1.25
+  → cache_write가 (inp - cache_read)에도 포함 + 별도 1.25배 → 이중 계산
+
+수정:
+  effective = (inp - cache_read - cache_write) × 1.0 + cache_read × 0.1 + cache_write × 1.25
+  → cache_write를 일반 입력에서 제외 후 125% 요율 적용
+```
+
+### Phase F 테스트 결과 (tests/test_phase_f.py)
+
+실행 일시: 2026-04-20
+
+**총 7 함수: PASS 7, FAIL 0**
+
+| 테스트 | 결과 | 검증 항목 |
+|--------|------|----------|
+| test_safe_risk_level | PASS | "HIGH"/"Medium"/" low " → 정상 변환, "unknown" → MEDIUM 폴백 |
+| test_atr_leverage_interpolation | PASS | ATR 0.5→20x, 1.5→18x, 2.5→14x, 인접값 차이 ≤3 (연속성) |
+| test_cache_cost_formula | PASS | cache_write 이중 계산 제거 확인 |
+| test_rule_store_thread_safety | PASS | 4스레드 × 5규칙 = 20건 동시 저장, JSON 무결성 확인 |
+| test_leverage_zero_defense | PASS | leverage=0 → ZeroDivisionError 없이 정상 평가 |
+| test_trading_brain_gap_fallback | PASS | gap / gap_pct / details.gap_pct 3가지 형태 모두 정상 |
+| test_timeout_pattern_creates_rule | PASS | 96캔들+ 타임아웃 시 규칙 1건 생성 |
+
+---
+
 ## 누적 테스트 요약 (최종)
 
 | Phase | 총 | PASS | FAIL | 비고 |
 |-------|-----|------|------|------|
-| A (RAG + Vision) | 28 | 25 | 3 | HuggingFace 네트워크 차단 (GCE 정상 예상) |
-| B (리스크 에이전트) | 48 | 48 | 0 | |
-| C (적응형 메모리) | 50 | 50 | 0 | |
-| D (통합 레이어) | 45 | 45 | 0 | |
-| E (LLM 최적화 + WF) | 36 | 36 | 0 | |
-| **합계** | **207** | **204** | **3** | |
+| A (RAG + Vision) | 9 | 9 | 0 | test_result 리네임 후 정상 |
+| B (리스크 에이전트) | 8 | 8 | 0 | |
+| C (적응형 메모리) | 5 | 5 | 0 | |
+| D (통합 레이어) | 8 | 8 | 0 | |
+| E (LLM 최적화 + WF) | 7 | 7 | 0 | |
+| F (결함 수정) | 7 | 7 | 0 | |
+| **합계** | **44** | **44** | **0** | |
 
 ---
 
@@ -721,5 +833,6 @@ python backtests/walk_forward.py --data signals.csv --level production --output 
 
 1. **실데이터 Walk-Forward 실행** — GCE/Windows 서버에서 `signals_all_labeled.csv` (370만 행) 투입 → Baseline vs Enhanced vs Memory PF 비교
 2. **LLM API 키 적용** — 실제 Claude Haiku 호출 → 반성 품질 평가 (규칙 기반 vs LLM 비교)
-3. **Shadow Mode 운영** — auto_trader_v9.py에 `risk_check()` 추가 후 실제 개입 없이 권고만 로깅 → 정확도 측정
+3. **Shadow Mode 운영** — `risk_check()` 연결 완료 → 실제 개입 효과 측정 (Shadow Mode에서 approved/rejected 비율 로깅)
 4. **Phase 4 RL 연계** — `rl/agent/sl_agent.py`에 EnrichedStateBuilder의 피처를 state로 주입
+5. **MEDIUM 이슈 후속 처리** — 멀티프로세싱 LLM 비용 추적 격리, MarketState ATR 기본값 보수화 검토
