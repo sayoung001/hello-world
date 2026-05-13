@@ -656,6 +656,120 @@ class AgentHook:
             print(f"  [v9_hook] 메모리 통계 실패: {e}")
             return None
 
+    # ── [Phase F] 온디맨드 분석 (텔레그램 명령) ──
+
+    def analyze_position(self, symbol: str, positions: list) -> str:
+        """특정 코인 포지션 분석 → 텔레그램 메시지 반환"""
+        matching = [p for p in positions if getattr(p, "symbol", "") == symbol]
+        if not matching:
+            return f"❌ {symbol} 포지션 없음"
+
+        try:
+            pos_infos = self._convert_positions(matching)
+            orch = self._get_orchestrator()
+            consensus = orch.run(positions=pos_infos)
+            self._memory.store(consensus)
+            self._shadow.log_analysis(consensus, trigger="수동요청")
+
+            messages = self._formatter.format_consensus(consensus)
+            return f"[🔎 포지션 판결 — {symbol}]\n" + "\n".join(messages)
+        except Exception as e:
+            return f"❌ {symbol} 분석 실패: {e}"
+
+    def analyze_entry(self, symbol: str, exchange=None) -> str:
+        """특정 코인 진입 판단 → 텔레그램 메시지 반환"""
+        try:
+            if not exchange:
+                return "❌ exchange 미연결"
+
+            ohlcv = exchange.fetch_ohlcv(symbol, '15m', limit=201)
+            import pandas as pd
+            df = pd.DataFrame(ohlcv, columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
+            df['Date'] = pd.to_datetime(df['Date'], unit='ms')
+            df.set_index('Date', inplace=True)
+            if len(df) > 0:
+                now_ts = pd.Timestamp.now(tz='UTC')
+                last_start = df.index[-1]
+                if hasattr(last_start, 'tz') and last_start.tz is None:
+                    last_start = last_start.tz_localize('UTC')
+                if now_ts < last_start + pd.Timedelta(minutes=15):
+                    df = df.iloc[:-1]
+            if len(df) < 100:
+                return f"❌ {symbol} 데이터 부족 ({len(df)}봉)"
+
+            from convergence_strategy import ConvergenceStrategy
+            strategy = ConvergenceStrategy()
+            result = strategy.detect(df)
+
+            short_sym = symbol.replace('/USDT', '')
+            close = df['Close'].astype(float)
+            ema12 = close.ewm(span=12).mean().iloc[-1]
+            ema26 = close.ewm(span=26).mean().iloc[-1]
+            gap = abs(ema12 - ema26) / close.iloc[-1] * 100
+            adx_val = result.get('details', {}).get('adx', 0) if result else 0
+            rsi_val = result.get('details', {}).get('rsi', 50) if result else 50
+
+            lines = [f"🔎 진입 판단 — {short_sym}"]
+            lines.append(f"{'━' * 25}")
+            lines.append(f"EMA GAP: {gap:.3f}%")
+            lines.append(f"ADX: {adx_val:.1f} | RSI: {rsi_val:.1f}")
+            lines.append(f"현재가: {close.iloc[-1]:,.2f}")
+
+            if not result:
+                lines.append(f"\n📋 시그널: 없음 (수렴 미감지)")
+                lines.append(f"{'━' * 25}")
+                return "\n".join(lines)
+
+            direction = result.get('direction', '?')
+            conf = result.get('confidence', 0)
+            lines.append(f"\n📋 시그널: {direction.upper()}")
+            lines.append(f"신뢰도: {conf} | 방향: {direction}")
+
+            signal = {
+                "symbol": symbol, "direction": direction,
+                "confidence": conf, "gap": gap, "adx": adx_val,
+                "adx_value": adx_val, "rsi": rsi_val,
+            }
+
+            if self.enable_risk_pipeline:
+                risk_result = self.risk_check(signal=signal)
+                if risk_result:
+                    risk_emoji = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}
+                    rl = risk_result.get("risk_level", "?")
+                    lines.append(f"\n리스크: {risk_emoji.get(rl, '⚪')} {rl.upper()}")
+                    lines.append(f"레버리지 권고: {risk_result.get('recommended_leverage', 20)}x")
+                    approved = risk_result.get("approved", True)
+                    lines.append(f"진입 승인: {'✅ 가능' if approved else '🛑 거부'}")
+
+            if self.enable_memory:
+                brain = self.get_brain_advice(signal)
+                if brain:
+                    lines.append(f"\n🧠 Brain 신뢰도: {brain.get('brain_confidence', 0):.2f}")
+                    advice = brain.get("advice", "")
+                    if advice:
+                        lines.append(f"자문: {advice[:120]}")
+
+            lines.append(f"{'━' * 25}")
+            return "\n".join(lines)
+
+        except Exception as e:
+            return f"❌ {symbol} 진입 분석 실패: {e}"
+
+    def analyze_market_now(self, positions: list) -> str:
+        """즉시 시장 분석 → 텔레그램 메시지 반환"""
+        try:
+            pos_infos = self._convert_positions(list(positions)) if positions else []
+            orch = self._get_orchestrator()
+            consensus = orch.run(positions=pos_infos)
+            self._memory.store(consensus)
+            self._shadow.log_analysis(consensus, trigger="수동요청")
+            self._last_analysis_time = time.time()
+
+            messages = self._formatter.format_consensus(consensus)
+            return f"[🔎 시장 분석 (수동)]\n" + "\n".join(messages)
+        except Exception as e:
+            return f"❌ 시장 분석 실패: {e}"
+
     # ── 유틸리티 ──
 
     def get_accuracy_report(self) -> dict:

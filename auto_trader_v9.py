@@ -42,7 +42,7 @@ v8 대비 변경:
   python auto_trader_v9.py --mode D --live       # 실전 CasTrail
 """
 
-import ccxt, pandas as pd, numpy as np, time, json, os, sys, requests, traceback, math
+import ccxt, pandas as pd, numpy as np, time, json, os, sys, requests, traceback, math, threading
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
@@ -194,6 +194,7 @@ class Telegram:
     def __init__(self, token, chat_id):
         self.token = token; self.chat_id = chat_id
         self.ok = bool(token and chat_id)
+        self._update_offset = 0
 
     @staticmethod
     def _escape_html(text):
@@ -228,6 +229,28 @@ class Telegram:
         """오류 알람 — HTML 이스케이프 적용"""
         safe_msg = self._escape_html(msg)
         self.send(f"🔴 오류 발생\n{safe_msg}")
+
+    def get_updates(self) -> list[dict]:
+        """텔레그램 메시지 수신 (명령어 처리용)"""
+        if not self.ok:
+            return []
+        try:
+            r = requests.get(
+                f"https://api.telegram.org/bot{self.token}/getUpdates",
+                params={"offset": self._update_offset, "timeout": 0, "limit": 10},
+                timeout=5,
+            )
+            if r.status_code != 200:
+                return []
+            results = r.json().get("result", [])
+            if results:
+                self._update_offset = results[-1]["update_id"] + 1
+            return [
+                u for u in results
+                if str(u.get("message", {}).get("chat", {}).get("id", "")) == str(self.chat_id)
+            ]
+        except Exception:
+            return []
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2346,6 +2369,150 @@ class ConvergenceTrader:
         self.tg.send(msg)
         print(msg)
 
+    # ── [Phase F] 텔레그램 명령어 처리 ──
+
+    def _process_telegram_commands(self):
+        """텔레그램 명령어 폴링 + 처리"""
+        try:
+            updates = self.tg.get_updates()
+        except Exception:
+            return
+
+        for update in updates:
+            msg = update.get("message", {})
+            text = msg.get("text", "").strip()
+            if not text:
+                continue
+            try:
+                self._handle_command(text)
+            except Exception as e:
+                print(f"  [TG 명령] 처리 오류: {e}")
+
+    def _handle_command(self, text: str):
+        """개별 명령어 파싱 + 실행"""
+        text_lower = text.lower().strip()
+
+        # /help — 명령어 목록
+        if text_lower in ("/help", "/명령어"):
+            self.tg.send(
+                "📋 사용 가능한 명령어\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "/포지션 <코인> — 보유 포지션 분석\n"
+                "  예: /포지션 ETH\n"
+                "/진입 <코인> — 진입 시그널 판단\n"
+                "  예: /진입 SOL\n"
+                "/시장 — 즉시 시장 분석\n"
+                "/상태 — 봇 상태 요약\n"
+                "/메모리 — Brain 메모리 통계\n"
+                "/help — 이 도움말"
+            )
+            return
+
+        # /포지션 <코인> — 보유 포지션 판결
+        if text_lower.startswith(("/포지션", "/position")):
+            symbol = self._parse_symbol(text)
+            if not symbol:
+                self.tg.send("❌ 사용법: /포지션 <코인>\n예: /포지션 ETH, /포지션 SOL")
+                return
+            if not self.agent_hook:
+                self.tg.send("❌ 에이전트 시스템 비활성화")
+                return
+            self.tg.send(f"🔍 {symbol} 포지션 분석 중...")
+
+            def _run():
+                result = self.agent_hook.analyze_position(symbol, self.positions)
+                self.tg.send(result[:4000])
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        # /진입 <코인> — 진입 시그널 판단
+        if text_lower.startswith(("/진입", "/entry")):
+            symbol = self._parse_symbol(text)
+            if not symbol:
+                self.tg.send("❌ 사용법: /진입 <코인>\n예: /진입 ETH, /진입 SOL")
+                return
+            if not self.agent_hook:
+                self.tg.send("❌ 에이전트 시스템 비활성화")
+                return
+            self.tg.send(f"🔍 {symbol} 진입 분석 중...")
+
+            def _run():
+                result = self.agent_hook.analyze_entry(symbol, exchange=self.exchange)
+                self.tg.send(result[:4000])
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        # /시장 — 즉시 시장 분석
+        if text_lower in ("/시장", "/market"):
+            if not self.agent_hook:
+                self.tg.send("❌ 에이전트 시스템 비활성화")
+                return
+            self.tg.send("🔍 시장 분석 중...")
+
+            def _run():
+                result = self.agent_hook.analyze_market_now(self.positions)
+                for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
+                    self.tg.send(chunk)
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        # /상태 — 봇 상태 요약
+        if text_lower in ("/상태", "/status"):
+            self.status_report()
+            return
+
+        # /메모리 — Brain 통계
+        if text_lower in ("/메모리", "/memory"):
+            if not self.agent_hook:
+                self.tg.send("❌ 에이전트 시스템 비활성화")
+                return
+            stats = self.agent_hook.get_memory_stats()
+            if not stats:
+                self.tg.send("❌ 메모리 시스템 비활성화")
+                return
+            brain = stats.get("brain", {})
+            reflection = stats.get("reflection", {})
+            rules = brain.get("rules", {})
+            lines = [
+                "🧠 메모리 통계",
+                f"{'━' * 20}",
+                f"규칙: {rules.get('total_rules', 0)}개 (활성 {rules.get('active_rules', 0)}개)",
+                f"평균 적중률: {rules.get('avg_hit_rate', 0):.0%}",
+                f"코인 추적: {brain.get('coins_tracked', 0)}개",
+                f"패턴 추적: {brain.get('patterns_tracked', 0)}개",
+                f"반성 횟수: {reflection.get('reflection_count', 0)}회",
+            ]
+            top_coins = brain.get("top_coins", [])
+            if top_coins:
+                lines.append(f"\n📊 상위 코인:")
+                for c in top_coins[:5]:
+                    lines.append(
+                        f"  {c['symbol']}: "
+                        f"승률 {c['winrate']:.0%} ({c['trades']}건)"
+                    )
+            self.tg.send("\n".join(lines))
+            return
+
+    def _parse_symbol(self, text: str) -> str:
+        """명령어에서 코인 심볼 추출: '/포지션 ETH' → 'ETH/USDT'"""
+        parts = text.strip().split()
+        if len(parts) < 2:
+            return ""
+        coin = parts[1].upper().replace("/USDT", "").replace("USDT", "")
+        if not coin:
+            return ""
+        symbol = f"{coin}/USDT"
+        if symbol not in self.cfg.get("WATCHLIST", []):
+            similar = [s for s in self.cfg.get("WATCHLIST", []) if coin in s]
+            if similar:
+                symbol = similar[0]
+            else:
+                self.tg.send(f"⚠️ {coin} — 워치리스트에 없음. {symbol}로 시도합니다.")
+        return symbol
+
     # ── 메인 루프 ──
 
     def run(self):
@@ -2372,6 +2539,12 @@ class ConvergenceTrader:
                         self.agent_hook.periodic_check(self.positions)
                     except Exception:
                         pass
+
+                # ── [Phase F] 텔레그램 명령어 수신 (매 루프) ──
+                try:
+                    self._process_telegram_commands()
+                except Exception:
+                    pass
 
                 # ── 포지션 모니터 (30초마다) ──
                 if self.positions:
