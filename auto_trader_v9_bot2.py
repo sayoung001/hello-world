@@ -341,7 +341,7 @@ class HuntTrader:
         if not os.path.exists(path):
             return 0
         try:
-            with open(path) as f:
+            with open(path, encoding='utf-8') as f:
                 data = json.load(f)
             margin = sum(
                 abs(float(p.get('quantity', 0)) * float(p.get('entry_price', 0)))
@@ -718,7 +718,7 @@ class HuntTrader:
 
     def _save_history(self, record):
         p = os.path.join(self.cfg["LOG_DIR"], "trade_history_v9_bot2.jsonl")
-        with open(p, 'a') as f:
+        with open(p, 'a', encoding='utf-8') as f:
             f.write(json.dumps(record, ensure_ascii=False) + '\n')
 
     @staticmethod
@@ -811,14 +811,14 @@ class HuntTrader:
         if os.path.exists(path):
             try: os.replace(path, path + '.bak')
             except: pass
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2, default=str)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, default=str, ensure_ascii=False)
 
     def _load_positions(self):
         for try_path in [self.cfg["POSITIONS_FILE"], self.cfg["POSITIONS_FILE"] + '.bak']:
             if not os.path.exists(try_path): continue
             try:
-                with open(try_path) as f: data = json.load(f)
+                with open(try_path, encoding='utf-8') as f: data = json.load(f)
                 for d in data:
                     for df in ['roe_history']:
                         raw = d.get(df, {})

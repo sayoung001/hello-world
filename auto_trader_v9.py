@@ -2163,8 +2163,8 @@ class ConvergenceTrader:
             try:
                 os.replace(path, path + '.bak')
             except: pass
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2, default=str)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, default=str, ensure_ascii=False)
 
     def _load_positions(self):
         path = self.cfg["POSITIONS_FILE"]
@@ -2173,7 +2173,7 @@ class ConvergenceTrader:
             if not os.path.exists(try_path):
                 continue
             try:
-                with open(try_path) as f: data = json.load(f)
+                with open(try_path, encoding='utf-8') as f: data = json.load(f)
                 for d in data:
                     for dict_field in ['roe_history']:
                         raw = d.get(dict_field, {})
@@ -2200,7 +2200,7 @@ class ConvergenceTrader:
 
     def _save_history(self, record):
         p = os.path.join(self.cfg["LOG_DIR"], "trade_history_v9.jsonl")
-        with open(p, 'a') as f:
+        with open(p, 'a', encoding='utf-8') as f:
             f.write(json.dumps(record, ensure_ascii=False) + '\n')
 
     @staticmethod

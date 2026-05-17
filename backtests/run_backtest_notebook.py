@@ -154,8 +154,14 @@ print("\n" + report)
 import matplotlib.pyplot as plt
 import matplotlib
 
-# 한글 폰트 설정 (Windows)
-matplotlib.rcParams['font.family'] = 'Malgun Gothic'
+# 한글 폰트 설정 (OS 자동 감지)
+import platform
+if platform.system() == 'Windows':
+    matplotlib.rcParams['font.family'] = 'Malgun Gothic'
+elif platform.system() == 'Darwin':
+    matplotlib.rcParams['font.family'] = 'AppleGothic'
+else:
+    matplotlib.rcParams['font.family'] = 'DejaVu Sans'
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 fig, axes = plt.subplots(2, 2, figsize=(14, 10))
