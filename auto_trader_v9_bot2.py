@@ -17,6 +17,7 @@ Bot 2: BTC 돌파 직후 알트 연쇄 돌파 캐치 (이 파일)
 """
 
 import ccxt, pandas as pd, numpy as np, time, json, os, sys, requests, traceback, math
+import threading
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
@@ -30,6 +31,12 @@ from auto_trader_v9 import (
     Telegram, Executor, BTCTrend7Level, OnchainFetcher,
     Position, KST, BINANCE_FAPI, MODE_CONFIGS, PROFILES
 )
+
+# Phase A~F 에이전트 시스템
+try:
+    from agents.v9_hook import AgentHook
+except ImportError:
+    AgentHook = None
 
 # ═══════════════════════════════════════════════════════════
 #  Bot2 전용 설정
@@ -280,6 +287,23 @@ class HuntTrader:
         self._scan_fails = {}
         self._init_balance = self.executor.total_balance()
 
+        # [Phase A~F] 에이전트 시스템 (Shadow Mode)
+        self.agent_hook = None
+        if AgentHook is not None:
+            try:
+                self.agent_hook = AgentHook(
+                    cg_client=None,
+                    btc_filter=self.btc_trend,
+                    tg=self.tg,
+                    exchange=self.exchange,
+                    shadow_mode=True,
+                    analysis_interval_h=4,
+                )
+                print(f"  {self.bot_tag} ✅ 에이전트 시스템 초기화 (Shadow Mode)")
+            except Exception as e:
+                print(f"  {self.bot_tag} ⚠️ 에이전트 초기화 실패 (봇 정상 운영): {e}")
+                self.agent_hook = None
+
         # 시작 알람
         self._send_startup_msg()
 
@@ -404,7 +428,9 @@ class HuntTrader:
                     continue
 
                 result['vol_surge'] = vol_surge
-                result.update({'adx_value': adx, 'volume_ratio': vr, 'rsi': rsi})
+                gap_pct_val = result.get('details', {}).get('gap_pct', 0)
+                result.update({'adx_value': adx, 'adx': adx,
+                               'gap': gap_pct_val, 'volume_ratio': vr, 'rsi': rsi})
                 signals.append(result)
                 time.sleep(0.08)
                 self._scan_fails[sym] = 0
@@ -440,6 +466,21 @@ class HuntTrader:
                 return
             if d == 'short' and self.btc_trend.short_blocked:
                 return
+
+        # [Phase F] 진입 전 리스크 평가
+        if self.agent_hook is not None:
+            try:
+                risk_result = self.agent_hook.risk_check(
+                    signal=signal,
+                    positions=[p.__dict__ for p in self.positions] if self.positions else [],
+                    account_balance=self.executor.total_balance(),
+                )
+                if risk_result and not risk_result.get("approved", True):
+                    print(f"  {self.bot_tag} 🛑 리스크 차단: {sym} {d} — "
+                          f"레벨: {risk_result.get('risk_level', '?')}")
+                    return
+            except Exception as e:
+                print(f"  {self.bot_tag} [Phase F] risk_check 오류 (진입 계속): {e}")
 
         # 마진 체크 (Bot1 마진 고려)
         entry = signal['entry_price']
@@ -520,6 +561,13 @@ class HuntTrader:
         self.positions.append(pos)
         self._save_positions()
         self.daily_trades += 1
+
+        # [Phase D] 에이전트 분석 트리거
+        if self.agent_hook:
+            try:
+                self.agent_hook.on_position_open(pos, self.positions)
+            except Exception:
+                pass
 
         # 진입 알람
         kr_dir = "롱 📈" if d == 'long' else "숏 📉"
@@ -661,6 +709,13 @@ class HuntTrader:
         closed_list.append(pos)
         self._alerted_orders.discard(f"{pos.symbol}_{pos.direction}")
 
+        # [Phase D] 에이전트 — 청산 결과 기록 + 반성
+        if self.agent_hook:
+            try:
+                self.agent_hook.on_position_close(pos, reason, roe)
+            except Exception:
+                pass
+
     def _save_history(self, record):
         p = os.path.join(self.cfg["LOG_DIR"], "trade_history_v9_bot2.jsonl")
         with open(p, 'a') as f:
@@ -799,6 +854,27 @@ class HuntTrader:
                 prev_state = self.hunt_tracker.state
                 new_state = self.hunt_tracker.update()
 
+                # [Phase D] 에이전트 주기 체크 (매 루프)
+                if self.agent_hook:
+                    try:
+                        self.agent_hook.crash_check(self.positions)
+                    except Exception:
+                        pass
+                    try:
+                        self.agent_hook.trend_check(self.positions)
+                    except Exception:
+                        pass
+                    try:
+                        self.agent_hook.periodic_check(self.positions)
+                    except Exception:
+                        pass
+
+                # [Phase F] 텔레그램 명령어 수신 (매 루프)
+                try:
+                    self._process_telegram_commands()
+                except Exception:
+                    pass
+
                 # 상태 전환 알림
                 if new_state != prev_state:
                     if new_state == BTCBreakoutTracker.HUNT:
@@ -865,6 +941,135 @@ class HuntTrader:
                 traceback.print_exc()
                 self.tg.send_error(f"{self.bot_tag} 오류: {e}")
                 time.sleep(60)
+
+    # ── [Phase F] 텔레그램 명령어 처리 ──
+
+    def _process_telegram_commands(self):
+        try:
+            updates = self.tg.get_updates()
+        except Exception:
+            return
+        for update in updates:
+            msg = update.get("message", {})
+            text = msg.get("text", "").strip()
+            if not text:
+                continue
+            try:
+                self._handle_command(text)
+            except Exception as e:
+                print(f"  {self.bot_tag} [TG 명령] 처리 오류: {e}")
+
+    def _handle_command(self, text: str):
+        text_lower = text.lower().strip()
+
+        if text_lower in ("/help", "/명령어"):
+            self.tg.send(
+                f"{self.bot_tag} 📋 사용 가능한 명령어\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "/포지션 <코인> — 보유 포지션 분석\n"
+                "/진입 <코인> — 진입 시그널 판단\n"
+                "/시장 — 즉시 시장 분석\n"
+                "/상태 — 봇 상태 요약\n"
+                "/메모리 — Brain 메모리 통계\n"
+                "/help — 이 도움말"
+            )
+            return
+
+        if text_lower.startswith(("/포지션", "/position")):
+            symbol = self._parse_symbol(text)
+            if not symbol:
+                self.tg.send("❌ 사용법: /포지션 <코인>\n예: /포지션 ETH")
+                return
+            if not self.agent_hook:
+                self.tg.send("❌ 에이전트 시스템 비활성화")
+                return
+            self.tg.send(f"{self.bot_tag} 🔍 {symbol} 포지션 분석 중...")
+
+            def _run():
+                result = self.agent_hook.analyze_position(symbol, self.positions)
+                self.tg.send(result[:4000])
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        if text_lower.startswith(("/진입", "/entry")):
+            symbol = self._parse_symbol(text)
+            if not symbol:
+                self.tg.send("❌ 사용법: /진입 <코인>\n예: /진입 SOL")
+                return
+            if not self.agent_hook:
+                self.tg.send("❌ 에이전트 시스템 비활성화")
+                return
+            self.tg.send(f"{self.bot_tag} 🔍 {symbol} 진입 분석 중...")
+
+            def _run():
+                result = self.agent_hook.analyze_entry(symbol, exchange=self.exchange)
+                self.tg.send(result[:4000])
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        if text_lower in ("/시장", "/market"):
+            if not self.agent_hook:
+                self.tg.send("❌ 에이전트 시스템 비활성화")
+                return
+            self.tg.send(f"{self.bot_tag} 🔍 시장 분석 중...")
+
+            def _run():
+                result = self.agent_hook.analyze_market_now(self.positions)
+                for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
+                    self.tg.send(chunk)
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        if text_lower in ("/상태", "/status"):
+            self._status_report()
+            return
+
+        if text_lower in ("/메모리", "/memory"):
+            if not self.agent_hook:
+                self.tg.send("❌ 에이전트 시스템 비활성화")
+                return
+            stats = self.agent_hook.get_memory_stats()
+            if not stats:
+                self.tg.send("❌ 메모리 시스템 비활성화")
+                return
+            brain = stats.get("brain", {})
+            reflection = stats.get("reflection", {})
+            rules = brain.get("rules", {})
+            lines = [
+                f"{self.bot_tag} 🧠 메모리 통계",
+                f"{'━' * 20}",
+                f"규칙: {rules.get('total_rules', 0)}개 (활성 {rules.get('active_rules', 0)}개)",
+                f"평균 적중률: {rules.get('avg_hit_rate', 0):.0%}",
+                f"코인 추적: {brain.get('coins_tracked', 0)}개",
+                f"패턴 추적: {brain.get('patterns_tracked', 0)}개",
+                f"반성 횟수: {reflection.get('reflection_count', 0)}회",
+            ]
+            top_coins = brain.get("top_coins", [])
+            if top_coins:
+                lines.append(f"\n📊 상위 코인:")
+                for c in top_coins[:5]:
+                    lines.append(f"  {c['symbol']}: 승률 {c['winrate']:.0%} ({c['trades']}건)")
+            self.tg.send("\n".join(lines))
+            return
+
+    def _parse_symbol(self, text: str) -> str:
+        parts = text.strip().split()
+        if len(parts) < 2:
+            return ""
+        coin = parts[1].upper().replace("/USDT", "").replace("USDT", "")
+        if not coin:
+            return ""
+        symbol = f"{coin}/USDT"
+        if symbol not in self.cfg.get("WATCHLIST", []):
+            similar = [s for s in self.cfg.get("WATCHLIST", []) if coin in s]
+            if similar:
+                symbol = similar[0]
+            else:
+                self.tg.send(f"⚠️ {coin} — 워치리스트에 없음. {symbol}로 시도합니다.")
+        return symbol
 
     def _status_report(self):
         bal = self.executor.total_balance()
