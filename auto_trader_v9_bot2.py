@@ -134,6 +134,10 @@ class BTCBreakoutTracker:
       TRIGGER  — BTC squeeze 해제 감지! 방향 기록
       HUNT     — 알트 스캔 활성 (N시간 제한)
       COOLDOWN — hunt 종료, 다음 squeeze까지 대기
+
+    트리거 조건 (OR):
+      1. squeeze → non-squeeze 전환 (EMA gap 0.5% 이하 → 초과)
+      2. BTC gap이 BTC_TRIGGER_GAP 이상으로 급변 (gap 기반 돌파)
     """
     STANDBY = "STANDBY"
     TRIGGER = "TRIGGER"
@@ -146,8 +150,9 @@ class BTCBreakoutTracker:
         self.state = self.STANDBY
         self.hunt_direction = None       # "long" or "short"
         self.hunt_start_time = None
-        self.last_squeeze_state = True   # 초기: squeeze라고 가정
+        self.last_squeeze_state = None   # None = 초기 상태 (첫 루프에서 설정)
         self._cooldown_until = 0
+        self._last_gap = 0.0            # 이전 gap 기록 (급변 감지용)
 
     def update(self) -> str:
         """매 루프마다 호출 — 상태 전환 로직"""
@@ -155,50 +160,53 @@ class BTCBreakoutTracker:
         now = time.time()
         is_squeeze = self.btc.is_squeeze
         gap = self.btc.gap_pct
+        trigger_gap = self.cfg.get("BTC_TRIGGER_GAP", 0.5)
 
         if self.state == self.STANDBY:
+            # 초기화: 첫 루프에서 현재 상태 기록만 하고 넘어감
+            if self.last_squeeze_state is None:
+                self.last_squeeze_state = is_squeeze
+                self._last_gap = gap
+                return self.state
+
+            triggered = False
+
+            # 조건 1: squeeze → non-squeeze 전환
             if self.last_squeeze_state and not is_squeeze:
-                # squeeze → non-squeeze 전환! = BTC 돌파
-                self.state = self.TRIGGER
-                # BTC 돌파 방향 판정
+                triggered = True
+
+            # 조건 2: gap 급변 (이전 gap < trigger_gap → 현재 gap >= trigger_gap)
+            if not triggered and self._last_gap < trigger_gap and gap >= trigger_gap:
+                triggered = True
+
+            if triggered:
+                self.state = self.HUNT
                 if self.btc._ema_s > self.btc._ema_l:
                     self.hunt_direction = "long"
                 else:
                     self.hunt_direction = "short"
                 self.hunt_start_time = now
-                self.state = self.HUNT  # 즉시 hunt 진입
 
             self.last_squeeze_state = is_squeeze
+            self._last_gap = gap
 
         elif self.state == self.HUNT:
             elapsed_h = (now - self.hunt_start_time) / 3600
             hunt_hours = self.cfg.get("HUNT_WINDOW_HOURS", 3)
 
             if elapsed_h >= hunt_hours:
-                # hunt 윈도우 종료
                 self.state = self.COOLDOWN
                 cooldown_h = self.cfg.get("HUNT_COOLDOWN_HOURS", 1)
                 self._cooldown_until = now + cooldown_h * 3600
                 self.hunt_direction = None
 
-            # BTC가 다시 squeeze 상태로 돌아오면 즉시 종료
-            if is_squeeze:
-                self.state = self.STANDBY
-                self.hunt_direction = None
-                self.last_squeeze_state = True
-
         elif self.state == self.COOLDOWN:
             if now >= self._cooldown_until:
                 self.state = self.STANDBY
                 self.last_squeeze_state = is_squeeze
-
-            # squeeze로 돌아오면 즉시 standby
-            if is_squeeze:
-                self.state = self.STANDBY
-                self.last_squeeze_state = True
+                self._last_gap = gap
 
         elif self.state == self.TRIGGER:
-            # 즉시 HUNT로 전환 (1프레임)
             self.state = self.HUNT
 
         return self.state
@@ -215,6 +223,8 @@ class BTCBreakoutTracker:
 
     def status_str(self):
         btc_s = self.btc.status_str()
+        gap = self.btc.gap_pct
+        tg = self.cfg.get("BTC_TRIGGER_GAP", 0.5)
         hunt_s = ""
         if self.state == self.HUNT:
             d = self.hunt_direction or "?"
@@ -224,6 +234,9 @@ class BTCBreakoutTracker:
         elif self.state == self.COOLDOWN:
             remain = max(0, self._cooldown_until - time.time()) / 60
             hunt_s = f" | COOLDOWN ({remain:.0f}min)"
+        elif self.state == self.STANDBY:
+            sq = "SQZ" if self.btc.is_squeeze else "NO_SQZ"
+            hunt_s = f" | gap:{gap:.3f}% trig:{tg}% {sq}"
         return f"[{self.state}]{hunt_s} | {btc_s}"
 
 
@@ -496,12 +509,15 @@ class HuntTrader:
         bot1_margin = self._get_bot1_margin()
         current_margin = sum(p.quantity * p.entry_price / self.cfg["LEVERAGE"]
                              for p in self.positions)
-        # 전체 마진 = Bot1 + Bot2
         total_used = bot1_margin + current_margin
+        # Bot2 한도 = 잔고 × 30% - Bot2 기사용분
         remaining = bal * self.cfg["MARGIN_EXPOSURE_LIMIT"] - current_margin
-        # 추가 안전장치: 전체 마진이 80% 넘으면 진입 차단
-        if (total_used + remaining * 0.5) / bal > 0.80:
+        # 전체(Bot1+Bot2) 마진이 80% 넘으면 보수적 진입
+        if total_used / max(bal, 1) > 0.80:
             remaining = min(remaining, bal * 0.10)
+        if remaining <= 0:
+            print(f"  {self.bot_tag} 마진 부족: 잔고${bal:.0f} Bot1${bot1_margin:.0f} Bot2${current_margin:.0f}")
+            return
 
         sizing_base = max(bal, self._init_balance * 0.3)
         risk_pct = self.cfg["RISK_PCT"]
