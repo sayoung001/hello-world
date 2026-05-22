@@ -108,8 +108,8 @@ CONFIG_BOT2 = {
     "MARGIN_EXPOSURE_LIMIT": 0.30,  # Bot1(50%) + Bot2(30%) = 80% 한도
     "MAX_DAILY_TRADES": 8,
 
-    # 주기
-    "SCAN_SEC": 60,
+    # 주기 (SCAN_SEC 90초 = Bot1(60초)과 겹치지 않도록 엇갈림)
+    "SCAN_SEC": 90,
     "MONITOR_SEC": 15,
     "STATUS_SEC": 7200,
     "CG_CACHE_SEC": 120,
@@ -300,10 +300,13 @@ class HuntTrader:
         self._scan_fails = {}
         self._init_balance = self.executor.total_balance()
 
-        # [Phase A~F] 에이전트 시스템 (Shadow Mode)
+        # [Phase A~F] 에이전트 시스템 (Shadow Mode) — Bot2 전용 rules 파일
         self.agent_hook = None
         if AgentHook is not None:
             try:
+                bot2_rules = os.path.join(
+                    os.path.dirname(__file__), "agents", "data", "memory", "rules_bot2.json"
+                )
                 self.agent_hook = AgentHook(
                     cg_client=None,
                     btc_filter=self.btc_trend,
@@ -311,6 +314,7 @@ class HuntTrader:
                     exchange=self.exchange,
                     shadow_mode=True,
                     analysis_interval_h=4,
+                    rules_path=bot2_rules,
                 )
                 print(f"  {self.bot_tag} ✅ 에이전트 시스템 초기화 (Shadow Mode)")
             except Exception as e:
@@ -349,21 +353,37 @@ class HuntTrader:
             ]
 
     def _get_bot1_margin(self):
-        """Bot1의 현재 마진 사용량 읽기"""
+        """Bot1의 현재 마진 사용량 읽기 (파일 동시 쓰기 대응: .bak 폴백)"""
         path = self.cfg.get("BOT1_POSITIONS_FILE", "")
-        if not os.path.exists(path):
-            return 0
-        try:
-            with open(path, encoding='utf-8') as f:
-                data = json.load(f)
-            margin = sum(
-                abs(float(p.get('quantity', 0)) * float(p.get('entry_price', 0)))
-                / self.cfg["LEVERAGE"]
-                for p in data
-            )
-            return margin
-        except:
-            return 0
+        for try_path in [path, path + '.bak']:
+            if not try_path or not os.path.exists(try_path):
+                continue
+            try:
+                with open(try_path, encoding='utf-8') as f:
+                    data = json.load(f)
+                margin = sum(
+                    abs(float(p.get('quantity', 0)) * float(p.get('entry_price', 0)))
+                    / self.cfg["LEVERAGE"]
+                    for p in data
+                )
+                return margin
+            except Exception:
+                continue
+        return 0
+
+    def _get_bot1_symbols(self) -> set:
+        """Bot1이 현재 보유 중인 심볼 목록 (포지션 파일에서 읽기)"""
+        path = self.cfg.get("BOT1_POSITIONS_FILE", "")
+        for try_path in [path, path + '.bak']:
+            if not try_path or not os.path.exists(try_path):
+                continue
+            try:
+                with open(try_path, encoding='utf-8') as f:
+                    data = json.load(f)
+                return {p.get('symbol', '') for p in data if p.get('symbol')}
+            except Exception:
+                continue
+        return set()
 
     def _send_startup_msg(self):
         bal = self._init_balance
@@ -466,6 +486,11 @@ class HuntTrader:
         if len(self.positions) >= self.cfg["MAX_POSITIONS"]: return
         if any(p.symbol == sym for p in self.positions): return
         if self.daily_trades >= self.cfg["MAX_DAILY_TRADES"]: return
+
+        # ★ 심볼 충돌 방지: Bot1 워치리스트 + Bot1 보유 포지션 모두 체크
+        if sym in BOT1_WATCHLIST or sym in self._get_bot1_symbols():
+            print(f"  {self.bot_tag} {sym} → Bot1 심볼 충돌 방지 → SKIP")
+            return
 
         # ★ Bot2 핵심: BTC 돌파 방향과 같은 방향만 진입
         hunt_dir = self.hunt_tracker.hunt_direction
@@ -785,10 +810,13 @@ class HuntTrader:
                         f"{self.bot_tag} {icon} 거래소 자동 청산 | {pos.direction.upper()} {pos.symbol}\n"
                         f"추정 손익: ${pnl:+,.2f} (현물{roe:+.2f}%)\n"
                         f"보유: {hh:.1f}시간 | 잔고: ${bal:,.0f}")
-                    # 잔여 주문 정리 (TP or SL 남아있을 수 있음)
-                    try:
-                        self.executor._cancel_all_orders(pos.symbol)
-                    except: pass
+                    # 잔여 주문 정리 — Bot2 자체 주문만 취소 (Bot1 주문 보호)
+                    for oid in [pos.sl_order_id, pos.tp_order_id]:
+                        if oid:
+                            try:
+                                self.exchange.cancel_order(oid, pos.symbol)
+                            except Exception:
+                                pass
                     removed.append(pos)
                     self._alerted_orders.discard(f"{pos.symbol}_{pos.direction}")
 
@@ -959,6 +987,8 @@ class HuntTrader:
                 time.sleep(60)
 
     # ── [Phase F] 텔레그램 명령어 처리 ──
+    # Bot2는 /b2 접두사 명령만 처리 (Bot1과 충돌 방지)
+    # 예: /b2상태, /b2포지션 ETH, /b2시장
 
     def _process_telegram_commands(self):
         try:
@@ -970,24 +1000,35 @@ class HuntTrader:
             text = msg.get("text", "").strip()
             if not text:
                 continue
+            # Bot2 전용 명령: /b2 또는 /bot2 접두사만 처리
+            text_lower = text.lower().strip()
+            if not (text_lower.startswith("/b2") or text_lower.startswith("/bot2")):
+                continue
+            # 접두사 제거 → 실제 명령어 추출
+            if text_lower.startswith("/bot2"):
+                cmd_text = "/" + text[5:].lstrip()
+            else:
+                cmd_text = "/" + text[3:].lstrip()
             try:
-                self._handle_command(text)
+                self._handle_command(cmd_text)
             except Exception as e:
                 print(f"  {self.bot_tag} [TG 명령] 처리 오류: {e}")
 
     def _handle_command(self, text: str):
         text_lower = text.lower().strip()
 
-        if text_lower in ("/help", "/명령어"):
+        if text_lower in ("/help", "/명령어", "/"):
             self.tg.send(
                 f"{self.bot_tag} 📋 사용 가능한 명령어\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "/포지션 <코인> — 보유 포지션 분석\n"
-                "/진입 <코인> — 진입 시그널 판단\n"
-                "/시장 — 즉시 시장 분석\n"
-                "/상태 — 봇 상태 요약\n"
-                "/메모리 — Brain 메모리 통계\n"
-                "/help — 이 도움말"
+                "⚠️ Bot2 명령은 /b2 접두사 사용\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "/b2포지션 <코인> — 보유 포지션 분석\n"
+                "/b2진입 <코인> — 진입 시그널 판단\n"
+                "/b2시장 — 즉시 시장 분석\n"
+                "/b2상태 — 봇 상태 요약\n"
+                "/b2메모리 — Brain 메모리 통계\n"
+                "/b2help — 이 도움말"
             )
             return
 

@@ -96,7 +96,8 @@ class AgentHook:
                  exchange=None, shadow_mode: bool = True,
                  analysis_interval_h: int = 4,
                  enable_risk_pipeline: bool = True,
-                 enable_memory: bool = True):
+                 enable_memory: bool = True,
+                 rules_path: str = ""):
         self.cg_client = cg_client
         self.btc_filter_instance = btc_filter
         self.tg = tg
@@ -126,7 +127,7 @@ class AgentHook:
         self._risk_pipeline = RiskPipeline() if self.enable_risk_pipeline else None
 
         if self.enable_memory:
-            self._rule_store = RuleStore()
+            self._rule_store = RuleStore(rules_path=rules_path) if rules_path else RuleStore()
             self._brain = TradingBrain(rule_store=self._rule_store)
             self._reflection = ReflectionEngine(rule_store=self._rule_store)
         else:
