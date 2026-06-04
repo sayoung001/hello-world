@@ -1074,8 +1074,36 @@ class HuntTrader:
                 "/b2시장 — 즉시 시장 분석\n"
                 "/b2상태 — 봇 상태 요약\n"
                 "/b2메모리 — Brain 메모리 통계\n"
+                "/<코인>분석 — 알트코인 구조 분석\n"
+                "  예: /sol분석, /eth분석\n"
                 "/b2help — 이 도움말"
             )
+            return
+
+        # /<코인>분석 — 알트코인 구조 분석
+        import re
+        alt_match = re.match(r'^/([a-zA-Z]+)분석$', text_lower.strip())
+        if alt_match:
+            coin = alt_match.group(1).upper()
+            if coin in ("BTC", "BITCOIN"):
+                self.tg.send(f"{self.bot_tag} ℹ️ BTC 분석은 /분석 또는 /시장 명령어를 사용하세요.")
+                return
+            symbol = f"{coin}/USDT"
+            self.tg.send(f"{self.bot_tag} 🔍 {coin} 구조 분석 중...")
+
+            def _run():
+                try:
+                    from agents.analyzers.alt_structure import AltStructureAgent
+                    agent = AltStructureAgent(symbol=symbol, exchange=self.exchange)
+                    data = agent.collect_data()
+                    result = agent.analyze(data)
+                    msg = agent.format_telegram(result)
+                    for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
+                        self.tg.send(chunk)
+                except Exception as e:
+                    self.tg.send(f"{self.bot_tag} ❌ {coin} 분석 실패: {e}")
+
+            threading.Thread(target=_run, daemon=True).start()
             return
 
         # /판결 — 전체 보유 포지션 판결
