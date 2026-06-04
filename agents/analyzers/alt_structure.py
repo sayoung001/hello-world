@@ -16,6 +16,7 @@ import numpy as np
 
 from agents.core.base import AgentBase
 from agents.core.protocol import AgentMessage
+from agents.output.chart_generator import generate_alt_chart
 
 
 class AltStructureAgent(AgentBase):
@@ -234,6 +235,8 @@ class AltStructureAgent(AgentBase):
             try:
                 ohlcv = self.exchange.fetch_ohlcv(self.symbol, timeframe=tf, limit=100)
                 df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
+                if tf == "4h":
+                    data["_ohlcv_4h"] = df
                 close = df["close"]
                 high = df["high"]
                 low = df["low"]
@@ -420,6 +423,16 @@ class AltStructureAgent(AgentBase):
             "confidence": 0.5,
             "reasoning": f"규칙 기반 폴백: EMA {trend}, 패턴 {pattern_bias}, RSI {rsi}"
         }
+
+    def generate_chart(self, collected_data: dict, analysis_msg: AgentMessage) -> bytes:
+        """분석 결과를 차트 이미지(PNG bytes)로 생성"""
+        ohlcv_df = collected_data.get("_ohlcv_4h", pd.DataFrame())
+        return generate_alt_chart(
+            coin=self.coin,
+            ohlcv_df=ohlcv_df,
+            analysis_result=analysis_msg.data,
+            collected_data=collected_data,
+        )
 
     def format_telegram(self, msg: AgentMessage) -> str:
         """분석 결과를 텔레그램 메시지로 포맷팅"""

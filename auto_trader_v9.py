@@ -225,6 +225,25 @@ class Telegram:
         except Exception as e:
             print(f"  TG err: {e}")
 
+    def send_photo(self, photo_bytes: bytes, caption: str = ""):
+        """이미지 전송 (PNG bytes)"""
+        if not self.ok:
+            print(f"  [TG] photo ({len(photo_bytes)} bytes), caption: {caption[:100]}"); return
+        try:
+            data = {"chat_id": self.chat_id}
+            if caption:
+                data["caption"] = caption[:1024]
+            r = requests.post(
+                f"https://api.telegram.org/bot{self.token}/sendPhoto",
+                data=data,
+                files={"photo": ("chart.png", photo_bytes, "image/png")},
+                timeout=30,
+            )
+            if r.status_code != 200 or not r.json().get("ok"):
+                print(f"  [TG] sendPhoto 실패: {r.status_code} {r.text[:200]}")
+        except Exception as e:
+            print(f"  TG photo err: {e}")
+
     def send_error(self, msg):
         """오류 알람 — HTML 이스케이프 적용"""
         safe_msg = self._escape_html(msg)
@@ -2429,9 +2448,16 @@ class ConvergenceTrader:
                     agent = AltStructureAgent(symbol=symbol, exchange=self.exchange)
                     data = agent.collect_data()
                     result = agent.analyze(data)
-                    msg = agent.format_telegram(result)
-                    for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
-                        self.tg.send(chunk)
+                    # 차트 이미지 생성 + 전송
+                    try:
+                        chart_png = agent.generate_chart(data, result)
+                        caption = agent.format_telegram(result)
+                        self.tg.send_photo(chart_png, caption=caption[:1024])
+                    except Exception as chart_err:
+                        print(f"  차트 생성 실패, 텍스트 전송: {chart_err}")
+                        msg = agent.format_telegram(result)
+                        for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
+                            self.tg.send(chunk)
                 except Exception as e:
                     self.tg.send(f"❌ {coin} 분석 실패: {e}")
 
