@@ -259,9 +259,23 @@ class AgentHook:
 
     # ── 트리거 1: 포지션 오픈 ──
 
+    def save_entry_snapshot(self, new_position):
+        """포지션 오픈 시 스냅샷만 저장 (알림 없음, 반성용 데이터 수집)"""
+        sym = getattr(new_position, "symbol", "")
+        if not sym:
+            return
+        with self._snapshot_lock:
+            self._entry_snapshots[sym] = {
+                "entry_time": time.time(),
+                "direction": getattr(new_position, "direction", ""),
+                "entry_price": getattr(new_position, "entry_price", 0),
+                "confidence": getattr(new_position, "confidence", 0),
+            }
+
     def on_position_open(self, new_position, all_positions: list):
-        """포지션 오픈 시 트리거 — 비동기 분석"""
-        pos_snapshot = list(all_positions)  # 스레드 안전 복사
+        """포지션 오픈 시 트리거 — 비동기 분석 + 텔레그램 전송"""
+        self.save_entry_snapshot(new_position)
+        pos_snapshot = list(all_positions)
 
         def _analyze():
             try:

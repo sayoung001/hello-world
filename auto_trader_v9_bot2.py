@@ -667,10 +667,10 @@ class HuntTrader:
         self._save_positions()
         self.daily_trades += 1
 
-        # [Phase D] 에이전트 분석 트리거
+        # [Phase D] 에이전트 — 진입 스냅샷만 저장 (자동 알림 제거, /b2판결로 대체)
         if self.agent_hook:
             try:
-                self.agent_hook.on_position_open(pos, self.positions)
+                self.agent_hook.save_entry_snapshot(pos)
             except Exception:
                 pass
 
@@ -959,7 +959,7 @@ class HuntTrader:
                 prev_state = self.hunt_tracker.state
                 new_state = self.hunt_tracker.update()
 
-                # [Phase D] 에이전트 주기 체크 (매 루프)
+                # [Phase D] 급락/추세 감지 (매 루프) — periodic_check 제거 (/b2판결로 대체)
                 if self.agent_hook:
                     try:
                         self.agent_hook.crash_check(self.positions)
@@ -967,10 +967,6 @@ class HuntTrader:
                         pass
                     try:
                         self.agent_hook.trend_check(self.positions)
-                    except Exception:
-                        pass
-                    try:
-                        self.agent_hook.periodic_check(self.positions)
                     except Exception:
                         pass
 
@@ -1071,13 +1067,65 @@ class HuntTrader:
             self.tg.send(
                 f"{self.bot_tag} 📋 사용 가능한 명령어\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "/포지션 <코인> — 보유 포지션 분석\n"
-                "/진입 <코인> — 진입 시그널 판단\n"
-                "/시장 — 즉시 시장 분석\n"
-                "/상태 — 봇 상태 요약\n"
-                "/메모리 — Brain 메모리 통계\n"
-                "/help — 이 도움말"
+                "/b2판결 — 전체 보유 포지션 판결\n"
+                "/b2분석 — 전체 시장+포지션 분석\n"
+                "/b2포지션 <코인> — 개별 포지션 분석\n"
+                "/b2진입 <코인> — 진입 시그널 판단\n"
+                "/b2시장 — 즉시 시장 분석\n"
+                "/b2상태 — 봇 상태 요약\n"
+                "/b2메모리 — Brain 메모리 통계\n"
+                "/b2help — 이 도움말"
             )
+            return
+
+        # /판결 — 전체 보유 포지션 판결
+        if text_lower in ("/판결", "/judge"):
+            if not self.agent_hook:
+                self.tg.send(f"{self.bot_tag} ❌ 에이전트 시스템 비활성화")
+                return
+            if not self.positions:
+                self.tg.send(f"{self.bot_tag} 📋 보유 포지션 없음")
+                return
+            n = len(self.positions)
+            syms = ", ".join(p.symbol.replace('/USDT', '') for p in self.positions)
+            self.tg.send(f"{self.bot_tag} ⚖️ 전체 포지션 판결 중... ({n}건: {syms})")
+
+            def _run():
+                try:
+                    pos_infos = self.agent_hook._convert_positions(self.positions)
+                    orch = self.agent_hook._get_orchestrator()
+                    consensus = orch.run(positions=pos_infos)
+                    self.agent_hook._memory.store(consensus)
+                    messages = self.agent_hook._formatter.format_consensus(consensus)
+                    header = f"{self.bot_tag} ⚖️ 포지션 판결 ({n}건)\n{'━' * 25}\n"
+                    full = header + "\n".join(messages)
+                    for chunk in [full[i:i+4000] for i in range(0, len(full), 4000)]:
+                        self.tg.send(chunk)
+                except Exception as e:
+                    self.tg.send(f"{self.bot_tag} ❌ 판결 실패: {e}")
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        # /분석 — 전체 시장+포지션 분석
+        if text_lower in ("/분석", "/analyze"):
+            if not self.agent_hook:
+                self.tg.send(f"{self.bot_tag} ❌ 에이전트 시스템 비활성화")
+                return
+            n = len(self.positions)
+            self.tg.send(f"{self.bot_tag} 🔍 전체 시장 분석 중... (포지션 {n}건)")
+
+            def _run():
+                try:
+                    pos_infos = self.agent_hook._convert_positions(self.positions) if self.positions else []
+                    orch = self.agent_hook._get_orchestrator()
+                    consensus = orch.run(positions=pos_infos)
+                    self.agent_hook._memory.store(consensus)
+                    self.agent_hook._send_result(consensus, trigger="분석요청")
+                except Exception as e:
+                    self.tg.send(f"{self.bot_tag} ❌ 분석 실패: {e}")
+
+            threading.Thread(target=_run, daemon=True).start()
             return
 
         if text_lower.startswith(("/포지션", "/position")):

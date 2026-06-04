@@ -1234,10 +1234,10 @@ class ConvergenceTrader:
         self._save_positions()
         self.daily_trades += 1
 
-        # [V9.4] 에이전트 분석 트리거 (비동기 — 봇 블로킹 없음)
+        # [V9.4] 에이전트 — 진입 스냅샷만 저장 (자동 알림 제거, /판결로 대체)
         if self.agent_hook:
             try:
-                self.agent_hook.on_position_open(pos, self.positions)
+                self.agent_hook.save_entry_snapshot(pos)
             except Exception:
                 pass
 
@@ -2138,7 +2138,7 @@ class ConvergenceTrader:
 
                 if self.agent_hook:
                     try:
-                        self.agent_hook.on_position_open(pos, {})
+                        self.agent_hook.save_entry_snapshot(pos)
                     except Exception:
                         pass
 
@@ -2397,7 +2397,9 @@ class ConvergenceTrader:
             self.tg.send(
                 "📋 사용 가능한 명령어\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "/포지션 <코인> — 보유 포지션 분석\n"
+                "/판결 — 전체 보유 포지션 판결\n"
+                "/분석 — 전체 시장+포지션 분석\n"
+                "/포지션 <코인> — 개별 포지션 분석\n"
                 "  예: /포지션 ETH\n"
                 "/진입 <코인> — 진입 시그널 판단\n"
                 "  예: /진입 SOL\n"
@@ -2406,6 +2408,58 @@ class ConvergenceTrader:
                 "/메모리 — Brain 메모리 통계\n"
                 "/help — 이 도움말"
             )
+            return
+
+        # /판결 — 전체 보유 포지션 판결
+        if text_lower in ("/판결", "/judge"):
+            if not self.agent_hook:
+                self.tg.send("❌ 에이전트 시스템 비활성화")
+                return
+            if not self.positions:
+                self.tg.send("📋 보유 포지션 없음")
+                return
+            n = len(self.positions)
+            syms = ", ".join(p.symbol.replace('/USDT', '') for p in self.positions)
+            self.tg.send(f"⚖️ 전체 포지션 판결 중... ({n}건: {syms})")
+
+            def _run():
+                try:
+                    pos_infos = self.agent_hook._convert_positions(self.positions)
+                    orch = self.agent_hook._get_orchestrator()
+                    consensus = orch.run(positions=pos_infos)
+                    self.agent_hook._memory.store(consensus)
+                    self.agent_hook._shadow.log_analysis(consensus, trigger="판결요청")
+                    messages = self.agent_hook._formatter.format_consensus(consensus)
+                    header = f"⚖️ 포지션 판결 ({n}건)\n{'━' * 25}\n"
+                    full = header + "\n".join(messages)
+                    for chunk in [full[i:i+4000] for i in range(0, len(full), 4000)]:
+                        self.tg.send(chunk)
+                except Exception as e:
+                    self.tg.send(f"❌ 판결 실패: {e}")
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        # /분석 — 전체 시장+포지션 분석 (기존 정기분석과 동일)
+        if text_lower in ("/분석", "/analyze"):
+            if not self.agent_hook:
+                self.tg.send("❌ 에이전트 시스템 비활성화")
+                return
+            n = len(self.positions)
+            self.tg.send(f"🔍 전체 시장 분석 중... (포지션 {n}건)")
+
+            def _run():
+                try:
+                    pos_infos = self.agent_hook._convert_positions(self.positions) if self.positions else []
+                    orch = self.agent_hook._get_orchestrator()
+                    consensus = orch.run(positions=pos_infos)
+                    self.agent_hook._memory.store(consensus)
+                    self.agent_hook._shadow.log_analysis(consensus, trigger="분석요청")
+                    self.agent_hook._send_result(consensus, trigger="분석요청")
+                except Exception as e:
+                    self.tg.send(f"❌ 분석 실패: {e}")
+
+            threading.Thread(target=_run, daemon=True).start()
             return
 
         # /포지션 <코인> — 보유 포지션 판결
@@ -2525,7 +2579,8 @@ class ConvergenceTrader:
                 now = time.time()
                 now_dt = datetime.now(KST)
 
-                # ── [V9.5] 실시간 급락 감지 + 방향 전환 감지 + 정기분석 (매 루프) ──
+                # ── [V9.5] 실시간 급락 감지 + 방향 전환 감지 (매 루프) ──
+                # ※ periodic_check(4h 정기알람) 제거 — /판결, /분석 명령으로 대체
                 if self.agent_hook:
                     try:
                         self.agent_hook.crash_check(self.positions)
@@ -2533,10 +2588,6 @@ class ConvergenceTrader:
                         pass
                     try:
                         self.agent_hook.trend_check(self.positions)
-                    except Exception:
-                        pass
-                    try:
-                        self.agent_hook.periodic_check(self.positions)
                     except Exception:
                         pass
 
