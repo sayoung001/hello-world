@@ -1063,7 +1063,7 @@ class HuntTrader:
     def _handle_command(self, text: str):
         text_lower = text.lower().strip()
 
-        if text_lower in ("/help", "/명령어"):
+        if text_lower in ("/help", "/명령어", "/도움"):
             self.tg.send(
                 f"{self.bot_tag} 📋 사용 가능한 명령어\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
