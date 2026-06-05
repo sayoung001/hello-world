@@ -2412,7 +2412,7 @@ class ConvergenceTrader:
         text_lower = text.lower().strip()
 
         # /help — 명령어 목록
-        if text_lower in ("/help", "/명령어", "/도움"):
+        if text_lower in ("/help", "/명령어", "/도움", "help", "도움", "명령어"):
             self.tg.send(
                 "📋 사용 가능한 명령어\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
