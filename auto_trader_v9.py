@@ -60,6 +60,11 @@ try:
 except ImportError:
     AgentHook = None
 
+try:
+    from agents.analyzers.breakout_scanner import BreakoutScannerAgent
+except ImportError:
+    BreakoutScannerAgent = None
+
 KST = timezone(timedelta(hours=9))
 BINANCE_FAPI = "https://fapi.binance.com"
 
@@ -2426,8 +2431,34 @@ class ConvergenceTrader:
                 "/메모리 — Brain 메모리 통계\n"
                 "/<코인>분석 — 알트코인 구조 분석\n"
                 "  예: /sol분석, /eth분석\n"
+                "/돌파 — 돌파 전문가 스캔 (LVN 횡보 강세 알트)\n"
                 "/help — 이 도움말"
             )
+            return
+
+        # /돌파 — 돌파 전문가 수동 트리거
+        if text_lower in ("/돌파", "/돌파스캔", "/breakout"):
+            if BreakoutScannerAgent is None:
+                self.tg.send("❌ 돌파 전문가 모듈 미설치")
+                return
+            self.tg.send("🔍 돌파 전문가 스캔 중...")
+
+            def _run():
+                try:
+                    agent = BreakoutScannerAgent(
+                        watchlist=self.cfg.get("WATCHLIST", []),
+                        exchange=self.exchange,
+                        btc_trend=self.btc_trend
+                    )
+                    data = agent.collect_data()
+                    result = agent.analyze(data)
+                    msg = agent.format_telegram(result)
+                    for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
+                        self.tg.send(chunk)
+                except Exception as e:
+                    self.tg.send(f"❌ 돌파 스캔 실패: {e}")
+
+            threading.Thread(target=_run, daemon=True).start()
             return
 
         # /<코인>분석 — 알트코인 구조 분석
@@ -2628,6 +2659,7 @@ class ConvergenceTrader:
         print(f"\n{'='*50}\n  Convergence Trader V9.2 [모드{self.mode} {self.mode_cfg['desc']}]\n{'='*50}")
         last_scan = 0; last_status = 0; last_verify = 0; last_sync = 0; last_bar_min = -1
         last_market = 0  # [V9.3] 4시간 시장 분석
+        last_breakout = 0  # 돌파 전문가 4시간 스캔
 
         while True:
             try:
@@ -2683,6 +2715,29 @@ class ConvergenceTrader:
                     except Exception as e:
                         print(f"  시장 분석 오류: {e}")
                     last_market = now
+
+                # ── 돌파 전문가 스캔 (4시간) ──
+                if BreakoutScannerAgent and now - last_breakout >= 14400:
+                    def _breakout_scan():
+                        try:
+                            agent = BreakoutScannerAgent(
+                                watchlist=self.cfg.get("WATCHLIST", []),
+                                exchange=self.exchange,
+                                btc_trend=self.btc_trend
+                            )
+                            data = agent.collect_data()
+                            candidates = data.get("candidates", [])
+                            if candidates:
+                                result = agent.analyze(data)
+                                msg = agent.format_telegram(result)
+                                for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
+                                    self.tg.send(chunk)
+                            else:
+                                print("  돌파 전문가: 후보 없음")
+                        except Exception as e:
+                            print(f"  돌파 스캔 오류: {e}")
+                    threading.Thread(target=_breakout_scan, daemon=True).start()
+                    last_breakout = now
 
                 # ── [#9] SL/TP 검증 (30분) ──
                 if now - last_verify >= 1800 and self.positions:
