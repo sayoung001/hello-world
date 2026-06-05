@@ -2451,8 +2451,10 @@ class ConvergenceTrader:
                     # 차트 이미지 생성 + 전송
                     try:
                         chart_png = agent.generate_chart(data, result)
-                        caption = agent.format_telegram(result)
-                        self.tg.send_photo(chart_png, caption=caption[:1024])
+                        self.tg.send_photo(chart_png, caption=f"📊 {coin} 구조 분석")
+                        msg = agent.format_telegram(result)
+                        for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
+                            self.tg.send(chunk)
                     except Exception as chart_err:
                         print(f"  차트 생성 실패, 텍스트 전송: {chart_err}")
                         msg = agent.format_telegram(result)
