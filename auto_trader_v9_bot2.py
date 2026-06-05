@@ -1262,12 +1262,11 @@ class HuntTrader:
 
     def _status_report(self):
         bal = self.executor.total_balance()
-        bot1_margin = self._get_bot1_margin()
         hunt_s = self.hunt_tracker.status_str()
         now = datetime.now(KST).strftime('%m/%d %H:%M')
 
         lines = [f"{self.bot_tag} 📊 상태 [{now}]",
-                 f"잔고: ${bal:,.0f} | Bot1마진: ${bot1_margin:,.0f}",
+                 f"잔고: ${bal:,.0f}",
                  f"BTC: {hunt_s}"]
 
         if self.positions:
