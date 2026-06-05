@@ -55,6 +55,12 @@ class AltStructureAgent(AgentBase):
 - 돌파 확률은 보수적으로 추정 (생존 우선)
 - 20x 레버리지 → ~4% 역행 = 청산. 리스크 항상 반영
 
+롱/숏 추천 진입 가이드 원칙:
+- 롱 추천: 지지 매물대(HVN) 근처 또는 VA 하단 근처에서 반등 기대
+- 숏 추천: 저항 매물대(HVN) 근처 또는 VA 상단 근처에서 하락 기대
+- SL은 진입가 기준 20x 레버리지에서 -60~80% 손실 이내 (가격 기준 ~3~4%)
+- TP는 다음 핵심 매물대 또는 반대쪽 VA 경계
+
 반드시 JSON 형식으로 출력하세요:
 ```json
 {{
@@ -68,6 +74,18 @@ class AltStructureAgent(AgentBase):
   "trend": "bullish|neutral|bearish",
   "trend_strength": "strong|moderate|weak",
   "patterns_detected": ["감지된 패턴들"],
+  "long_entry": {{
+    "entry_price": 롱추천진입가,
+    "stop_loss": 롱손절가,
+    "take_profit": 롱목표가,
+    "reason": "진입 근거 (한국어)"
+  }},
+  "short_entry": {{
+    "entry_price": 숏추천진입가,
+    "stop_loss": 숏손절가,
+    "take_profit": 숏목표가,
+    "reason": "진입 근거 (한국어)"
+  }},
   "risk_level": "SAFE|CAUTION|DANGER",
   "confidence": 0.0~1.0,
   "reasoning": "종합 분석 근거 (한국어)"
@@ -343,6 +361,13 @@ class AltStructureAgent(AgentBase):
 
 주요 지지/저항 레벨을 식별하고, 매물대와 패턴을 종합하여
 상방 돌파 확률과 리스크 수준을 평가하세요.
+
+또한 롱/숏 각각의 입장에서 최적의 매수 추천 가격을 제시하세요:
+- 롱 진입: 어디서 매수하면 좋은지 (지지 매물대, VA 하단 등 근거)
+- 숏 진입: 어디서 매도하면 좋은지 (저항 매물대, VA 상단 등 근거)
+- 각각의 SL(손절)과 TP(목표) 가격도 함께 제시
+- SL은 20x 레버리지에서 버틸 수 있는 범위 내 (~3~4% 이내)
+
 {coin}의 현재 가격 구조를 한국어로 명확하게 설명해주세요."""
 
         result = self.llm_json(prompt, deep=True, max_tokens=2500)
@@ -408,17 +433,43 @@ class AltStructureAgent(AgentBase):
         vp = d4h.get("volume_profile", {})
         va = vp.get("value_area", {})
 
+        resistances = [lvl for lvl in vp.get("hvn", []) if lvl > price]
+        support_lvls = [lvl for lvl in vp.get("hvn", []) if lvl < price]
+        va_low = va.get("low", price * 0.97)
+        va_high = va.get("high", price * 1.03)
+        atr = d4h.get("atr", price * 0.02)
+
+        long_entry_price = max(support_lvls) if support_lvls else va_low
+        long_sl = long_entry_price - atr * 1.5
+        long_tp = resistances[0] if resistances else va_high
+
+        short_entry_price = min(resistances) if resistances else va_high
+        short_sl = short_entry_price + atr * 1.5
+        short_tp = support_lvls[-1] if support_lvls else va_low
+
         return {
             "coin": self.coin,
             "current_price": price,
-            "key_resistance": [lvl for lvl in vp.get("hvn", []) if lvl > price],
-            "key_support": [lvl for lvl in vp.get("hvn", []) if lvl < price],
+            "key_resistance": resistances,
+            "key_support": support_lvls,
             "volume_profile_poc": vp.get("poc", 0),
             "value_area": va,
             "breakout_probability": round(breakout_prob, 2),
             "trend": trend,
             "trend_strength": "moderate",
             "patterns_detected": [p.get("desc", "") for p in bp.get("patterns", [])],
+            "long_entry": {
+                "entry_price": round(long_entry_price, 4),
+                "stop_loss": round(long_sl, 4),
+                "take_profit": round(long_tp, 4),
+                "reason": f"지지 매물대 근처 반등 기대"
+            },
+            "short_entry": {
+                "entry_price": round(short_entry_price, 4),
+                "stop_loss": round(short_sl, 4),
+                "take_profit": round(short_tp, 4),
+                "reason": f"저항 매물대 근처 하락 기대"
+            },
             "risk_level": risk_level,
             "confidence": 0.5,
             "reasoning": f"규칙 기반 폴백: EMA {trend}, 패턴 {pattern_bias}, RSI {rsi}"
@@ -471,6 +522,40 @@ class AltStructureAgent(AgentBase):
             lines.append(f"🟢 지지: {', '.join(str(s) for s in supports[:3])}")
         if resistances:
             lines.append(f"🔴 저항: {', '.join(str(r) for r in resistances[:3])}")
+
+        # 롱/숏 추천 진입
+        long_e = d.get("long_entry", {})
+        short_e = d.get("short_entry", {})
+
+        if long_e and long_e.get("entry_price"):
+            le = long_e["entry_price"]
+            lsl = long_e.get("stop_loss", 0)
+            ltp = long_e.get("take_profit", 0)
+            lines.append(f"\n🟢 LONG 추천")
+            lines.append(f"  진입: {le}")
+            if lsl:
+                sl_pnl = ((lsl - le) / le) * 20 * 100
+                lines.append(f"  SL: {lsl} ({sl_pnl:+.1f}%)")
+            if ltp:
+                tp_pnl = ((ltp - le) / le) * 20 * 100
+                lines.append(f"  TP: {ltp} (+{tp_pnl:.1f}%)")
+            if long_e.get("reason"):
+                lines.append(f"  → {long_e['reason']}")
+
+        if short_e and short_e.get("entry_price"):
+            se = short_e["entry_price"]
+            ssl = short_e.get("stop_loss", 0)
+            stp = short_e.get("take_profit", 0)
+            lines.append(f"\n🔴 SHORT 추천")
+            lines.append(f"  진입: {se}")
+            if ssl:
+                sl_pnl = ((se - ssl) / se) * 20 * 100
+                lines.append(f"  SL: {ssl} ({sl_pnl:+.1f}%)")
+            if stp:
+                tp_pnl = ((se - stp) / se) * 20 * 100
+                lines.append(f"  TP: {stp} (+{tp_pnl:.1f}%)")
+            if short_e.get("reason"):
+                lines.append(f"  → {short_e['reason']}")
 
         patterns = d.get("patterns_detected", [])
         if patterns:

@@ -70,6 +70,8 @@ def generate_alt_chart(
     confidence = analysis_result.get("confidence", 0)
     reasoning = analysis_result.get("reasoning", "")
     patterns = analysis_result.get("patterns_detected", [])
+    long_entry = analysis_result.get("long_entry", {})
+    short_entry = analysis_result.get("short_entry", {})
 
     # 4h 데이터
     d4h = collected_data.get("4h", {})
@@ -158,6 +160,37 @@ def generate_alt_chart(
                         f" S {lvl:.4f} ({pnl:.1f}%)",
                         color="#69f0ae", fontsize=8, va="center")
 
+        # ── 롱 추천 진입 영역 (파란) ──
+        le = long_entry.get("entry_price", 0)
+        lsl = long_entry.get("stop_loss", 0)
+        ltp = long_entry.get("take_profit", 0)
+        if le and price_min - y_pad <= le <= price_max + y_pad:
+            ax.axhline(le, color="#29b6f6", linewidth=1.3, linestyle="-", alpha=0.8)
+            pnl = _leverage_pnl(current_price, le)
+            ax.text(-0.5, le, f" L.Entry {le:.4f}", color="#29b6f6", fontsize=8,
+                    va="center", fontweight="bold")
+            if lsl and price_min - y_pad <= lsl <= price_max + y_pad:
+                ax.axhline(lsl, color="#29b6f6", linewidth=0.8, linestyle=":", alpha=0.5)
+                ax.text(-0.5, lsl, f" L.SL {lsl:.4f}", color="#29b6f6", fontsize=7, va="center")
+            if ltp and price_min - y_pad <= ltp <= price_max + y_pad:
+                ax.axhline(ltp, color="#29b6f6", linewidth=0.8, linestyle=":", alpha=0.5)
+                ax.text(-0.5, ltp, f" L.TP {ltp:.4f}", color="#29b6f6", fontsize=7, va="center")
+
+        # ── 숏 추천 진입 영역 (보라) ──
+        se = short_entry.get("entry_price", 0)
+        ssl = short_entry.get("stop_loss", 0)
+        stp = short_entry.get("take_profit", 0)
+        if se and price_min - y_pad <= se <= price_max + y_pad:
+            ax.axhline(se, color="#ce93d8", linewidth=1.3, linestyle="-", alpha=0.8)
+            ax.text(-0.5, se, f" S.Entry {se:.4f}", color="#ce93d8", fontsize=8,
+                    va="center", fontweight="bold")
+            if ssl and price_min - y_pad <= ssl <= price_max + y_pad:
+                ax.axhline(ssl, color="#ce93d8", linewidth=0.8, linestyle=":", alpha=0.5)
+                ax.text(-0.5, ssl, f" S.SL {ssl:.4f}", color="#ce93d8", fontsize=7, va="center")
+            if stp and price_min - y_pad <= stp <= price_max + y_pad:
+                ax.axhline(stp, color="#ce93d8", linewidth=0.8, linestyle=":", alpha=0.5)
+                ax.text(-0.5, stp, f" S.TP {stp:.4f}", color="#ce93d8", fontsize=7, va="center")
+
         # EMA 라인
         if len(df) >= 26:
             ema12 = df["close"].ewm(span=12).mean()
@@ -181,6 +214,8 @@ def generate_alt_chart(
         plt.Line2D([0], [0], color="#ffab00", linewidth=1.2, linestyle="-.", label="POC"),
         plt.Line2D([0], [0], color="#ff5252", linewidth=1.0, linestyle="--", label="Resistance"),
         plt.Line2D([0], [0], color="#69f0ae", linewidth=1.0, linestyle="--", label="Support"),
+        plt.Line2D([0], [0], color="#29b6f6", linewidth=1.3, label="Long Entry"),
+        plt.Line2D([0], [0], color="#ce93d8", linewidth=1.3, label="Short Entry"),
         plt.Line2D([0], [0], color="#42a5f5", linewidth=1.0, label="EMA12"),
         plt.Line2D([0], [0], color="#ffa726", linewidth=1.0, label="EMA26"),
     ]
@@ -274,6 +309,58 @@ def generate_alt_chart(
             y -= dy
 
     y -= dy * 0.5
+
+    # ── 롱/숏 추천 진입 ──
+    if long_entry.get("entry_price") or short_entry.get("entry_price"):
+        _text(0.05, y, "━ 추천 진입 (20x) ━", "#bbbbbb", 9, "bold")
+        y -= dy
+
+    if long_entry.get("entry_price"):
+        le = long_entry["entry_price"]
+        lsl = long_entry.get("stop_loss", 0)
+        ltp = long_entry.get("take_profit", 0)
+        _text(0.05, y, "LONG", "#29b6f6", 9, "bold")
+        _text(0.30, y, f"Entry: {le:.4f}", "#29b6f6", 8)
+        y -= dy
+        if lsl:
+            sl_pnl = _leverage_pnl(le, lsl)
+            _text(0.05, y, f"  SL: {lsl:.4f}", "#ff8a80", 8)
+            _text(0.55, y, f"Max Loss: {sl_pnl:+.1f}%", "#ff8a80", 8)
+            y -= dy
+        if ltp:
+            tp_pnl = _leverage_pnl(le, ltp)
+            _text(0.05, y, f"  TP: {ltp:.4f}", "#a5d6a7", 8)
+            _text(0.55, y, f"Target: +{tp_pnl:.1f}%", "#a5d6a7", 8)
+            y -= dy
+        if lsl and ltp and (le - lsl) > 0:
+            rr = (ltp - le) / (le - lsl)
+            _text(0.05, y, f"  R:R = 1:{rr:.1f}", "#ffffff", 8)
+            y -= dy
+        y -= dy * 0.3
+
+    if short_entry.get("entry_price"):
+        se = short_entry["entry_price"]
+        ssl = short_entry.get("stop_loss", 0)
+        stp = short_entry.get("take_profit", 0)
+        _text(0.05, y, "SHORT", "#ce93d8", 9, "bold")
+        _text(0.30, y, f"Entry: {se:.4f}", "#ce93d8", 8)
+        y -= dy
+        if ssl:
+            sl_pnl = _leverage_pnl(se, ssl, leverage=-20)
+            _text(0.05, y, f"  SL: {ssl:.4f}", "#ff8a80", 8)
+            sl_loss = ((se - ssl) / se) * 20 * 100
+            _text(0.55, y, f"Max Loss: {sl_loss:+.1f}%", "#ff8a80", 8)
+            y -= dy
+        if stp:
+            tp_pnl = ((se - stp) / se) * 20 * 100
+            _text(0.05, y, f"  TP: {stp:.4f}", "#a5d6a7", 8)
+            _text(0.55, y, f"Target: +{tp_pnl:.1f}%", "#a5d6a7", 8)
+            y -= dy
+        if ssl and stp and (ssl - se) > 0:
+            rr = (se - stp) / (ssl - se)
+            _text(0.05, y, f"  R:R = 1:{rr:.1f}", "#ffffff", 8)
+            y -= dy
+        y -= dy * 0.3
 
     # 감지된 패턴
     if patterns:
