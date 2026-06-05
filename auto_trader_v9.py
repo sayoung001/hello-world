@@ -201,27 +201,26 @@ class Telegram:
         """HTML 특수문자 이스케이프 — 에러 메시지에 <>&가 있어도 안전"""
         return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
-    def send(self, msg):
+    def send(self, msg, parse_mode=None):
         if not self.ok:
             print(f"  [TG] {msg[:200]}"); return
-        # 1차: HTML
+        data = {"chat_id": self.chat_id, "text": msg[:4000]}
+        if parse_mode:
+            data["parse_mode"] = parse_mode
         try:
             r = requests.post(f"https://api.telegram.org/bot{self.token}/sendMessage",
-                data={"chat_id": self.chat_id, "text": msg[:4000], "parse_mode": "HTML"},
-                timeout=10)
+                data=data, timeout=10)
             if r.status_code == 200 and r.json().get('ok'):
-                return  # 성공
-            # HTML 파싱 실패 → plain text 재시도
-            print(f"  [TG] HTML 실패({r.status_code}), plain 재시도")
-        except Exception as e:
-            print(f"  [TG] HTML 예외: {e}")
-        # 2차: plain text
-        try:
-            r = requests.post(f"https://api.telegram.org/bot{self.token}/sendMessage",
-                data={"chat_id": self.chat_id, "text": msg[:4000]},
-                timeout=10)
-            if r.status_code != 200:
-                print(f"  [TG] plain도 실패: {r.status_code} {r.text[:200]}")
+                return
+            # parse_mode가 있었으면 plain으로 재시도
+            if parse_mode:
+                print(f"  [TG] {parse_mode} 실패({r.status_code}), plain 재시도")
+                data.pop("parse_mode", None)
+                r = requests.post(f"https://api.telegram.org/bot{self.token}/sendMessage",
+                    data=data, timeout=10)
+                if r.status_code == 200 and r.json().get('ok'):
+                    return
+            print(f"  [TG] 전송 실패: {r.status_code} {r.text[:200]}")
         except Exception as e:
             print(f"  TG err: {e}")
 
