@@ -356,6 +356,9 @@ class HuntTrader:
                 print(f"  {self.bot_tag} ⚠️ 에이전트 초기화 실패 (봇 정상 운영): {e}")
                 self.agent_hook = None
 
+        # 돌파 전문가 정기 스캔 간격 (초) — 텔레그램 /돌파간격 명령으로 조정 가능
+        self.breakout_interval_sec = 14400  # 기본 4시간
+
         # 시작 알람
         self._send_startup_msg()
 
@@ -1019,8 +1022,8 @@ class HuntTrader:
                     self._status_report()
                     last_status = now
 
-                # ── 돌파 전문가 스캔 (4시간) ──
-                if BreakoutScannerAgent and now - last_breakout >= 14400:
+                # ── 돌파 전문가 스캔 (정기, 기본 4시간) ──
+                if BreakoutScannerAgent and now - last_breakout >= self.breakout_interval_sec:
                     def _breakout_scan():
                         try:
                             agent = BreakoutScannerAgent(
@@ -1090,6 +1093,7 @@ class HuntTrader:
                 print(f"  {self.bot_tag} [TG 명령] 처리 오류: {e}")
 
     def _handle_command(self, text: str):
+        import re
         text_lower = text.lower().strip()
 
         if text_lower in ("/help", "/명령어", "/도움", "help", "도움", "명령어"):
@@ -1106,8 +1110,34 @@ class HuntTrader:
                 "/<코인>분석 — 알트코인 구조 분석\n"
                 "  예: /sol분석, /eth분석\n"
                 "/돌파 — 돌파 전문가 스캔 (LVN 횡보 강세 알트)\n"
+                "/돌파간격 <시간> — 정기 스캔 주기 변경\n"
+                "  예: /돌파간격 2 (2시간마다), /돌파간격 0.5 (30분마다)\n"
                 "/b2help — 이 도움말"
             )
+            return
+
+        # /돌파간격 <시간> — 정기 스캔 주기 변경
+        interval_match = re.match(r'^/돌파간격\s+([0-9]*\.?[0-9]+)$', text.strip())
+        if interval_match or text_lower.strip() == "/돌파간격":
+            if not interval_match:
+                cur_h = self.breakout_interval_sec / 3600
+                self.tg.send(
+                    f"{self.bot_tag} ⏱️ 현재 돌파 스캔 주기: {cur_h:g}시간\n"
+                    "변경: /돌파간격 <시간>\n"
+                    "예: /돌파간격 2 → 2시간마다\n"
+                    "    /돌파간격 0.5 → 30분마다\n"
+                    "(최소 0.25시간=15분)"
+                )
+                return
+            hours = float(interval_match.group(1))
+            if hours < 0.25:
+                self.tg.send(f"{self.bot_tag} ❌ 최소 주기는 0.25시간(15분)입니다.")
+                return
+            if hours > 48:
+                self.tg.send(f"{self.bot_tag} ❌ 최대 주기는 48시간입니다.")
+                return
+            self.breakout_interval_sec = int(hours * 3600)
+            self.tg.send(f"{self.bot_tag} ✅ 돌파 스캔 주기 변경: {hours:g}시간마다")
             return
 
         # /돌파 — 돌파 전문가 수동 트리거
@@ -1136,7 +1166,6 @@ class HuntTrader:
             return
 
         # /<코인>분석 — 알트코인 구조 분석
-        import re
         alt_match = re.match(r'^/([a-zA-Z]+)분석$', text_lower.strip())
         if alt_match:
             coin = alt_match.group(1).upper()
