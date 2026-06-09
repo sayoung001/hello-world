@@ -1184,12 +1184,12 @@ class HuntTrader:
                     try:
                         chart_png = agent.generate_chart(data, result)
                         self.tg.send_photo(chart_png, caption=f"{self.bot_tag} 📊 {coin} 구조 분석")
-                        msg = agent.format_telegram(result)
+                        msg = agent.format_telegram(result, collected_data=data)
                         for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
                             self.tg.send(chunk)
                     except Exception as chart_err:
                         print(f"  차트 생성 실패, 텍스트 전송: {chart_err}")
-                        msg = agent.format_telegram(result)
+                        msg = agent.format_telegram(result, collected_data=data)
                         for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
                             self.tg.send(chunk)
                 except Exception as e:

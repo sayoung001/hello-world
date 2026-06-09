@@ -27,8 +27,18 @@ class AltStructureAgent(AgentBase):
     - 지정된 알트코인의 주요 지지/저항 레벨 식별 (Volume Profile)
     - 돌파/반동 패턴 감지
     - EMA/RSI/ATR 멀티타임프레임 분석
+    - BTC 상관관계 기반 시나리오 분석
     - 추세 및 돌파 확률 추정
     """
+
+    BTC_SCENARIOS = [
+        (-10, "BTC 급락 -10%"),
+        (-5, "BTC 하락 -5%"),
+        (-3, "BTC 조정 -3%"),
+        (+3, "BTC 반등 +3%"),
+        (+5, "BTC 상승 +5%"),
+        (+10, "BTC 급등 +10%"),
+    ]
 
     def __init__(self, symbol: str = "SOL/USDT", exchange=None):
         coin = symbol.replace("/USDT", "").replace("USDT", "").upper()
@@ -86,11 +96,60 @@ class AltStructureAgent(AgentBase):
     "take_profit": 숏목표가,
     "reason": "진입 근거 (한국어)"
   }},
+  "btc_scenario_analysis": "BTC 시나리오별 현재 포지션 영향 분석 (한국어, 2~3문장)",
   "risk_level": "SAFE|CAUTION|DANGER",
   "confidence": 0.0~1.0,
   "reasoning": "종합 분석 근거 (한국어)"
 }}
 ```"""
+
+    def _compute_btc_correlation(self, alt_df: pd.DataFrame) -> dict:
+        """BTC-알트 상관관계, 베타, 시나리오 분석"""
+        try:
+            btc_ohlcv = self.exchange.fetch_ohlcv("BTC/USDT", timeframe="4h", limit=100)
+            btc_df = pd.DataFrame(btc_ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
+        except Exception:
+            return {}
+
+        merged = pd.merge(
+            btc_df[["ts", "close"]].rename(columns={"close": "btc_close"}),
+            alt_df[["ts", "close"]].rename(columns={"close": "alt_close"}),
+            on="ts", how="inner"
+        )
+        if len(merged) < 20:
+            return {}
+
+        btc_ret = merged["btc_close"].pct_change().dropna()
+        alt_ret = merged["alt_close"].pct_change().dropna()
+
+        correlation = float(btc_ret.corr(alt_ret))
+        btc_var = float(btc_ret.var())
+        beta = float(btc_ret.cov(alt_ret) / btc_var) if btc_var > 0 else 1.0
+
+        alt_price = float(merged["alt_close"].iloc[-1])
+        btc_price = float(merged["btc_close"].iloc[-1])
+
+        scenarios = []
+        for btc_pct, label in self.BTC_SCENARIOS:
+            expected_alt_pct = beta * btc_pct
+            expected_alt_price = alt_price * (1 + expected_alt_pct / 100)
+            lev_pnl = expected_alt_pct * 20
+            scenarios.append({
+                "btc_change_pct": btc_pct,
+                "label": label,
+                "expected_alt_pct": round(expected_alt_pct, 2),
+                "expected_alt_price": round(expected_alt_price, 4),
+                "lev20x_pnl_pct": round(lev_pnl, 1),
+            })
+
+        return {
+            "correlation": round(correlation, 3),
+            "beta": round(beta, 3),
+            "btc_price": round(btc_price, 2),
+            "alt_price": round(alt_price, 4),
+            "data_points": len(merged),
+            "scenarios": scenarios,
+        }
 
     @staticmethod
     def _compute_volume_profile(df: pd.DataFrame, lookback: int = 50, bins: int = 30) -> dict:
@@ -299,6 +358,13 @@ class AltStructureAgent(AgentBase):
             except Exception as e:
                 data[f"{tf}"] = {"error": str(e)}
 
+        ohlcv_4h = data.get("_ohlcv_4h")
+        if ohlcv_4h is not None and not ohlcv_4h.empty:
+            try:
+                data["btc_correlation"] = self._compute_btc_correlation(ohlcv_4h)
+            except Exception:
+                data["btc_correlation"] = {}
+
         return data
 
     def analyze(self, collected_data: dict, context: dict | None = None,
@@ -328,6 +394,20 @@ class AltStructureAgent(AgentBase):
                 for p in bp_data.get("patterns", []):
                     pattern_info += f"  - {p.get('desc', p.get('type', ''))}\n"
 
+        btc_corr = collected_data.get("btc_correlation", {})
+        corr_info = ""
+        if btc_corr:
+            corr_info = f"""
+## BTC 상관관계 분석
+- 상관계수: {btc_corr.get('correlation', 'N/A')} (1.0=완전동조, 0=무관, -1=역행)
+- 베타(β): {btc_corr.get('beta', 'N/A')} (1.0보다 크면 BTC보다 변동성 큼)
+- BTC 현재가: {btc_corr.get('btc_price', 'N/A')}
+- 데이터 기간: 4h봉 {btc_corr.get('data_points', 0)}개
+
+### BTC 시나리오별 {coin} 예상 (β={btc_corr.get('beta', 'N/A')} 기반)"""
+            for sc in btc_corr.get("scenarios", []):
+                corr_info += f"\n- {sc['label']}: {coin} {sc['expected_alt_pct']:+.2f}% → ${sc['expected_alt_price']} (20x: {sc['lev20x_pnl_pct']:+.1f}%)"
+
         prompt = f"""다음 {coin} 데이터를 분석하여 구조적 판단을 내려주세요.
 
 ## 가격 데이터 (멀티타임프레임)
@@ -353,6 +433,7 @@ class AltStructureAgent(AgentBase):
 ### 15분봉
 - EMA 12/26: {d15m.get('ema_12', 'N/A')} / {d15m.get('ema_26', 'N/A')}
 - RSI: {d15m.get('rsi', 'N/A')} | ATR: {d15m.get('atr_pct', 'N/A')}%
+{corr_info}
 
 ## 20x 레버리지 핵심 고려사항
 - ~4% 역행 = 청산
@@ -361,6 +442,10 @@ class AltStructureAgent(AgentBase):
 
 주요 지지/저항 레벨을 식별하고, 매물대와 패턴을 종합하여
 상방 돌파 확률과 리스크 수준을 평가하세요.
+
+BTC 상관관계(β)를 고려하여 시나리오별 {coin}의 예상 가격과 리스크를 설명하세요.
+특히 BTC 하락 시나리오에서 현재 포지션이 감수해야 할 손실률,
+BTC 상승 시나리오에서 기대할 수 있는 수익률을 20x 레버리지 기준으로 반영하세요.
 
 또한 롱/숏 각각의 입장에서 최적의 매수 추천 가격을 제시하세요:
 - 롱 진입: 어디서 매수하면 좋은지 (지지 매물대, VA 하단 등 근거)
@@ -485,7 +570,7 @@ class AltStructureAgent(AgentBase):
             collected_data=collected_data,
         )
 
-    def format_telegram(self, msg: AgentMessage) -> str:
+    def format_telegram(self, msg: AgentMessage, collected_data: dict | None = None) -> str:
         """분석 결과를 텔레그램 메시지로 포맷팅"""
         d = msg.data
         coin = d.get("coin", self.coin)
@@ -562,6 +647,29 @@ class AltStructureAgent(AgentBase):
             lines.append(f"\n🔍 패턴:")
             for p in patterns[:3]:
                 lines.append(f"  • {p}")
+
+        btc_corr = (collected_data or {}).get("btc_correlation", {})
+        if btc_corr and btc_corr.get("scenarios"):
+            corr = btc_corr.get("correlation", 0)
+            beta = btc_corr.get("beta", 0)
+            corr_desc = "강한 동조" if abs(corr) >= 0.7 else "보통" if abs(corr) >= 0.4 else "약한 관계"
+            lines.append(f"\n📐 BTC 상관관계")
+            lines.append(f"  상관계수: {corr:.3f} ({corr_desc})")
+            lines.append(f"  베타(β): {beta:.2f} (BTC 1% → {coin} {beta:.2f}%)")
+            lines.append(f"\n⚡ BTC 시나리오 (20x 레버리지)")
+            for sc in btc_corr["scenarios"]:
+                pnl = sc["lev20x_pnl_pct"]
+                emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                lines.append(
+                    f"  {emoji} {sc['label']}: "
+                    f"{coin} {sc['expected_alt_pct']:+.1f}% "
+                    f"→ {sc['expected_alt_price']} "
+                    f"(20x: {pnl:+.0f}%)"
+                )
+
+        btc_scenario_text = d.get("btc_scenario_analysis", "")
+        if btc_scenario_text:
+            lines.append(f"\n📋 시나리오 평가: {btc_scenario_text[:200]}")
 
         if msg.warnings:
             lines.append("")
