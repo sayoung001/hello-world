@@ -2438,6 +2438,8 @@ class ConvergenceTrader:
                 "/돌파 — 돌파 전문가 스캔 (LVN 횡보 강세 알트)\n"
                 "/돌파간격 <시간> — 정기 스캔 주기 변경\n"
                 "  예: /돌파간격 2 (2시간마다), /돌파간격 0.5 (30분마다)\n"
+                "/스퀴즈 <코인> — 숏스퀴즈/롱캐스케이드 종료 감지\n"
+                "  예: /스퀴즈 BTC, /스퀴즈 ETH\n"
                 "/help — 이 도움말"
             )
             return
@@ -2487,6 +2489,27 @@ class ConvergenceTrader:
                         self.tg.send(chunk)
                 except Exception as e:
                     self.tg.send(f"❌ 돌파 스캔 실패: {e}")
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        # /스퀴즈 <코인> — 숏스퀴즈/롱캐스케이드 종료 감지
+        squeeze_match = re.match(r'^/스퀴즈\s+([a-zA-Z0-9]+)$', text.strip())
+        if squeeze_match or text_lower.strip() == "/스퀴즈":
+            coin = squeeze_match.group(1).upper() if squeeze_match else "BTC"
+            self.tg.send(f"🔍 {coin} 스퀴즈/캐스케이드 감지 중...")
+
+            def _run():
+                try:
+                    from agents.analyzers.squeeze_detector import SqueezeCascadeDetector
+                    cg = getattr(self, 'coinglass', None) or getattr(self, 'cg_client', None)
+                    detector = SqueezeCascadeDetector(exchange=self.exchange, cg_client=cg)
+                    result = detector.detect(coin)
+                    msg = detector.format_telegram(result)
+                    for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
+                        self.tg.send(chunk)
+                except Exception as e:
+                    self.tg.send(f"❌ {coin} 스퀴즈 감지 실패: {e}")
 
             threading.Thread(target=_run, daemon=True).start()
             return
