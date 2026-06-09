@@ -982,6 +982,11 @@ class ConvergenceTrader:
         # 돌파 전문가 정기 스캔 간격 (초) — 텔레그램 /돌파간격 명령으로 조정 가능
         self.breakout_interval_sec = 14400  # 기본 4시간
 
+        # 스퀴즈/캐스케이드 1분 모니터링 — /스퀴즈감시 <코인>로 등록
+        # {coin: {"last_phase": str, "alerted": bool}}
+        self.squeeze_watch: dict = {}
+        self.squeeze_threshold_pct = 100  # 알람 발동 소진도 (%)
+
         # 사이징 기준 (compound/half/quarter용)
         self._init_balance = self.executor.total_balance()
 
@@ -2414,6 +2419,44 @@ class ConvergenceTrader:
             except Exception as e:
                 print(f"  [TG 명령] 처리 오류: {e}")
 
+    def _squeeze_watch_tick(self):
+        """1분마다 등록된 코인의 스퀴즈/캐스케이드 소진도 점검 → 임계 도달 시 알람"""
+        try:
+            from agents.analyzers.squeeze_detector import SqueezeCascadeDetector
+            cg = getattr(self.onchain, '_cg', None)
+            detector = SqueezeCascadeDetector(exchange=self.exchange, cg_client=cg)
+        except Exception:
+            return
+
+        for coin in list(self.squeeze_watch.keys()):
+            try:
+                result = detector.detect(coin)
+                state = self.squeeze_watch.get(coin, {})
+
+                # 이벤트 종료(NONE)면 감시 자동 해제
+                if result.event_type.value == "none":
+                    if state.get("had_event"):
+                        self.tg.send(f"🌀 {coin} 스퀴즈/캐스케이드 이벤트 소멸 → 감시 해제")
+                        self.squeeze_watch.pop(coin, None)
+                    continue
+
+                state["had_event"] = True
+                exh = result.exhaustion_pct
+
+                # 임계 도달 + 미알람 → 알람 발동
+                if exh >= self.squeeze_threshold_pct and not state.get("alerted"):
+                    msg = "🚨 소진 100% 달성! 🚨\n" + detector.format_telegram(result)
+                    for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
+                        self.tg.send(chunk)
+                    state["alerted"] = True
+                # 소진도 다시 내려가면 알람 재무장
+                elif exh < self.squeeze_threshold_pct - 15:
+                    state["alerted"] = False
+
+                self.squeeze_watch[coin] = state
+            except Exception as e:
+                print(f"  스퀴즈 감시 오류({coin}): {e}")
+
     def _handle_command(self, text: str):
         """개별 명령어 파싱 + 실행"""
         import re
@@ -2440,6 +2483,8 @@ class ConvergenceTrader:
                 "  예: /돌파간격 2 (2시간마다), /돌파간격 0.5 (30분마다)\n"
                 "/스퀴즈 <코인> — 숏스퀴즈/롱캐스케이드 종료 감지\n"
                 "  예: /스퀴즈 BTC, /스퀴즈 ETH\n"
+                "/스퀴즈감시 <코인> — 1분마다 감시, 소진 100%시 알람\n"
+                "  예: /스퀴즈감시 BTC (해제: /스퀴즈감시해제 BTC)\n"
                 "/help — 이 도움말"
             )
             return
@@ -2502,7 +2547,7 @@ class ConvergenceTrader:
             def _run():
                 try:
                     from agents.analyzers.squeeze_detector import SqueezeCascadeDetector
-                    cg = getattr(self, 'coinglass', None) or getattr(self, 'cg_client', None)
+                    cg = getattr(self.onchain, '_cg', None)
                     detector = SqueezeCascadeDetector(exchange=self.exchange, cg_client=cg)
                     result = detector.detect(coin)
                     msg = detector.format_telegram(result)
@@ -2512,6 +2557,41 @@ class ConvergenceTrader:
                     self.tg.send(f"❌ {coin} 스퀴즈 감지 실패: {e}")
 
             threading.Thread(target=_run, daemon=True).start()
+            return
+
+        # /스퀴즈감시해제 <코인> — 모니터링 해제
+        unwatch_match = re.match(r'^/스퀴즈감시해제\s+([a-zA-Z0-9]+)$', text.strip())
+        if unwatch_match or text_lower.strip() == "/스퀴즈감시해제":
+            if unwatch_match:
+                coin = unwatch_match.group(1).upper()
+                if self.squeeze_watch.pop(coin, None) is not None:
+                    self.tg.send(f"🛑 {coin} 스퀴즈 감시 해제됨")
+                else:
+                    self.tg.send(f"ℹ️ {coin}은(는) 감시 중이 아닙니다")
+            else:
+                self.squeeze_watch.clear()
+                self.tg.send("🛑 모든 스퀴즈 감시 해제됨")
+            return
+
+        # /스퀴즈감시 <코인> — 1분 모니터링 등록 (목록 조회 겸용)
+        watch_match = re.match(r'^/스퀴즈감시\s+([a-zA-Z0-9]+)$', text.strip())
+        if watch_match or text_lower.strip() == "/스퀴즈감시":
+            if not watch_match:
+                if self.squeeze_watch:
+                    coins = ", ".join(self.squeeze_watch.keys())
+                    self.tg.send(f"👁️ 감시 중: {coins}\n"
+                                 f"임계 소진도: {self.squeeze_threshold_pct}%\n"
+                                 "등록: /스퀴즈감시 <코인>\n"
+                                 "해제: /스퀴즈감시해제 <코인>")
+                else:
+                    self.tg.send("👁️ 감시 중인 코인 없음\n"
+                                 "등록: /스퀴즈감시 BTC")
+                return
+            coin = watch_match.group(1).upper()
+            self.squeeze_watch[coin] = {"alerted": False, "had_event": False}
+            self.tg.send(f"👁️ {coin} 스퀴즈/캐스케이드 감시 시작\n"
+                         f"1분마다 점검 → 소진도 {self.squeeze_threshold_pct}% 달성 시 알람\n"
+                         "해제: /스퀴즈감시해제 " + coin)
             return
 
         # /<코인>분석 — 알트코인 구조 분석
@@ -2527,7 +2607,8 @@ class ConvergenceTrader:
             def _run():
                 try:
                     from agents.analyzers.alt_structure import AltStructureAgent
-                    agent = AltStructureAgent(symbol=symbol, exchange=self.exchange)
+                    agent = AltStructureAgent(symbol=symbol, exchange=self.exchange,
+                                              cg_client=getattr(self.onchain, '_cg', None))
                     data = agent.collect_data()
                     result = agent.analyze(data)
                     # 차트 이미지 생성 + 전송
@@ -2712,6 +2793,7 @@ class ConvergenceTrader:
         last_scan = 0; last_status = 0; last_verify = 0; last_sync = 0; last_bar_min = -1
         last_market = 0  # [V9.3] 4시간 시장 분석
         last_breakout = 0  # 돌파 전문가 4시간 스캔
+        last_squeeze_watch = 0  # 스퀴즈/캐스케이드 1분 모니터링
 
         while True:
             try:
@@ -2790,6 +2872,11 @@ class ConvergenceTrader:
                             print(f"  돌파 스캔 오류: {e}")
                     threading.Thread(target=_breakout_scan, daemon=True).start()
                     last_breakout = now
+
+                # ── 스퀴즈/캐스케이드 모니터링 (1분) ──
+                if self.squeeze_watch and now - last_squeeze_watch >= 60:
+                    threading.Thread(target=self._squeeze_watch_tick, daemon=True).start()
+                    last_squeeze_watch = now
 
                 # ── [#9] SL/TP 검증 (30분) ──
                 if now - last_verify >= 1800 and self.positions:

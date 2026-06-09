@@ -678,3 +678,22 @@ class SqueezeCascadeDetector:
             lines.append("\n💡 소진 진행 중 — 포지션 축소 또는 반대 포지션 준비 권장")
 
         return "\n".join(lines)
+
+    def format_compact(self, result: DetectionResult) -> str:
+        """알트 분석가(LLM) 주입용 한 줄 요약 — 팩트만 간결하게"""
+        if result.event_type == EventType.NONE:
+            return "스퀴즈/캐스케이드 미감지 (정상 시장)"
+
+        type_name = "숏스퀴즈" if result.event_type == EventType.SHORT_SQUEEZE else "롱 캐스케이드"
+        phase_name = {
+            EventPhase.BUILDING: "초기 진행",
+            EventPhase.ACTIVE: "활발 진행",
+            EventPhase.EXHAUSTING: "소진 진행",
+            EventPhase.EXHAUSTED: "사실상 종료",
+        }[result.phase]
+
+        strong = [s.name for s in result.signals if s.score >= 0.7]
+        strong_str = f" (종료근거: {', '.join(strong)})" if strong else ""
+
+        return (f"{type_name} {phase_name}, 소진도 {result.exhaustion_pct:.0f}%, "
+                f"신뢰도 {result.confidence:.0%}{strong_str}")

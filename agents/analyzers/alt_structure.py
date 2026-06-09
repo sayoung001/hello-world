@@ -40,7 +40,7 @@ class AltStructureAgent(AgentBase):
         (+10, "BTC 급등 +10%"),
     ]
 
-    def __init__(self, symbol: str = "SOL/USDT", exchange=None):
+    def __init__(self, symbol: str = "SOL/USDT", exchange=None, cg_client=None):
         coin = symbol.replace("/USDT", "").replace("USDT", "").upper()
         super().__init__(
             agent_id=f"agent_alt_{coin.lower()}",
@@ -54,6 +54,7 @@ class AltStructureAgent(AgentBase):
             import ccxt
             exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
         self.exchange = exchange
+        self.cg_client = cg_client
 
     def _get_system_prompt(self) -> str:
         return f"""당신은 {self.coin} 가격 구조 전문 분석가입니다.
@@ -365,6 +366,21 @@ class AltStructureAgent(AgentBase):
             except Exception:
                 data["btc_correlation"] = {}
 
+        # 숏스퀴즈/롱캐스케이드 종료 감지 결과 주입
+        try:
+            from agents.analyzers.squeeze_detector import SqueezeCascadeDetector
+            detector = SqueezeCascadeDetector(exchange=self.exchange, cg_client=self.cg_client)
+            sq_result = detector.detect(self.coin)
+            data["squeeze_detection"] = {
+                "compact": detector.format_compact(sq_result),
+                "event_type": sq_result.event_type.value,
+                "phase": sq_result.phase.value,
+                "exhaustion_pct": sq_result.exhaustion_pct,
+                "confidence": sq_result.confidence,
+            }
+        except Exception:
+            data["squeeze_detection"] = {}
+
         return data
 
     def analyze(self, collected_data: dict, context: dict | None = None,
@@ -408,6 +424,15 @@ class AltStructureAgent(AgentBase):
             for sc in btc_corr.get("scenarios", []):
                 corr_info += f"\n- {sc['label']}: {coin} {sc['expected_alt_pct']:+.2f}% → ${sc['expected_alt_price']} (20x: {sc['lev20x_pnl_pct']:+.1f}%)"
 
+        squeeze = collected_data.get("squeeze_detection", {})
+        squeeze_info = ""
+        if squeeze and squeeze.get("compact"):
+            squeeze_info = f"""
+## 숏스퀴즈/롱캐스케이드 종료 감지 (정량 분석)
+- 현황: {squeeze.get('compact', 'N/A')}
+- 소진도가 높을수록(75%+) 해당 이벤트가 종료에 가까움 → 반대 방향 기회
+- 숏스퀴즈 종료 임박 = 숏 진입 기회, 롱캐스케이드 종료 임박 = 롱 반등 기회"""
+
         prompt = f"""다음 {coin} 데이터를 분석하여 구조적 판단을 내려주세요.
 
 ## 가격 데이터 (멀티타임프레임)
@@ -434,6 +459,7 @@ class AltStructureAgent(AgentBase):
 - EMA 12/26: {d15m.get('ema_12', 'N/A')} / {d15m.get('ema_26', 'N/A')}
 - RSI: {d15m.get('rsi', 'N/A')} | ATR: {d15m.get('atr_pct', 'N/A')}%
 {corr_info}
+{squeeze_info}
 
 ## 20x 레버리지 핵심 고려사항
 - ~4% 역행 = 청산
@@ -670,6 +696,13 @@ BTC 상승 시나리오에서 기대할 수 있는 수익률을 20x 레버리지
         btc_scenario_text = d.get("btc_scenario_analysis", "")
         if btc_scenario_text:
             lines.append(f"\n📋 시나리오 평가: {btc_scenario_text[:200]}")
+
+        squeeze = (collected_data or {}).get("squeeze_detection", {})
+        if squeeze and squeeze.get("event_type") and squeeze.get("event_type") != "none":
+            exh = squeeze.get("exhaustion_pct", 0)
+            ev = "🟢⬆️숏스퀴즈" if squeeze.get("event_type") == "short_squeeze" else "🔴⬇️롱캐스케이드"
+            lines.append(f"\n🌀 {ev} 소진도 {exh:.0f}%")
+            lines.append(f"  {squeeze.get('compact', '')}")
 
         if msg.warnings:
             lines.append("")
