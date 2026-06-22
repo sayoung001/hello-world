@@ -140,6 +140,20 @@ class NotionPublisher:
             print(f"[notion] {path} 실패: {type(e).__name__}: {e}")
             return None
 
+    def _patch(self, path: str, payload: dict) -> Optional[dict]:
+        if not self.enabled:
+            print(f"[notion] 미설정 — {path} 생략")
+            return None
+        try:
+            import requests
+            r = requests.patch(f"{NOTION_BASE}{path}", headers=self._headers(),
+                               json=payload, timeout=20)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:  # noqa: BLE001
+            print(f"[notion] {path} 실패: {type(e).__name__}: {e}")
+            return None
+
     def create_recommendations_db(self, parent_page_id: str,
                                   title: str = "오늘의 추천") -> Optional[str]:
         """1회 셋업: 부모 페이지 아래 추천 DB 생성 → DB ID 반환."""
@@ -160,7 +174,23 @@ class NotionPublisher:
         payload = {
             "parent": {"type": "page_id", "page_id": parent_page_id},
             "properties": {"title": {"title": _rt(title)}},
-            "children": blocks,
+            "children": blocks[:100],   # 생성 시 100블록 제한
         }
         res = self._post("/pages", payload)
-        return res.get("id") if res else None
+        page_id = res.get("id") if res else None
+        if page_id and len(blocks) > 100:
+            self.append_blocks(page_id, blocks[100:])
+        return page_id
+
+    def append_blocks(self, block_id: str, blocks: list) -> None:
+        """100개씩 청크로 자식 블록 추가."""
+        from stock_auto.integrations.md_to_notion import batched
+        for chunk in batched(blocks, 100):
+            self._patch(f"/blocks/{block_id}/children", {"children": chunk})
+
+    def create_page_from_markdown(self, parent_page_id: str, title: str,
+                                  md_text: str) -> Optional[str]:
+        """Markdown 문서 → Notion 페이지(A: 설계 문서 변환)."""
+        from stock_auto.integrations.md_to_notion import markdown_to_blocks
+        blocks = markdown_to_blocks(md_text)
+        return self.create_summary_page(parent_page_id, title, blocks)
