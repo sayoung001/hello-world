@@ -128,7 +128,8 @@ class KISFeed:
     """KIS WebSocket → TickSnapshot 스트림. volume_monitor.SurgeMonitor.run에 사용."""
 
     def __init__(self, app_key: str, app_secret: str, market: Market,
-                 env: str = "real", us_exchange: str = "NAS"):
+                 env: str = "real", us_exchange: str = "NAS",
+                 debug_raw: int = 0, should_stop=None):
         self.app_key = app_key
         self.app_secret = app_secret
         self.market = market
@@ -136,6 +137,8 @@ class KISFeed:
         self.us_exchange = us_exchange
         self._tr = TR_KR if market == Market.KR else TR_US
         self._field_count = 46 if market == Market.KR else 26  # 종목당 필드 수(근사)
+        self.debug_raw = debug_raw       # >0이면 첫 N개 원시 패킷을 출력(필드 정렬용)
+        self.should_stop = should_stop   # 콜백: True면 스트림 종료(데몬 자동정지)
 
     def _tr_key(self, symbol: str) -> str:
         if self.market == Market.KR:
@@ -162,10 +165,17 @@ class KISFeed:
             tz = KST if self.market == Market.KR else ET
             parse = parse_kr if self.market == Market.KR else parse_us
 
+            seen = 0
             while True:
+                if self.should_stop is not None and self.should_stop():
+                    break
                 raw = ws.recv()
                 if not raw:
                     continue
+                # 원시 패킷 캡처(필드 정렬 검증용)
+                if self.debug_raw and seen < self.debug_raw:
+                    seen += 1
+                    print(f"[kis-raw {seen}] {raw[:600]}")
                 # 제어 메시지(JSON): 구독응답/PINGPONG
                 if raw[0] in "{[":
                     if "PINGPONG" in raw:

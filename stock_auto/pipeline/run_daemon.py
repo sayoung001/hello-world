@@ -1,0 +1,129 @@
+"""
+자동 운영 데몬 (매일 자동 실행 + 자가보정 피드백).
+
+APScheduler(zoneinfo)로 거래소 현지시각 기준 트리거 → DST 자동:
+  - 일일 배치 + 프로파일 재구축:  US 마감(16:00 ET)+1h
+      ① 관측 저장소(전일 실시간 누적)로 프로파일 자가보정 재구축(--from-observations)
+      ② run_daily(US/KR) → 추천 → Notion 게시
+  - KR 개장(09:00 KST):  KR 모니터 스레드 시작(장중 누적 관측 적립 + 폭주 Telegram)
+  - US 개장(09:30 ET):   US 모니터 스레드 시작(동일)
+
+→ 매일 돌수록 관측이 쌓여 프로파일이 실측으로 수렴(정적 frac → 실측 보정).
+
+사용:  python -m stock_auto.pipeline.run_daemon
+정지:  Ctrl+C
+주의: 단일 프로세스 데몬. 운영 안정성이 중요하면 배치/모니터를 별 프로세스(cron/systemd)로
+      분리하고 본 모듈은 참고 구현으로 사용.
+"""
+
+from __future__ import annotations
+
+import threading
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
+from stock_auto.config.env import get_secrets
+from stock_auto.config.settings import Market
+from stock_auto.config.universe import load_universe
+from stock_auto.realtime.volume_monitor import (
+    SurgeMonitor, HistoricalProfile, DEFAULT_THRESHOLDS)
+from stock_auto.realtime import observation_store
+from stock_auto.data.kis_feed import KISFeed
+from stock_auto.notify.telegram import Telegram, surge_alert_callback
+
+KST = ZoneInfo("Asia/Seoul")
+ET = ZoneInfo("America/New_York")
+
+
+def _recalibrate_and_batch():
+    """일일 배치 + 프로파일 자가보정 재구축."""
+    from stock_auto.realtime.profile_builder import save_profile, build_and_save
+    from stock_auto.pipeline.daily_batch import run_daily
+    from stock_auto.integrations.notion_publisher import NotionPublisher
+    sec = get_secrets()
+    print(f"[daemon] {datetime.now()} 일일 배치 + 프로파일 재구축")
+
+    for market in (Market.US, Market.KR):
+        syms = list(load_universe(market).keys())
+        # ① 실측 우선 재구축, 부족분 frac 폴백
+        emp = observation_store.build_profiles_from_observations(market, syms, min_days=10)
+        for s, prof in emp.items():
+            save_profile(prof, market)
+        rest = [s for s in syms if s not in emp]
+        if rest:
+            build_and_save(rest, market)
+        print(f"[daemon] {market.value} 프로파일: 실측 {len(emp)} / frac {len(rest)}")
+        # ② 추천 배치
+        notion = NotionPublisher(token=sec.notion_token) if sec.has_notion else None
+        run_daily(market=market, universe=syms,
+                  stock_sector_etf=load_universe(market),
+                  notion=notion, notion_db_id=sec.notion_reco_db_id or None,
+                  notion_parent_page=sec.notion_parent_page_id or None,
+                  run_llm=sec.has_anthropic)
+
+
+def _run_monitor_thread(market: Market, session_minutes: int):
+    """개장 시 모니터를 스레드로 구동, 장 마감까지 자동 정지."""
+    sec = get_secrets()
+    if not sec.has_kis:
+        print("[daemon] KIS 키 없음 — 모니터 생략")
+        return
+    syms = list(load_universe(market).keys())
+
+    # 프로파일 로드
+    from stock_auto.pipeline.run_monitor import _load_profiles
+    profiles = _load_profiles(market, syms)
+    tg = Telegram(sec.telegram_bot_token, sec.telegram_chat_id)
+
+    def _record(snap, window):
+        observation_store.record(snap.market, datetime.now().strftime("%Y-%m-%d"),
+                                 snap.symbol, window, snap.cum_volume, snap.cum_turnover)
+
+    monitor = SurgeMonitor(profiles, DEFAULT_THRESHOLDS,
+                           on_signal=surge_alert_callback(tg) if tg.enabled else None,
+                           on_observation=_record)
+    deadline = datetime.now() + timedelta(minutes=session_minutes)
+    feed = KISFeed(sec.kis_app_key, sec.kis_app_secret, market, env=sec.kis_env,
+                   should_stop=lambda: datetime.now() >= deadline)
+
+    def _run():
+        print(f"[daemon] {market.value} 모니터 시작 ({session_minutes}분)")
+        try:
+            monitor.run(feed, syms)
+        except Exception as e:  # noqa: BLE001
+            print(f"[daemon] {market.value} 모니터 오류: {e}")
+        print(f"[daemon] {market.value} 모니터 종료")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def main() -> int:
+    try:
+        from apscheduler.schedulers.blocking import BlockingScheduler
+        from apscheduler.triggers.cron import CronTrigger
+    except ImportError:
+        print("❌ apscheduler 필요: pip install apscheduler")
+        return 1
+
+    sch = BlockingScheduler(timezone=KST)
+    # 일일 배치 + 재구축: ET 17:00(마감+1h), DST 자동
+    sch.add_job(_recalibrate_and_batch,
+                CronTrigger(hour=17, minute=0, day_of_week="mon-fri", timezone=ET))
+    # KR 개장 09:00 KST → KR 정규장 약 390분
+    sch.add_job(lambda: _run_monitor_thread(Market.KR, 390),
+                CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=KST))
+    # US 개장 09:30 ET → 약 390분
+    sch.add_job(lambda: _run_monitor_thread(Market.US, 390),
+                CronTrigger(hour=9, minute=30, day_of_week="mon-fri", timezone=ET))
+
+    print("[daemon] 시작 — 일일배치(US마감+1h) / KR·US 개장 모니터 / 자가보정")
+    print("[daemon] Ctrl+C 로 종료")
+    try:
+        sch.start()
+    except (KeyboardInterrupt, SystemExit):
+        print("\n[daemon] 종료")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

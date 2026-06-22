@@ -68,9 +68,19 @@ def main() -> int:
     if not tg.enabled:
         print("⚠️ 텔레그램 미설정 — 알림은 콘솔로 출력")
 
+    # 자가보정: 각 윈도우 누적거래량을 관측 저장소에 적립 → 다음날 프로파일 재구축
+    from stock_auto.realtime import observation_store
+    from datetime import datetime as _dt
+
+    def _record(snap, window):
+        observation_store.record(
+            snap.market, _dt.now().strftime("%Y-%m-%d"), snap.symbol,
+            window, snap.cum_volume, snap.cum_turnover)
+
     monitor = SurgeMonitor(
         profiles, thresholds=DEFAULT_THRESHOLDS,
-        on_signal=surge_alert_callback(tg) if tg.enabled else None)
+        on_signal=surge_alert_callback(tg) if tg.enabled else None,
+        on_observation=_record)
 
     feed = KISFeed(sec.kis_app_key, sec.kis_app_secret, market,
                    env=sec.kis_env, us_exchange=args.us_exchange)

@@ -284,17 +284,21 @@ class SurgeMonitor:
         on_signal: Optional[Callable[[SurgeSignal], None]] = None,
         eval_windows: tuple[int, ...] = EVAL_WINDOWS_MIN,
         cooldown_sec: int = DEDUP_COOLDOWN_SEC,
+        on_observation: Optional[Callable[[TickSnapshot, int], None]] = None,
     ):
         self.profiles = profiles
         self.thresholds = thresholds
         self.on_signal = on_signal or (lambda s: print(s.to_telegram()))
         self.eval_windows = eval_windows
         self.cooldown_sec = cooldown_sec
+        # 자가보정 피드백: 각 윈도우에서 누적거래량 1회 기록(폭주 여부 무관)
+        self.on_observation = on_observation
 
         # 종목별 롤링 상태: (시각, 가격, 체결건수) 1분 윈도우
         self._hist: dict[str, deque[tuple[datetime, float, int]]] = {}
         self._last_alert_ts: dict[str, float] = {}        # symbol → epoch
         self._fired_windows: dict[str, set[int]] = {}     # symbol → 발화한 윈도우
+        self._observed_windows: dict[str, set[int]] = {}  # symbol → 기록한 윈도우
 
     def _rolling_ref(self, symbol: str, snap: TickSnapshot):
         """약 60초 전 (가격, 체결건수, 경과초)를 찾는다."""
@@ -327,6 +331,14 @@ class SurgeMonitor:
         window = self._which_window(snap.elapsed_min)
         if window is None:
             return None
+        # 관측 기록(자가보정): 폭주 여부와 무관하게 윈도우당 1회
+        if (self.on_observation is not None
+                and window not in self._observed_windows.get(snap.symbol, set())):
+            self._observed_windows.setdefault(snap.symbol, set()).add(window)
+            try:
+                self.on_observation(snap, window)
+            except Exception:  # noqa: BLE001 — 기록 실패가 모니터를 막지 않게
+                pass
         # 이미 이 윈도우에서 발화했으면 skip
         if window in self._fired_windows.get(snap.symbol, set()):
             return None
