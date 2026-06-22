@@ -68,9 +68,10 @@ def _subscribe_msg(approval_key: str, tr_id: str, tr_key: str) -> str:
 # H0STCNT0(국내): ^ 구분, 종목당 필드
 KR_IDX = {"price": 2, "open": 7, "cum_vol": 13, "cum_amt": 14,
           "sign": 3, "vrss": 4, "sell_sum": 19, "buy_sum": 20, "time": 1}
-# HDFSCNT0(해외): 종목당 필드
+# HDFSCNT0(해외): 종목당 26필드 (실측 검증 2026-06: AAPL HDFSCNT0)
 US_IDX = {"open": 8, "price": 11, "sign": 12, "diff": 13,
-          "cum_vol": 20, "cum_amt": 21, "strength": 24, "time": 5}
+          "cum_vol": 20, "cum_amt": 21, "sell_vol": 22, "buy_vol": 23,
+          "strength": 24, "time": 5}
 
 
 def _f(x: str) -> float:
@@ -104,14 +105,14 @@ def parse_us(fields: list[str], symbol: str, session_open: datetime,
              ts: datetime) -> TickSnapshot:
     i = US_IDX
     price = _f(fields[i["price"]])
-    # 해외는 매수/매도 체결량 분리 미제공 → 체결강도(STRN, 매수/매도*100)를 비율로 인코딩
-    strn = _f(fields[i["strength"]])
+    # 실측 검증: 22=매도누적, 23=매수누적 (체결강도 STRN = 매수/매도×100과 일치)
     return TickSnapshot(
         symbol=symbol, market=Market.US, ts=ts, price=price,
         prev_close=_prev_close(price, _f(fields[i["diff"]]), fields[i["sign"]]),
         open_price=_f(fields[i["open"]]), session_open=session_open,
         cum_volume=_f(fields[i["cum_vol"]]), cum_turnover=_f(fields[i["cum_amt"]]),
-        buy_exec_volume=strn, sell_exec_volume=100.0,  # strength = strn/100
+        buy_exec_volume=_f(fields[i["buy_vol"]]),
+        sell_exec_volume=_f(fields[i["sell_vol"]]),
     )
 
 
@@ -185,10 +186,10 @@ class KISFeed:
                 parts = raw.split("|")
                 if len(parts) < 4:
                     continue
-                tr_id, body = parts[1], parts[3]
+                tr_id, count, body = parts[1], parts[2], parts[3]
                 if tr_id != self._tr:
                     continue
-                snap = self._parse_body(body, parse, session_open, tz)
+                snap = self._parse_body(body, count, parse, session_open, tz)
                 if snap:
                     yield snap
         finally:
@@ -197,13 +198,20 @@ class KISFeed:
             except Exception:  # noqa: BLE001
                 pass
 
-    def _parse_body(self, body: str, parse, session_open, tz):
+    def _parse_body(self, body: str, count: str, parse, session_open, tz):
+        """다건 패킷(count>1)은 종목당 필드수로 나눠 '최신(마지막)' 레코드만 파싱."""
         fields = body.split("^")
-        if len(fields) < self._field_count:
-            return None
-        # 종목코드: KR=fields[0], US=fields[1](SYMB)
-        symbol = fields[0] if self.market == Market.KR else fields[1]
         try:
-            return parse(fields, symbol, session_open, datetime.now(tz))
+            n = max(int(count), 1)
+        except (TypeError, ValueError):
+            n = 1
+        rec_size = len(fields) // n
+        if rec_size < 10:
+            return None
+        rec = fields[-rec_size:]   # 가장 최근(누적값이 최신) 레코드
+        # 종목코드: KR=rec[0], US=rec[1](SYMB)
+        symbol = rec[0] if self.market == Market.KR else rec[1]
+        try:
+            return parse(rec, symbol, session_open, datetime.now(tz))
         except (IndexError, ValueError):
             return None
