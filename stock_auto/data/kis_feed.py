@@ -87,10 +87,32 @@ def _prev_close(price: float, vrss: float, sign: str) -> float:
     return price - signed
 
 
-def parse_kr(fields: list[str], symbol: str, session_open: datetime,
-             ts: datetime) -> TickSnapshot:
+def _hms_to_time(hms: str) -> time:
+    """'HHMMSS'(또는 'HHMM') → time. 부족분 0 패딩."""
+    s = str(hms).strip().zfill(6)[:6]
+    return time(int(s[0:2]), int(s[2:4]), int(s[4:6]))
+
+
+def _packet_dt_us(ymd: str, hms: str) -> datetime:
+    """해외: 현지일자(XYMD 'YYYYMMDD') + 현지시간(XHMS 'HHMMSS') → ET aware datetime."""
+    s = str(ymd).strip()
+    return datetime(int(s[0:4]), int(s[4:6]), int(s[6:8]),
+                    tzinfo=ET).replace(
+        hour=_hms_to_time(hms).hour, minute=_hms_to_time(hms).minute,
+        second=_hms_to_time(hms).second)
+
+
+# 해외 현지일자(XYMD) 필드 인덱스
+US_XYMD = 4
+
+
+def parse_kr(fields: list[str], symbol: str) -> TickSnapshot:
+    """국내: ts=오늘(KST)+체결시간, session_open=오늘 09:00 KST."""
     i = KR_IDX
     price = _f(fields[i["price"]])
+    today = datetime.now(KST).date()
+    ts = datetime.combine(today, _hms_to_time(fields[i["time"]]), tzinfo=KST)
+    session_open = datetime.combine(today, time(9, 0), tzinfo=KST)
     return TickSnapshot(
         symbol=symbol, market=Market.KR, ts=ts, price=price,
         prev_close=_prev_close(price, _f(fields[i["vrss"]]), fields[i["sign"]]),
@@ -101,11 +123,16 @@ def parse_kr(fields: list[str], symbol: str, session_open: datetime,
     )
 
 
-def parse_us(fields: list[str], symbol: str, session_open: datetime,
-             ts: datetime) -> TickSnapshot:
+def parse_us(fields: list[str], symbol: str) -> TickSnapshot:
+    """
+    해외: ts·session_open을 '현지(ET) 패킷 시간'으로 산출(서버 시계 의존 제거).
+    ts = XYMD(현지일자) + XHMS(현지시간), session_open = 같은 현지일자 09:30 ET.
+    실측 검증: 22=매도누적, 23=매수누적 (체결강도 STRN = 매수/매도×100과 일치).
+    """
     i = US_IDX
     price = _f(fields[i["price"]])
-    # 실측 검증: 22=매도누적, 23=매수누적 (체결강도 STRN = 매수/매도×100과 일치)
+    ts = _packet_dt_us(fields[US_XYMD], fields[i["time"]])
+    session_open = datetime.combine(ts.date(), time(9, 30), tzinfo=ET)
     return TickSnapshot(
         symbol=symbol, market=Market.US, ts=ts, price=price,
         prev_close=_prev_close(price, _f(fields[i["diff"]]), fields[i["sign"]]),
@@ -114,14 +141,6 @@ def parse_us(fields: list[str], symbol: str, session_open: datetime,
         buy_exec_volume=_f(fields[i["buy_vol"]]),
         sell_exec_volume=_f(fields[i["sell_vol"]]),
     )
-
-
-def _session_open(market: Market, now: Optional[datetime] = None) -> datetime:
-    if market == Market.KR:
-        now = now or datetime.now(KST)
-        return datetime.combine(now.date(), time(9, 0), tzinfo=KST)
-    now = now or datetime.now(ET)
-    return datetime.combine(now.date(), time(9, 30), tzinfo=ET)
 
 
 # ── 피드 ────────────────────────────────────────────────────────────────────
@@ -162,8 +181,6 @@ class KISFeed:
         try:
             for sym in symbols:
                 ws.send(_subscribe_msg(approval, self._tr, self._tr_key(sym)))
-            session_open = _session_open(self.market)
-            tz = KST if self.market == Market.KR else ET
             parse = parse_kr if self.market == Market.KR else parse_us
 
             seen = 0
@@ -189,7 +206,7 @@ class KISFeed:
                 tr_id, count, body = parts[1], parts[2], parts[3]
                 if tr_id != self._tr:
                     continue
-                snap = self._parse_body(body, count, parse, session_open, tz)
+                snap = self._parse_body(body, count, parse)
                 if snap:
                     yield snap
         finally:
@@ -198,7 +215,7 @@ class KISFeed:
             except Exception:  # noqa: BLE001
                 pass
 
-    def _parse_body(self, body: str, count: str, parse, session_open, tz):
+    def _parse_body(self, body: str, count: str, parse):
         """다건 패킷(count>1)은 종목당 필드수로 나눠 '최신(마지막)' 레코드만 파싱."""
         fields = body.split("^")
         try:
@@ -212,6 +229,6 @@ class KISFeed:
         # 종목코드: KR=rec[0], US=rec[1](SYMB)
         symbol = rec[0] if self.market == Market.KR else rec[1]
         try:
-            return parse(rec, symbol, session_open, datetime.now(tz))
+            return parse(rec, symbol)   # ts/session_open은 패킷 시간으로 산출
         except (IndexError, ValueError):
             return None

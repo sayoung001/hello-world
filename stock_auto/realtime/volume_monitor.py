@@ -318,9 +318,12 @@ class SurgeMonitor:
         return ref[1], ref[2], secs
 
     def _which_window(self, elapsed_min: float) -> Optional[int]:
-        """현재 경과분이 평가 윈도우 근처(±0.5분)인지."""
+        """
+        경과분이 윈도우 [w, w+1) 구간이면 그 윈도우. (윈도우 도달 직후 첫 틱에 발화)
+        ±0.5 대칭 대신 도달-이후 1분 캐치 → 희소 체결에서도 윈도우 누락 방지.
+        """
         for w in self.eval_windows:
-            if abs(elapsed_min - w) <= 0.5:
+            if w <= elapsed_min < w + 1.0:
                 return w
         return None
 
