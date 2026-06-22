@@ -60,13 +60,22 @@ def screen_universe(
     market: Market,
     index_ohlcv: Optional[dict[str, pd.DataFrame]] = None,
     top_n: int = TOP_N_FOR_AGENTS,
+    stock_sector_etf: Optional[dict[str, str]] = None,
+    sector_status: Optional[dict[str, int]] = None,
 ) -> ScreenResult:
     """
     ohlcv_map: {symbol: 표준 OHLCV df (DatetimeIndex)}
     index_ohlcv: {index_symbol: df} — 매크로 레짐용
+    stock_sector_etf: {symbol: 섹터 ETF 티커} — sector_map.get_sector_etf 결과
+    sector_status: {ETF 티커: status_score 0~5} — sector_analysis.load_sector_status 결과
+
+    분석 §3.2 해결: 섹터 상태를 매수 판정에 실제 반영한다.
+      - 섹터 status_score 0(하락위험) → 매수 차단
     """
     macro = compute_macro_regime(index_ohlcv or {}, market)
     gate_ok = macro_gate_ok(macro)
+    stock_sector_etf = stock_sector_etf or {}
+    sector_status = sector_status or {}
 
     rows: list[dict] = []
     exit_rows: list[dict] = []
@@ -91,8 +100,15 @@ def screen_universe(
 
             last = df.iloc[-1]
 
-            # 매크로 AND 게이트: 시장 약세면 Final_Buy 무효화 (분석 §3.7)
-            final_buy = bool(last.get("Final_Buy", False)) and gate_ok
+            # 섹터 상태 조회 (분석 §3.2)
+            sec_etf = stock_sector_etf.get(symbol, "-")
+            sec_score = sector_status.get(sec_etf)  # None이면 미상
+
+            # 매크로 AND 게이트 + 섹터 게이트
+            #   - 매크로 약세(레짐0) → 차단 (§3.7)
+            #   - 섹터 하락위험(score 0) → 차단 (§3.2)
+            sector_ok = (sec_score is None) or (sec_score >= 1)
+            final_buy = bool(last.get("Final_Buy", False)) and gate_ok and sector_ok
 
             active = get_active_strategies(last)
             levels = calculate_strategy_levels(last, active)
@@ -111,6 +127,8 @@ def screen_universe(
                 "regime_trans": rinfo["transition"],
                 "macro_regime": macro.level,
                 "macro_gate": gate_ok,
+                "sector_etf": sec_etf,
+                "sector_status_score": sec_score,
                 "final_buy": final_buy,
                 "close": float(last["Close"]),
                 "rsi_14": float(last.get("rsi_14", 0.0)),
