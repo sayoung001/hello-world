@@ -695,7 +695,7 @@ BTC 상승 시나리오에서 기대할 수 있는 수익률을 20x 레버리지
 
         btc_scenario_text = d.get("btc_scenario_analysis", "")
         if btc_scenario_text:
-            lines.append(f"\n📋 시나리오 평가: {btc_scenario_text[:200]}")
+            lines.append(f"\n📋 시나리오 평가: {btc_scenario_text}")
 
         squeeze = (collected_data or {}).get("squeeze_detection", {})
         if squeeze and squeeze.get("event_type") and squeeze.get("event_type") != "none":
@@ -711,6 +711,8 @@ BTC 상승 시나리오에서 기대할 수 있는 수익률을 20x 레버리지
 
         reasoning = d.get("reasoning", "")
         if reasoning:
-            lines.append(f"\n💡 {reasoning[:300]}")
+            lines.append(f"\n💡 {reasoning}")
 
-        return "\n".join(lines)
+        full_msg = "\n".join(lines)
+        # 텔레그램 4000자 제한 → 복수 메시지로 분할은 호출부에서 처리
+        return full_msg

@@ -358,7 +358,7 @@ def generate_alt_chart(
         _t(0.05, y, "Patterns", "#bbbbbb", 8, True)
         y -= dy
         for p in patterns[:3]:
-            _t(0.08, y, f"- {p[:40]}", "#e0e0e0", 7)
+            _t(0.08, y, f"- {p[:28]}", "#e0e0e0", 7)
             y -= dy * 0.8
         y -= dy * 0.3
 
@@ -366,10 +366,10 @@ def generate_alt_chart(
     if reasoning and y > 0.06:
         _t(0.05, y, "Analysis", "#bbbbbb", 8, True)
         y -= dy
-        text = reasoning[:250]
+        text = reasoning[:200]
         while text and y > 0.02:
-            line = text[:42]
-            text = text[42:]
+            line = text[:28]
+            text = text[28:]
             _t(0.05, y, line, "#e0e0e0", 7)
             y -= dy * 0.85
 
