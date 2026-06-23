@@ -140,7 +140,7 @@ Market Context Layer(BTC 구조, 매크로, 상관관계, 알트 생태계)의 �
 
         confidence = 0.7
         if result.get("portfolio_risk") == "DANGER":
-            confidence = 0.85
+            confidence = 0.75  # DANGER 판정 confidence 과도 상향 방지 (0.85 → 0.75)
 
         return self._build_message(
             data=result,

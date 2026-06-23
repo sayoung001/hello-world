@@ -31,8 +31,8 @@ MODERATOR_PROMPT = """당신은 크립토 선물 트레이딩 전문가 패널�
 규칙:
 1. Factual 에이전트 (BTC 구조, 상관관계)는 기초 사실 → 높은 가중치
 2. Subjective 에이전트 (매크로, 알트, 뉴스)는 해석 → 보조 참고
-3. Bull/Bear 토론에서 Bear의 우려가 구체적이면 보수적으로 판단
-4. 의견 충돌 시 20x 레버리지 생존 원칙 적용 (보수적 우선)
+3. Bull/Bear 토론에서 양측의 근거를 공정하게 평가 (Bear 편향 주의)
+4. 의견 충돌 시 데이터 기반으로 판단 — 단순히 보수적이면 안 됨. 리스크가 실제로 높을 때만 DANGER
 5. 반드시 JSON 형식으로 출력
 
 출력 형식:
@@ -135,24 +135,27 @@ class Orchestrator:
 
         try:
             import anthropic
+            from agents.core.base import QUICK_MODEL, _track_usage
             client = anthropic.Anthropic()
 
             debate_input = f"에이전트 분석:\n{summary}{crash_text}"
 
-            # Bull 주장
             bull_resp = client.messages.create(
-                model=DEEP_MODEL, max_tokens=500,
-                system=BULL_PROMPT,
+                model=QUICK_MODEL, max_tokens=500,
+                system=[{"type": "text", "text": BULL_PROMPT,
+                         "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": debate_input}]
             )
+            _track_usage(QUICK_MODEL, "bull_agent", bull_resp)
             bull_argument = bull_resp.content[0].text.strip()
 
-            # Bear 주장
             bear_resp = client.messages.create(
-                model=DEEP_MODEL, max_tokens=500,
-                system=BEAR_PROMPT,
+                model=QUICK_MODEL, max_tokens=500,
+                system=[{"type": "text", "text": BEAR_PROMPT,
+                         "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": debate_input}]
             )
+            _track_usage(QUICK_MODEL, "bear_agent", bear_resp)
             bear_argument = bear_resp.content[0].text.strip()
 
             print(f"  🐂 Bull: {bull_argument[:80]}...")
@@ -266,6 +269,7 @@ class Orchestrator:
         # 4. LLM 모더레이션
         try:
             import anthropic
+            from agents.core.base import _track_usage
             client = anthropic.Anthropic()
 
             summary = self._build_analysis_summary(weighted_messages)
@@ -273,7 +277,6 @@ class Orchestrator:
                            f"🐂 Bull: {debate['bull']}\n"
                            f"🐻 Bear: {debate['bear']}")
 
-            # 급락 컨텍스트를 모더레이터에게 전달
             crash_instruction = ""
             if crash_context:
                 crash_instruction = (
@@ -289,7 +292,8 @@ class Orchestrator:
             response = client.messages.create(
                 model=DEEP_MODEL,
                 max_tokens=1500,
-                system=MODERATOR_PROMPT,
+                system=[{"type": "text", "text": MODERATOR_PROMPT,
+                         "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": (
                     f"에이전트 분석 (가중치 적용됨):\n{summary}"
                     f"{debate_text}{crash_instruction}\n\n"
@@ -297,13 +301,14 @@ class Orchestrator:
                     f"현재 추정 regime: {estimated_regime}"
                 )}]
             )
+            _track_usage(DEEP_MODEL, "moderator", response)
             raw = response.content[0].text
             if "```json" in raw:
                 raw = raw.split("```json")[1].split("```")[0]
             result = json.loads(raw.strip())
 
             consensus = MarketConsensus(
-                overall_risk=RiskLevel(result.get("overall_risk", "CAUTION")),
+                overall_risk=RiskLevel(result.get("overall_risk", "SAFE")),
                 market_regime=MarketRegime(result.get("market_regime", "neutral")),
                 btc_bias=result.get("btc_bias", "neutral"),
                 confidence=result.get("confidence", 0.5),
@@ -349,9 +354,9 @@ class Orchestrator:
             if appetite == "risk-off":
                 bearish_signals += 1
 
-        if danger_count >= 2 or bearish_signals >= 3:
+        if danger_count >= 3 or bearish_signals >= 4:
             return "risk-off"
-        elif safe_count >= len(messages) * 0.6:
+        elif safe_count >= len(messages) * 0.4:  # 40%로 완화 (기존 60%)
             return "risk-on"
         return "neutral"
 
@@ -371,9 +376,9 @@ class Orchestrator:
         danger_pct = danger_weight / total_weight
         caution_pct = caution_weight / total_weight
 
-        if danger_pct >= 0.3:  # 30% 이상이 DANGER
+        if danger_pct >= 0.45:  # 45% 이상이 DANGER (기존 30% → 완화)
             risk = RiskLevel.DANGER
-        elif danger_pct + caution_pct >= 0.4:  # 40% 이상이 CAUTION+
+        elif danger_pct + caution_pct >= 0.55:  # 55% 이상이 CAUTION+ (기존 40% → 완화)
             risk = RiskLevel.CAUTION
         else:
             risk = RiskLevel.SAFE

@@ -4,11 +4,10 @@ auto_trader_v9_bot2.py — BTC 돌파 후 알트 연쇄 돌파 추격 봇
 Bot 1: BTC 조용할 때 알트 독자 돌파 (기존 v9)
 Bot 2: BTC 돌파 직후 알트 연쇄 돌파 캐치 (이 파일)
 
-같은 바이낸스 계정에서 Bot1과 동시 운영:
+★ Bot1과 별도 바이낸스 계정 사용
   - 포지션 파일 분리 (positions_v9_bot2.json)
-  - Bot1 워치리스트 제외 (중복 진입 방지)
-  - 마진 잔여분만 사용 (Bot1 우선)
-  - 텔레그램 메시지에 [Bot2] 태그
+  - Bot2 전용 API 키 (BINANCE_API_KEY_BOT2)
+  - 독립 마진 관리 (Bot1 마진 불참조)
 
 사용법:
   python auto_trader_v9_bot2.py --mode E              # 페이퍼
@@ -17,6 +16,7 @@ Bot 2: BTC 돌파 직후 알트 연쇄 돌파 캐치 (이 파일)
 """
 
 import ccxt, pandas as pd, numpy as np, time, json, os, sys, requests, traceback, math
+import threading
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
@@ -31,11 +31,22 @@ from auto_trader_v9 import (
     Position, KST, BINANCE_FAPI, MODE_CONFIGS, PROFILES
 )
 
+# Phase A~F 에이전트 시스템
+try:
+    from agents.v9_hook import AgentHook
+except ImportError:
+    AgentHook = None
+
+try:
+    from agents.analyzers.breakout_scanner import BreakoutScannerAgent
+except ImportError:
+    BreakoutScannerAgent = None
+
 # ═══════════════════════════════════════════════════════════
 #  Bot2 전용 설정
 # ═══════════════════════════════════════════════════════════
 
-# Bot1 워치리스트 (중복 진입 방지)
+# Bot1 워치리스트 (참고용 — 별도 계정이므로 제외하지 않음)
 BOT1_WATCHLIST = {
     "SOL/USDT", "XRP/USDT", "NEAR/USDT", "UNI/USDT", "COMP/USDT",
     "SAND/USDT", "MANA/USDT", "QNT/USDT", "ANKR/USDT", "SUI/USDT",
@@ -47,9 +58,11 @@ BOT1_WATCHLIST = {
 CONFIG_BOT2 = {
     "PAPER_TRADE": True,
 
-    # API Keys (Bot1과 동일 — 같은 계정)
-    "BINANCE_API_KEY":  os.environ.get("BINANCE_API_KEY", ""),
-    "BINANCE_SECRET":   os.environ.get("BINANCE_SECRET", ""),
+    # API Keys (Bot2 전용 바이낸스 계정, Bot1과 별도)
+    "BINANCE_API_KEY":  os.environ.get("BINANCE_API_KEY_BOT2",
+                        os.environ.get("BINANCE_API_KEY", "")),
+    "BINANCE_SECRET":   os.environ.get("BINANCE_SECRET_BOT2",
+                        os.environ.get("BINANCE_SECRET", "")),
     "COINGLASS_API_KEY": os.environ.get("COINGLASS_API_KEY", ""),
     "TELEGRAM_TOKEN":   os.environ.get("TELEGRAM_TOKEN_TRADER",
                         os.environ.get("TELEGRAM_TOKEN_MONITOR", "")),
@@ -66,11 +79,18 @@ CONFIG_BOT2 = {
 
     # 시그널 필터 (Bot1보다 느슨 — hunt mode 특성)
     "EMA_GAP_THRESHOLD": 0.7,
-    "MIN_SQUEEZE_CANDLES": 10,    # Bot1: 15 → Bot2: 10 (빠른 진입)
-    "MIN_CONFIDENCE": 60,          # Bot1: 70 → Bot2: 60
-    "MIN_ADX": 20,                 # Bot1: 25 → Bot2: 20
-    "MIN_VOLUME_RATIO": 1.5,
-    "MIN_VOL_SURGE": 2.0,         # Bot2 전용: vol surge 필터
+    "MIN_SQUEEZE_CANDLES": 6,     # Bot1: 15 → Bot2: 6 (더 짧은 스퀴즈 허용)
+    "MIN_CONFIDENCE": 50,          # Bot1: 70 → Bot2: 50 (낮은 확신도 허용)
+    "MIN_ADX": 18,                 # Bot1: 25 → Bot2: 18
+    "MIN_VOLUME_RATIO": 1.3,       # Bot1: 1.5 → Bot2: 1.3
+    "MIN_VOL_SURGE": 1.5,         # Bot2 전용: vol surge 필터 (2.0→1.5 완화)
+
+    # 모멘텀 시그널 (스퀴즈 없이도 BTC 방향 모멘텀으로 진입)
+    "MOMENTUM_ENABLED": True,      # 스퀴즈 미충족 시 모멘텀 시그널 사용
+    "MOM_ATR_MULT": 2.0,           # ATR 대비 N배 이상 움직임
+    "MOM_VOL_SURGE": 2.5,          # 모멘텀: 거래량 2.5배 이상 (스퀴즈 없으므로 더 엄격)
+    "MOM_RSI_LONG": 55,            # 모멘텀 롱: RSI > 55
+    "MOM_RSI_SHORT": 45,           # 모멘텀 숏: RSI < 45
     "FIBO_LEVEL": 2.618,
     "SL_RATIO": 1.5,
 
@@ -90,15 +110,16 @@ CONFIG_BOT2 = {
     "BTC_SQUEEZE_ENABLED": False,  # ★ Bot2 핵심: squeeze OFF
 
     # ★ Bot2 전용: Hunt 설정
-    "HUNT_WINDOW_HOURS": 3,        # trigger 후 스캔 지속 시간
+    "HUNT_WINDOW_HOURS": 4,        # trigger 후 스캔 지속 시간 (3→4h)
     "HUNT_COOLDOWN_HOURS": 1,      # hunt 종료 후 대기
     "BTC_TRIGGER_GAP": 0.5,        # BTC gap이 이 값 넘으면 trigger
+    "BTC_GAP_ACCEL": 0.15,         # gap 가속도 (이전 대비 +0.15% 이상이면 trigger)
 
     # 포지션 — Bot1과 분리
     "MAX_POSITIONS": 5,
     "RISK_PCT": 8.0,               # Bot1(10%)보다 보수적
     "SIZING": "compound",
-    "MARGIN_EXPOSURE_LIMIT": 0.30,  # Bot1(50%) + Bot2(30%) = 80% 한도
+    "MARGIN_EXPOSURE_LIMIT": 0.50,  # Bot2 독립 계정 — 50% 사용
     "MAX_DAILY_TRADES": 8,
 
     # 주기
@@ -110,7 +131,6 @@ CONFIG_BOT2 = {
     # 경로 — Bot1과 분리
     "LOG_DIR": "./trade_logs",
     "POSITIONS_FILE": "./trade_logs/positions_v9_bot2.json",
-    "BOT1_POSITIONS_FILE": "./trade_logs/positions_v9.json",  # Bot1 포지션 읽기용
 }
 
 
@@ -127,6 +147,10 @@ class BTCBreakoutTracker:
       TRIGGER  — BTC squeeze 해제 감지! 방향 기록
       HUNT     — 알트 스캔 활성 (N시간 제한)
       COOLDOWN — hunt 종료, 다음 squeeze까지 대기
+
+    트리거 조건 (OR):
+      1. squeeze → non-squeeze 전환 (EMA gap 0.5% 이하 → 초과)
+      2. BTC gap이 BTC_TRIGGER_GAP 이상으로 급변 (gap 기반 돌파)
     """
     STANDBY = "STANDBY"
     TRIGGER = "TRIGGER"
@@ -139,59 +163,89 @@ class BTCBreakoutTracker:
         self.state = self.STANDBY
         self.hunt_direction = None       # "long" or "short"
         self.hunt_start_time = None
-        self.last_squeeze_state = True   # 초기: squeeze라고 가정
+        self.last_squeeze_state = None   # None = 초기 상태 (첫 루프에서 설정)
         self._cooldown_until = 0
+        self._last_gap = 0.0            # 이전 gap 기록 (급변 감지용)
 
     def update(self) -> str:
-        """매 루프마다 호출 — 상태 전환 로직"""
+        """매 루프마다 호출 — 상태 전환 로직
+
+        트리거 조건 (OR, 어느 하나라도 충족 시 HUNT 진입):
+          1. squeeze → non-squeeze 전환
+          2. gap이 BTC_TRIGGER_GAP 이상으로 돌파
+          3. gap 가속 — 이전 대비 BTC_GAP_ACCEL(0.15%) 이상 확대
+        """
         self.btc.update()
         now = time.time()
         is_squeeze = self.btc.is_squeeze
         gap = self.btc.gap_pct
+        trigger_gap = self.cfg.get("BTC_TRIGGER_GAP", 0.5)
+        gap_accel = self.cfg.get("BTC_GAP_ACCEL", 0.15)
 
         if self.state == self.STANDBY:
+            if self.last_squeeze_state is None:
+                self.last_squeeze_state = is_squeeze
+                self._last_gap = gap
+                return self.state
+
+            triggered = False
+            trigger_reason = ""
+
+            # 조건 1: squeeze → non-squeeze 전환
             if self.last_squeeze_state and not is_squeeze:
-                # squeeze → non-squeeze 전환! = BTC 돌파
-                self.state = self.TRIGGER
-                # BTC 돌파 방향 판정
+                triggered = True
+                trigger_reason = "squeeze_breakout"
+
+            # 조건 2: gap이 trigger_gap 이상으로 돌파
+            if not triggered and self._last_gap < trigger_gap and gap >= trigger_gap:
+                triggered = True
+                trigger_reason = "gap_threshold"
+
+            # 조건 3: gap 가속 (이미 높더라도 더 확대되면 모멘텀 추격)
+            if not triggered and gap >= trigger_gap:
+                gap_delta = gap - self._last_gap
+                if gap_delta >= gap_accel:
+                    triggered = True
+                    trigger_reason = f"gap_accel(+{gap_delta:.3f}%)"
+
+            if triggered:
+                self.state = self.HUNT
                 if self.btc._ema_s > self.btc._ema_l:
                     self.hunt_direction = "long"
                 else:
                     self.hunt_direction = "short"
                 self.hunt_start_time = now
-                self.state = self.HUNT  # 즉시 hunt 진입
+                self._trigger_reason = trigger_reason
+                print(f"  [BTC] HUNT 트리거: {trigger_reason} | gap:{gap:.3f}% "
+                      f"prev:{self._last_gap:.3f}% dir:{self.hunt_direction}")
 
             self.last_squeeze_state = is_squeeze
+            self._last_gap = gap
 
         elif self.state == self.HUNT:
             elapsed_h = (now - self.hunt_start_time) / 3600
-            hunt_hours = self.cfg.get("HUNT_WINDOW_HOURS", 3)
+            hunt_hours = self.cfg.get("HUNT_WINDOW_HOURS", 4)
+
+            # HUNT 중에도 gap 방향 전환 시 방향 업데이트
+            if self.btc._ema_s > self.btc._ema_l:
+                self.hunt_direction = "long"
+            else:
+                self.hunt_direction = "short"
 
             if elapsed_h >= hunt_hours:
-                # hunt 윈도우 종료
                 self.state = self.COOLDOWN
                 cooldown_h = self.cfg.get("HUNT_COOLDOWN_HOURS", 1)
                 self._cooldown_until = now + cooldown_h * 3600
                 self.hunt_direction = None
-
-            # BTC가 다시 squeeze 상태로 돌아오면 즉시 종료
-            if is_squeeze:
-                self.state = self.STANDBY
-                self.hunt_direction = None
-                self.last_squeeze_state = True
+            self._last_gap = gap
 
         elif self.state == self.COOLDOWN:
             if now >= self._cooldown_until:
                 self.state = self.STANDBY
                 self.last_squeeze_state = is_squeeze
-
-            # squeeze로 돌아오면 즉시 standby
-            if is_squeeze:
-                self.state = self.STANDBY
-                self.last_squeeze_state = True
+                self._last_gap = gap
 
         elif self.state == self.TRIGGER:
-            # 즉시 HUNT로 전환 (1프레임)
             self.state = self.HUNT
 
         return self.state
@@ -208,6 +262,8 @@ class BTCBreakoutTracker:
 
     def status_str(self):
         btc_s = self.btc.status_str()
+        gap = self.btc.gap_pct
+        tg = self.cfg.get("BTC_TRIGGER_GAP", 0.5)
         hunt_s = ""
         if self.state == self.HUNT:
             d = self.hunt_direction or "?"
@@ -217,6 +273,9 @@ class BTCBreakoutTracker:
         elif self.state == self.COOLDOWN:
             remain = max(0, self._cooldown_until - time.time()) / 60
             hunt_s = f" | COOLDOWN ({remain:.0f}min)"
+        elif self.state == self.STANDBY:
+            sq = "SQZ" if self.btc.is_squeeze else "NO_SQZ"
+            hunt_s = f" | gap:{gap:.3f}% trig:{tg}% {sq}"
         return f"[{self.state}]{hunt_s} | {btc_s}"
 
 
@@ -280,27 +339,49 @@ class HuntTrader:
         self._scan_fails = {}
         self._init_balance = self.executor.total_balance()
 
+        # [Phase A~F] 에이전트 시스템 (Shadow Mode)
+        self.agent_hook = None
+        if AgentHook is not None:
+            try:
+                self.agent_hook = AgentHook(
+                    cg_client=None,
+                    btc_filter=self.btc_trend,
+                    tg=self.tg,
+                    exchange=self.exchange,
+                    shadow_mode=True,
+                    analysis_interval_h=4,
+                )
+                print(f"  {self.bot_tag} ✅ 에이전트 시스템 초기화 (Shadow Mode)")
+            except Exception as e:
+                print(f"  {self.bot_tag} ⚠️ 에이전트 초기화 실패 (봇 정상 운영): {e}")
+                self.agent_hook = None
+
+        # 돌파 전문가 정기 스캔 간격 (초) — 텔레그램 /돌파간격 명령으로 조정 가능
+        self.breakout_interval_sec = 14400  # 기본 4시간
+
+        # 스퀴즈/캐스케이드 1분 모니터링 — /스퀴즈감시 <코인>로 등록
+        self.squeeze_watch: dict = {}
+        self.squeeze_threshold_pct = 100  # 알람 발동 소진도 (%)
+
         # 시작 알람
         self._send_startup_msg()
 
     def _build_watchlist(self):
-        """바이낸스 선물 전체 코인에서 Bot1 제외 + 거래량 필터"""
+        """바이낸스 선물 전체 USDT 코인 수집 (별도 계정 — Bot1 제외 없음)"""
         try:
             markets = self.exchange.load_markets()
             watchlist = []
             for sym, info in markets.items():
                 if not info.get('active'): continue
                 if info.get('type') != 'swap': continue
-                # 심볼 정규화 먼저 (BTC/USDT:USDT → BTC/USDT)
                 clean_sym = sym.split(':')[0] if ':' in sym else sym
                 if not clean_sym.endswith('/USDT'): continue
-                if clean_sym in BOT1_WATCHLIST: continue
                 if clean_sym in ('BTC/USDT',): continue
                 if clean_sym not in watchlist:
                     watchlist.append(clean_sym)
 
             self.cfg["WATCHLIST"] = sorted(watchlist)
-            print(f"  {self.bot_tag} 워치리스트: {len(watchlist)}개 (Bot1 {len(BOT1_WATCHLIST)}개 제외)")
+            print(f"  {self.bot_tag} 워치리스트: {len(watchlist)}개")
         except Exception as e:
             print(f"  워치리스트 자동 구성 실패: {e}")
             self.cfg["WATCHLIST"] = [
@@ -311,42 +392,104 @@ class HuntTrader:
                 "RENDER/USDT", "SHIB/USDT", "TON/USDT", "XLM/USDT",
             ]
 
-    def _get_bot1_margin(self):
-        """Bot1의 현재 마진 사용량 읽기"""
-        path = self.cfg.get("BOT1_POSITIONS_FILE", "")
-        if not os.path.exists(path):
-            return 0
-        try:
-            with open(path) as f:
-                data = json.load(f)
-            margin = sum(
-                abs(float(p.get('quantity', 0)) * float(p.get('entry_price', 0)))
-                / self.cfg["LEVERAGE"]
-                for p in data
-            )
-            return margin
-        except:
-            return 0
-
     def _send_startup_msg(self):
         bal = self._init_balance
-        bot1_margin = self._get_bot1_margin()
         trade_mode = "페이퍼" if self.cfg["PAPER_TRADE"] else "실전"
         n_coins = len(self.cfg["WATCHLIST"])
         hunt_h = self.cfg.get("HUNT_WINDOW_HOURS", 3)
 
+        mom_s = "ON" if self.cfg.get("MOMENTUM_ENABLED") else "OFF"
         msg = (f"{self.bot_tag} 시작 [모드{self.mode} {self.mode_cfg['desc']}]\n"
                f"━━━━━━━━━━━━━━━━━━━━\n"
                f"전략: BTC 돌파 → 알트 연쇄 추격\n"
                f"매매: {trade_mode} | 잔고: ${bal:,.0f}\n"
-               f"코인: {n_coins}개 (Bot1 제외) | Hunt: {hunt_h}h\n"
+               f"코인: {n_coins}개 | Hunt: {hunt_h}h\n"
                f"R:{self.cfg['RISK_PCT']}% P:{self.cfg['MAX_POSITIONS']}\n"
-               f"conf≥{self.cfg['MIN_CONFIDENCE']} ADX≥{self.cfg['MIN_ADX']} "
-               f"vol_surge≥{self.cfg['MIN_VOL_SURGE']}\n"
-               f"Bot1 마진: ${bot1_margin:,.0f}\n"
+               f"수렴: conf≥{self.cfg['MIN_CONFIDENCE']} ADX≥{self.cfg['MIN_ADX']} "
+               f"vol≥{self.cfg['MIN_VOL_SURGE']}\n"
+               f"모멘텀: {mom_s} ATR×{self.cfg.get('MOM_ATR_MULT',2.0)} "
+               f"vol×{self.cfg.get('MOM_VOL_SURGE',2.5)}\n"
                f"BTC: {self.hunt_tracker.status_str()}")
         self.tg.send(msg)
         print(msg)
+
+    # ── 모멘텀 시그널 (스퀴즈 없이 BTC 방향 추종) ──
+
+    def _detect_momentum(self, df, sym) -> dict | None:
+        """BTC 돌파 방향으로 강한 모멘텀을 보이는 알트 감지.
+        스퀴즈 조건 없이 가격+거래량 급등만으로 시그널 생성."""
+        if len(df) < 60:
+            return None
+
+        df = self.strategy._ensure_indicators(df)
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        atr = curr.get('atr', 0)
+        if atr <= 0:
+            return None
+
+        price = curr['Close']
+        move = abs(curr['Close'] - prev['Close'])
+        breakout_atr = move / atr
+
+        if breakout_atr < self.cfg.get("MOM_ATR_MULT", 2.0):
+            return None
+
+        vol_surge = self._calc_vol_surge(df)
+        if vol_surge < self.cfg.get("MOM_VOL_SURGE", 2.5):
+            return None
+
+        adx = curr.get('adx', 0)
+        if adx < self.cfg["MIN_ADX"]:
+            return None
+
+        rsi_col = 'rsi_14' if 'rsi_14' in curr.index else 'rsi'
+        rsi = curr.get(rsi_col, 50)
+
+        is_bullish = curr['Close'] > curr['Open']
+        is_bearish = curr['Close'] < curr['Open']
+
+        direction = None
+        if is_bullish and rsi > self.cfg.get("MOM_RSI_LONG", 55):
+            direction = "long"
+        elif is_bearish and rsi < self.cfg.get("MOM_RSI_SHORT", 45):
+            direction = "short"
+
+        if not direction:
+            return None
+
+        # SL/TP 계산 (ATR 기반)
+        atr_val = float(atr)
+        sl_dist = atr_val * 1.5
+        tp_dist = atr_val * 3.0
+        if direction == "long":
+            sl_price = price - sl_dist
+            tp_price = price + tp_dist
+        else:
+            sl_price = price + sl_dist
+            tp_price = price - tp_dist
+
+        rvol = curr.get('rvol', vol_surge)
+        conf = min(90, int(40 + breakout_atr * 10 + vol_surge * 5))
+
+        return {
+            'symbol': sym,
+            'direction': direction,
+            'entry_price': price,
+            'stop_loss': sl_price,
+            'take_profit': tp_price,
+            'confidence': conf,
+            'atr': atr_val,
+            'reasons': [f'momentum_atr×{breakout_atr:.1f}', f'vol_surge×{vol_surge:.1f}'],
+            'squeeze_candles': 0,
+            'vol_surge': vol_surge,
+            'adx_value': adx, 'adx': adx,
+            'gap': 0, 'volume_ratio': rvol, 'rsi': rsi,
+            'details': {'adx': adx, 'gap_pct': 0, 'rsi': rsi,
+                        'breakout': {'volume_ratio': rvol}},
+            '_signal_type': 'momentum',
+        }
 
     # ── 스캔 (hunt 모드에서만 활성) ──
 
@@ -358,9 +501,8 @@ class HuntTrader:
         return round(cur / avg, 2) if avg > 0 else 0.0
 
     def scan(self):
-        """hunt 모드에서만 알트 스캔"""
+        """hunt 모드에서만 알트 스캔 — 수렴 돌파 + 모멘텀 듀얼 시그널"""
         signals = []
-        scan_summary = []
 
         for sym in self.cfg["WATCHLIST"]:
             try:
@@ -379,33 +521,35 @@ class HuntTrader:
                         df = df.iloc[:-1]
                 if len(df) < 100: continue
 
+                # 시도 1: 수렴 돌파 시그널 (기존 전략)
                 result = self.strategy.detect(df)
-                if not result:
-                    continue
+                if result:
+                    conf = result.get('confidence', 0)
+                    if conf >= self.cfg["MIN_CONFIDENCE"]:
+                        result['symbol'] = sym
+                        adx = result.get('details',{}).get('adx',0)
+                        vr = result.get('details',{}).get('breakout',{}).get('volume_ratio',0)
+                        rsi = result.get('details',{}).get('rsi',50)
 
-                conf = result.get('confidence', 0)
-                if conf < self.cfg["MIN_CONFIDENCE"]:
-                    continue
+                        if adx >= self.cfg["MIN_ADX"] and vr >= self.cfg["MIN_VOLUME_RATIO"]:
+                            vol_surge = self._calc_vol_surge(df)
+                            if vol_surge >= self.cfg.get("MIN_VOL_SURGE", 1.5):
+                                result['vol_surge'] = vol_surge
+                                gap_pct_val = result.get('details', {}).get('gap_pct', 0)
+                                result.update({'adx_value': adx, 'adx': adx,
+                                               'gap': gap_pct_val, 'volume_ratio': vr, 'rsi': rsi})
+                                result['_signal_type'] = 'convergence'
+                                signals.append(result)
+                                time.sleep(0.08)
+                                self._scan_fails[sym] = 0
+                                continue  # 수렴 시그널 발견 → 모멘텀 스킵
 
-                result['symbol'] = sym
-                adx = result.get('details',{}).get('adx',0)
-                vr = result.get('details',{}).get('breakout',{}).get('volume_ratio',0)
-                rsi = result.get('details',{}).get('rsi',50)
+                # 시도 2: 모멘텀 시그널 (스퀴즈 없어도 강한 움직임)
+                if self.cfg.get("MOMENTUM_ENABLED", True):
+                    mom = self._detect_momentum(df, sym)
+                    if mom:
+                        signals.append(mom)
 
-                if adx < self.cfg["MIN_ADX"] or vr < self.cfg["MIN_VOLUME_RATIO"]:
-                    short_sym = sym.replace('/USDT', '')
-                    d = result.get('direction', '?')
-                    print(f"  ⚠️ {short_sym} {d} 필터: ADX:{adx:.1f} vol:{vr:.2f}")
-                    continue
-
-                # vol_surge 체크
-                vol_surge = self._calc_vol_surge(df)
-                if vol_surge < self.cfg.get("MIN_VOL_SURGE", 2.0):
-                    continue
-
-                result['vol_surge'] = vol_surge
-                result.update({'adx_value': adx, 'volume_ratio': vr, 'rsi': rsi})
-                signals.append(result)
                 time.sleep(0.08)
                 self._scan_fails[sym] = 0
 
@@ -434,14 +578,31 @@ class HuntTrader:
             print(f"  {self.bot_tag} {sym} {d} → BTC방향({hunt_dir})과 다름 → SKIP")
             return
 
-        # BTC 7Level 기본 방향 필터 유지
+        # BTC 7Level 방향 필터 (CRASH 시 롱차단, STRONG_BULL 시 숏차단)
         if self.btc_trend:
             if d == 'long' and self.btc_trend.long_blocked:
+                print(f"  {self.bot_tag} {sym} {d} → BTC CRASH 롱차단 → SKIP")
                 return
             if d == 'short' and self.btc_trend.short_blocked:
+                print(f"  {self.bot_tag} {sym} {d} → BTC STRONG_BULL 숏차단 → SKIP")
                 return
 
-        # 마진 체크 (Bot1 마진 고려)
+        # [Phase F] 진입 전 리스크 평가
+        if self.agent_hook is not None:
+            try:
+                risk_result = self.agent_hook.risk_check(
+                    signal=signal,
+                    positions=[p.__dict__ for p in self.positions] if self.positions else [],
+                    account_balance=self.executor.total_balance(),
+                )
+                if risk_result and not risk_result.get("approved", True):
+                    print(f"  {self.bot_tag} 🛑 리스크 차단: {sym} {d} — "
+                          f"레벨: {risk_result.get('risk_level', '?')}")
+                    return
+            except Exception as e:
+                print(f"  {self.bot_tag} [Phase F] risk_check 오류 (진입 계속): {e}")
+
+        # 마진 체크 (Bot2 독립 계정)
         entry = signal['entry_price']
         if entry <= 0: return  # [V9.2] 비정상 시그널 방어
         sl_dist = abs(entry - signal['stop_loss']) * self.cfg["SL_RATIO"]
@@ -452,15 +613,12 @@ class HuntTrader:
         bal = self.executor.total_balance()
         if bal <= 0: return  # API 실패 시 진입 차단
 
-        bot1_margin = self._get_bot1_margin()
         current_margin = sum(p.quantity * p.entry_price / self.cfg["LEVERAGE"]
                              for p in self.positions)
-        # 전체 마진 = Bot1 + Bot2
-        total_used = bot1_margin + current_margin
         remaining = bal * self.cfg["MARGIN_EXPOSURE_LIMIT"] - current_margin
-        # 추가 안전장치: 전체 마진이 80% 넘으면 진입 차단
-        if (total_used + remaining * 0.5) / bal > 0.80:
-            remaining = min(remaining, bal * 0.10)
+        if remaining <= 0:
+            print(f"  {self.bot_tag} 마진 부족: 잔고${bal:.0f} 사용${current_margin:.0f}")
+            return
 
         sizing_base = max(bal, self._init_balance * 0.3)
         risk_pct = self.cfg["RISK_PCT"]
@@ -520,6 +678,13 @@ class HuntTrader:
         self.positions.append(pos)
         self._save_positions()
         self.daily_trades += 1
+
+        # [Phase D] 에이전트 — 진입 스냅샷만 저장 (자동 알림 제거, /b2판결로 대체)
+        if self.agent_hook:
+            try:
+                self.agent_hook.save_entry_snapshot(pos)
+            except Exception:
+                pass
 
         # 진입 알람
         kr_dir = "롱 📈" if d == 'long' else "숏 📉"
@@ -661,9 +826,16 @@ class HuntTrader:
         closed_list.append(pos)
         self._alerted_orders.discard(f"{pos.symbol}_{pos.direction}")
 
+        # [Phase D] 에이전트 — 청산 결과 기록 + 반성
+        if self.agent_hook:
+            try:
+                self.agent_hook.on_position_close(pos, reason, roe)
+            except Exception:
+                pass
+
     def _save_history(self, record):
         p = os.path.join(self.cfg["LOG_DIR"], "trade_history_v9_bot2.jsonl")
-        with open(p, 'a') as f:
+        with open(p, 'a', encoding='utf-8') as f:
             f.write(json.dumps(record, ensure_ascii=False) + '\n')
 
     @staticmethod
@@ -756,14 +928,14 @@ class HuntTrader:
         if os.path.exists(path):
             try: os.replace(path, path + '.bak')
             except: pass
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2, default=str)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, default=str, ensure_ascii=False)
 
     def _load_positions(self):
         for try_path in [self.cfg["POSITIONS_FILE"], self.cfg["POSITIONS_FILE"] + '.bak']:
             if not os.path.exists(try_path): continue
             try:
-                with open(try_path) as f: data = json.load(f)
+                with open(try_path, encoding='utf-8') as f: data = json.load(f)
                 for d in data:
                     for df in ['roe_history']:
                         raw = d.get(df, {})
@@ -789,6 +961,8 @@ class HuntTrader:
 
         last_scan = 0; last_status = 0; last_bar_min = -1
         last_verify = 0; last_sync = 0
+        last_breakout = 0  # 돌파 전문가 4시간 스캔
+        last_squeeze_watch = 0  # 스퀴즈/캐스케이드 1분 모니터링
 
         while True:
             try:
@@ -798,6 +972,23 @@ class HuntTrader:
                 # ── BTC 상태 업데이트 ──
                 prev_state = self.hunt_tracker.state
                 new_state = self.hunt_tracker.update()
+
+                # [Phase D] 급락/추세 감지 (매 루프) — periodic_check 제거 (/b2판결로 대체)
+                if self.agent_hook:
+                    try:
+                        self.agent_hook.crash_check(self.positions)
+                    except Exception:
+                        pass
+                    try:
+                        self.agent_hook.trend_check(self.positions)
+                    except Exception:
+                        pass
+
+                # [Phase F] 텔레그램 명령어 수신 (매 루프)
+                try:
+                    self._process_telegram_commands()
+                except Exception:
+                    pass
 
                 # 상태 전환 알림
                 if new_state != prev_state:
@@ -836,6 +1027,34 @@ class HuntTrader:
                     self._status_report()
                     last_status = now
 
+                # ── 돌파 전문가 스캔 (정기, 기본 4시간) ──
+                if BreakoutScannerAgent and now - last_breakout >= self.breakout_interval_sec:
+                    def _breakout_scan():
+                        try:
+                            agent = BreakoutScannerAgent(
+                                watchlist=self.cfg.get("WATCHLIST", []),
+                                exchange=self.exchange,
+                                btc_trend=self.btc_trend
+                            )
+                            data = agent.collect_data()
+                            candidates = data.get("candidates", [])
+                            if candidates:
+                                result = agent.analyze(data)
+                                msg = agent.format_telegram(result)
+                                for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
+                                    self.tg.send(chunk)
+                            else:
+                                print(f"  {self.bot_tag} 돌파 전문가: 후보 없음")
+                        except Exception as e:
+                            print(f"  {self.bot_tag} 돌파 스캔 오류: {e}")
+                    threading.Thread(target=_breakout_scan, daemon=True).start()
+                    last_breakout = now
+
+                # ── 스퀴즈/캐스케이드 모니터링 (1분) ──
+                if self.squeeze_watch and now - last_squeeze_watch >= 60:
+                    threading.Thread(target=self._squeeze_watch_tick, daemon=True).start()
+                    last_squeeze_watch = now
+
                 # ── SL/TP 검증 (30분) ──
                 if now - last_verify >= 1800 and self.positions:
                     self.verify_all_orders()
@@ -866,14 +1085,381 @@ class HuntTrader:
                 self.tg.send_error(f"{self.bot_tag} 오류: {e}")
                 time.sleep(60)
 
+    # ── [Phase F] 텔레그램 명령어 처리 ──
+
+    def _process_telegram_commands(self):
+        try:
+            updates = self.tg.get_updates()
+        except Exception:
+            return
+        for update in updates:
+            msg = update.get("message", {})
+            text = msg.get("text", "").strip()
+            if not text:
+                continue
+            try:
+                self._handle_command(text)
+            except Exception as e:
+                print(f"  {self.bot_tag} [TG 명령] 처리 오류: {e}")
+
+    def _squeeze_watch_tick(self):
+        """1분마다 등록된 코인의 스퀴즈/캐스케이드 소진도 점검 → 임계 도달 시 알람"""
+        try:
+            from agents.analyzers.squeeze_detector import SqueezeCascadeDetector
+            _oc = getattr(self, 'onchain', None)
+            cg = getattr(_oc, '_cg', None)
+            detector = SqueezeCascadeDetector(exchange=self.exchange, cg_client=cg)
+        except Exception:
+            return
+
+        for coin in list(self.squeeze_watch.keys()):
+            try:
+                result = detector.detect(coin)
+                state = self.squeeze_watch.get(coin, {})
+
+                if result.event_type.value == "none":
+                    if state.get("had_event"):
+                        self.tg.send(f"{self.bot_tag} 🌀 {coin} 스퀴즈/캐스케이드 이벤트 소멸 → 감시 해제")
+                        self.squeeze_watch.pop(coin, None)
+                    continue
+
+                state["had_event"] = True
+                exh = result.exhaustion_pct
+
+                if exh >= self.squeeze_threshold_pct and not state.get("alerted"):
+                    msg = f"{self.bot_tag} 🚨 소진 100% 달성! 🚨\n" + detector.format_telegram(result)
+                    for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
+                        self.tg.send(chunk)
+                    state["alerted"] = True
+                elif exh < self.squeeze_threshold_pct - 15:
+                    state["alerted"] = False
+
+                self.squeeze_watch[coin] = state
+            except Exception as e:
+                print(f"  {self.bot_tag} 스퀴즈 감시 오류({coin}): {e}")
+
+    def _handle_command(self, text: str):
+        import re
+        text_lower = text.lower().strip()
+
+        if text_lower in ("/help", "/명령어", "/도움", "help", "도움", "명령어"):
+            self.tg.send(
+                f"{self.bot_tag} 📋 사용 가능한 명령어\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "/b2판결 — 전체 보유 포지션 판결\n"
+                "/b2분석 — 전체 시장+포지션 분석\n"
+                "/b2포지션 <코인> — 개별 포지션 분석\n"
+                "/b2진입 <코인> — 진입 시그널 판단\n"
+                "/b2시장 — 즉시 시장 분석\n"
+                "/b2상태 — 봇 상태 요약\n"
+                "/b2메모리 — Brain 메모리 통계\n"
+                "/<코인>분석 — 알트코인 구조 분석\n"
+                "  예: /sol분석, /eth분석\n"
+                "/돌파 — 돌파 전문가 스캔 (LVN 횡보 강세 알트)\n"
+                "/돌파간격 <시간> — 정기 스캔 주기 변경\n"
+                "  예: /돌파간격 2 (2시간마다), /돌파간격 0.5 (30분마다)\n"
+                "/스퀴즈 <코인> — 숏스퀴즈/롱캐스케이드 종료 감지\n"
+                "  예: /스퀴즈 BTC, /스퀴즈 ETH\n"
+                "/스퀴즈감시 <코인> — 1분마다 감시, 소진 100%시 알람\n"
+                "  예: /스퀴즈감시 BTC (해제: /스퀴즈감시해제 BTC)\n"
+                "/b2help — 이 도움말"
+            )
+            return
+
+        # /돌파간격 <시간> — 정기 스캔 주기 변경
+        interval_match = re.match(r'^/돌파간격\s+([0-9]*\.?[0-9]+)$', text.strip())
+        if interval_match or text_lower.strip() == "/돌파간격":
+            if not interval_match:
+                cur_h = self.breakout_interval_sec / 3600
+                self.tg.send(
+                    f"{self.bot_tag} ⏱️ 현재 돌파 스캔 주기: {cur_h:g}시간\n"
+                    "변경: /돌파간격 <시간>\n"
+                    "예: /돌파간격 2 → 2시간마다\n"
+                    "    /돌파간격 0.5 → 30분마다\n"
+                    "(최소 0.25시간=15분)"
+                )
+                return
+            hours = float(interval_match.group(1))
+            if hours < 0.25:
+                self.tg.send(f"{self.bot_tag} ❌ 최소 주기는 0.25시간(15분)입니다.")
+                return
+            if hours > 48:
+                self.tg.send(f"{self.bot_tag} ❌ 최대 주기는 48시간입니다.")
+                return
+            self.breakout_interval_sec = int(hours * 3600)
+            self.tg.send(f"{self.bot_tag} ✅ 돌파 스캔 주기 변경: {hours:g}시간마다")
+            return
+
+        # /돌파 — 돌파 전문가 수동 트리거
+        if text_lower in ("/돌파", "/돌파스캔", "/breakout"):
+            if BreakoutScannerAgent is None:
+                self.tg.send(f"{self.bot_tag} ❌ 돌파 전문가 모듈 미설치")
+                return
+            self.tg.send(f"{self.bot_tag} 🔍 돌파 전문가 스캔 중...")
+
+            def _run():
+                try:
+                    agent = BreakoutScannerAgent(
+                        watchlist=self.cfg.get("WATCHLIST", []),
+                        exchange=self.exchange,
+                        btc_trend=self.btc_trend
+                    )
+                    data = agent.collect_data()
+                    result = agent.analyze(data)
+                    msg = agent.format_telegram(result)
+                    for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
+                        self.tg.send(chunk)
+                except Exception as e:
+                    self.tg.send(f"{self.bot_tag} ❌ 돌파 스캔 실패: {e}")
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        # /스퀴즈 <코인> — 숏스퀴즈/롱캐스케이드 종료 감지
+        squeeze_match = re.match(r'^/스퀴즈\s+([a-zA-Z0-9]+)$', text.strip())
+        if squeeze_match or text_lower.strip() == "/스퀴즈":
+            coin = squeeze_match.group(1).upper() if squeeze_match else "BTC"
+            self.tg.send(f"{self.bot_tag} 🔍 {coin} 스퀴즈/캐스케이드 감지 중...")
+
+            def _run():
+                try:
+                    from agents.analyzers.squeeze_detector import SqueezeCascadeDetector
+                    _oc = getattr(self, 'onchain', None)
+                    cg = getattr(_oc, '_cg', None)
+                    detector = SqueezeCascadeDetector(exchange=self.exchange, cg_client=cg)
+                    result = detector.detect(coin)
+                    msg = detector.format_telegram(result)
+                    for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
+                        self.tg.send(chunk)
+                except Exception as e:
+                    self.tg.send(f"{self.bot_tag} ❌ {coin} 스퀴즈 감지 실패: {e}")
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        # /스퀴즈감시해제 <코인> — 모니터링 해제
+        unwatch_match = re.match(r'^/스퀴즈감시해제\s+([a-zA-Z0-9]+)$', text.strip())
+        if unwatch_match or text_lower.strip() == "/스퀴즈감시해제":
+            if unwatch_match:
+                coin = unwatch_match.group(1).upper()
+                if self.squeeze_watch.pop(coin, None) is not None:
+                    self.tg.send(f"{self.bot_tag} 🛑 {coin} 스퀴즈 감시 해제됨")
+                else:
+                    self.tg.send(f"{self.bot_tag} ℹ️ {coin}은(는) 감시 중이 아닙니다")
+            else:
+                self.squeeze_watch.clear()
+                self.tg.send(f"{self.bot_tag} 🛑 모든 스퀴즈 감시 해제됨")
+            return
+
+        # /스퀴즈감시 <코인> — 1분 모니터링 등록 (목록 조회 겸용)
+        watch_match = re.match(r'^/스퀴즈감시\s+([a-zA-Z0-9]+)$', text.strip())
+        if watch_match or text_lower.strip() == "/스퀴즈감시":
+            if not watch_match:
+                if self.squeeze_watch:
+                    coins = ", ".join(self.squeeze_watch.keys())
+                    self.tg.send(f"{self.bot_tag} 👁️ 감시 중: {coins}\n"
+                                 f"임계 소진도: {self.squeeze_threshold_pct}%\n"
+                                 "등록: /스퀴즈감시 <코인>\n"
+                                 "해제: /스퀴즈감시해제 <코인>")
+                else:
+                    self.tg.send(f"{self.bot_tag} 👁️ 감시 중인 코인 없음\n"
+                                 "등록: /스퀴즈감시 BTC")
+                return
+            coin = watch_match.group(1).upper()
+            self.squeeze_watch[coin] = {"alerted": False, "had_event": False}
+            self.tg.send(f"{self.bot_tag} 👁️ {coin} 스퀴즈/캐스케이드 감시 시작\n"
+                         f"1분마다 점검 → 소진도 {self.squeeze_threshold_pct}% 달성 시 알람\n"
+                         "해제: /스퀴즈감시해제 " + coin)
+            return
+
+        # /<코인>분석 — 알트코인 구조 분석
+        alt_match = re.match(r'^/([a-zA-Z]+)분석$', text_lower.strip())
+        if alt_match:
+            coin = alt_match.group(1).upper()
+            if coin in ("BTC", "BITCOIN"):
+                self.tg.send(f"{self.bot_tag} ℹ️ BTC 분석은 /분석 또는 /시장 명령어를 사용하세요.")
+                return
+            symbol = f"{coin}/USDT"
+            self.tg.send(f"{self.bot_tag} 🔍 {coin} 구조 분석 중...")
+
+            def _run():
+                try:
+                    from agents.analyzers.alt_structure import AltStructureAgent
+                    _oc = getattr(self, 'onchain', None)
+                    agent = AltStructureAgent(symbol=symbol, exchange=self.exchange,
+                                              cg_client=getattr(_oc, '_cg', None))
+                    data = agent.collect_data()
+                    result = agent.analyze(data)
+                    try:
+                        chart_png = agent.generate_chart(data, result)
+                        self.tg.send_photo(chart_png, caption=f"{self.bot_tag} 📊 {coin} 구조 분석")
+                        msg = agent.format_telegram(result, collected_data=data)
+                        for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
+                            self.tg.send(chunk)
+                    except Exception as chart_err:
+                        print(f"  차트 생성 실패, 텍스트 전송: {chart_err}")
+                        msg = agent.format_telegram(result, collected_data=data)
+                        for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
+                            self.tg.send(chunk)
+                except Exception as e:
+                    self.tg.send(f"{self.bot_tag} ❌ {coin} 분석 실패: {e}")
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        # /판결 — 전체 보유 포지션 판결
+        if text_lower in ("/판결", "/judge"):
+            if not self.agent_hook:
+                self.tg.send(f"{self.bot_tag} ❌ 에이전트 시스템 비활성화")
+                return
+            if not self.positions:
+                self.tg.send(f"{self.bot_tag} 📋 보유 포지션 없음")
+                return
+            n = len(self.positions)
+            syms = ", ".join(p.symbol.replace('/USDT', '') for p in self.positions)
+            self.tg.send(f"{self.bot_tag} ⚖️ 전체 포지션 판결 중... ({n}건: {syms})")
+
+            def _run():
+                try:
+                    pos_infos = self.agent_hook._convert_positions(self.positions)
+                    orch = self.agent_hook._get_orchestrator()
+                    consensus = orch.run(positions=pos_infos)
+                    self.agent_hook._memory.store(consensus)
+                    messages = self.agent_hook._formatter.format_consensus(consensus)
+                    header = f"{self.bot_tag} ⚖️ 포지션 판결 ({n}건)\n{'━' * 25}\n"
+                    full = header + "\n".join(messages)
+                    for chunk in [full[i:i+4000] for i in range(0, len(full), 4000)]:
+                        self.tg.send(chunk)
+                except Exception as e:
+                    self.tg.send(f"{self.bot_tag} ❌ 판결 실패: {e}")
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        # /분석 — 전체 시장+포지션 분석
+        if text_lower in ("/분석", "/analyze"):
+            if not self.agent_hook:
+                self.tg.send(f"{self.bot_tag} ❌ 에이전트 시스템 비활성화")
+                return
+            n = len(self.positions)
+            self.tg.send(f"{self.bot_tag} 🔍 전체 시장 분석 중... (포지션 {n}건)")
+
+            def _run():
+                try:
+                    pos_infos = self.agent_hook._convert_positions(self.positions) if self.positions else []
+                    orch = self.agent_hook._get_orchestrator()
+                    consensus = orch.run(positions=pos_infos)
+                    self.agent_hook._memory.store(consensus)
+                    self.agent_hook._send_result(consensus, trigger="분석요청")
+                except Exception as e:
+                    self.tg.send(f"{self.bot_tag} ❌ 분석 실패: {e}")
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        if text_lower.startswith(("/포지션", "/position")):
+            symbol = self._parse_symbol(text)
+            if not symbol:
+                self.tg.send("❌ 사용법: /포지션 <코인>\n예: /포지션 ETH")
+                return
+            if not self.agent_hook:
+                self.tg.send("❌ 에이전트 시스템 비활성화")
+                return
+            self.tg.send(f"{self.bot_tag} 🔍 {symbol} 포지션 분석 중...")
+
+            def _run():
+                result = self.agent_hook.analyze_position(symbol, self.positions)
+                self.tg.send(result[:4000])
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        if text_lower.startswith(("/진입", "/entry")):
+            symbol = self._parse_symbol(text)
+            if not symbol:
+                self.tg.send("❌ 사용법: /진입 <코인>\n예: /진입 SOL")
+                return
+            if not self.agent_hook:
+                self.tg.send("❌ 에이전트 시스템 비활성화")
+                return
+            self.tg.send(f"{self.bot_tag} 🔍 {symbol} 진입 분석 중...")
+
+            def _run():
+                result = self.agent_hook.analyze_entry(symbol, exchange=self.exchange)
+                self.tg.send(result[:4000])
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        if text_lower in ("/시장", "/market"):
+            if not self.agent_hook:
+                self.tg.send("❌ 에이전트 시스템 비활성화")
+                return
+            self.tg.send(f"{self.bot_tag} 🔍 시장 분석 중...")
+
+            def _run():
+                result = self.agent_hook.analyze_market_now(self.positions)
+                for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
+                    self.tg.send(chunk)
+
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        if text_lower in ("/상태", "/status"):
+            self._status_report()
+            return
+
+        if text_lower in ("/메모리", "/memory"):
+            if not self.agent_hook:
+                self.tg.send("❌ 에이전트 시스템 비활성화")
+                return
+            stats = self.agent_hook.get_memory_stats()
+            if not stats:
+                self.tg.send("❌ 메모리 시스템 비활성화")
+                return
+            brain = stats.get("brain", {})
+            reflection = stats.get("reflection", {})
+            rules = brain.get("rules", {})
+            lines = [
+                f"{self.bot_tag} 🧠 메모리 통계",
+                f"{'━' * 20}",
+                f"규칙: {rules.get('total_rules', 0)}개 (활성 {rules.get('active_rules', 0)}개)",
+                f"평균 적중률: {rules.get('avg_hit_rate', 0):.0%}",
+                f"코인 추적: {brain.get('coins_tracked', 0)}개",
+                f"패턴 추적: {brain.get('patterns_tracked', 0)}개",
+                f"반성 횟수: {reflection.get('reflection_count', 0)}회",
+            ]
+            top_coins = brain.get("top_coins", [])
+            if top_coins:
+                lines.append(f"\n📊 상위 코인:")
+                for c in top_coins[:5]:
+                    lines.append(f"  {c['symbol']}: 승률 {c['winrate']:.0%} ({c['trades']}건)")
+            self.tg.send("\n".join(lines))
+            return
+
+    def _parse_symbol(self, text: str) -> str:
+        parts = text.strip().split()
+        if len(parts) < 2:
+            return ""
+        coin = parts[1].upper().replace("/USDT", "").replace("USDT", "")
+        if not coin:
+            return ""
+        symbol = f"{coin}/USDT"
+        if symbol not in self.cfg.get("WATCHLIST", []):
+            similar = [s for s in self.cfg.get("WATCHLIST", []) if coin in s]
+            if similar:
+                symbol = similar[0]
+            else:
+                self.tg.send(f"⚠️ {coin} — 워치리스트에 없음. {symbol}로 시도합니다.")
+        return symbol
+
     def _status_report(self):
         bal = self.executor.total_balance()
-        bot1_margin = self._get_bot1_margin()
         hunt_s = self.hunt_tracker.status_str()
         now = datetime.now(KST).strftime('%m/%d %H:%M')
 
         lines = [f"{self.bot_tag} 📊 상태 [{now}]",
-                 f"잔고: ${bal:,.0f} | Bot1마진: ${bot1_margin:,.0f}",
+                 f"잔고: ${bal:,.0f}",
                  f"BTC: {hunt_s}"]
 
         if self.positions:

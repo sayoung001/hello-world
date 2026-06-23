@@ -1579,14 +1579,14 @@ class ConvergenceTrader:
                 else:
                     d[k] = v
             data.append(d)
-        with open(self.cfg["POSITIONS_FILE"], 'w') as f:
-            json.dump(data, f, indent=2, default=str)
+        with open(self.cfg["POSITIONS_FILE"], 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, default=str, ensure_ascii=False)
 
     def _load_positions(self):
         path = self.cfg["POSITIONS_FILE"]
         if not os.path.exists(path): return
         try:
-            with open(path) as f: data = json.load(f)
+            with open(path, encoding='utf-8') as f: data = json.load(f)
             for d in data:
                 for dict_field in ['roe_history']:
                     raw = d.get(dict_field, {})
@@ -1608,7 +1608,7 @@ class ConvergenceTrader:
 
     def _save_history(self, record):
         p = os.path.join(self.cfg["LOG_DIR"], "trade_history_semi.jsonl")
-        with open(p, 'a') as f:
+        with open(p, 'a', encoding='utf-8') as f:
             f.write(json.dumps(record, ensure_ascii=False) + '\n')
 
     @staticmethod

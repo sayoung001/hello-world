@@ -819,3 +819,6 @@ if __name__ == "__main__":
         print("📐 수렴 돌파 모드")
 
     backtest_convergence(coins=coins, months=months, config=config, hedge=hedge)
+
+# 호환 alias — 외부 코드에서 ConvergenceStrategy로 import하는 경우 대응
+ConvergenceStrategy = ConvergenceBreakout
