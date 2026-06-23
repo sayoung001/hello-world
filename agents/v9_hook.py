@@ -711,8 +711,8 @@ class AgentHook:
             if len(df) < 100:
                 return f"❌ {symbol} 데이터 부족 ({len(df)}봉)"
 
-            from convergence_strategy import ConvergenceStrategy
-            strategy = ConvergenceStrategy()
+            from convergence_strategy import ConvergenceBreakout
+            strategy = ConvergenceBreakout()
             result = strategy.detect(df)
 
             short_sym = symbol.replace('/USDT', '')
