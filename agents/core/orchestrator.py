@@ -16,6 +16,22 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from agents.core.base import AgentBase, DEEP_MODEL
+
+
+def _retry_api_call(func, max_retries=3):
+    """529 Overloaded 에러 시 exponential backoff 재시도"""
+    last_err = None
+    for attempt in range(max_retries + 1):
+        try:
+            return func()
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            if ("529" in err_str or "overloaded" in err_str.lower()) and attempt < max_retries:
+                time.sleep(2 ** (attempt + 1))
+                continue
+            raise
+    raise last_err
 from agents.core.protocol import (
     AgentMessage, MarketConsensus, PositionInfo, PositionVerdict,
     RiskLevel, MarketRegime, ActionType,
@@ -140,21 +156,21 @@ class Orchestrator:
 
             debate_input = f"에이전트 분석:\n{summary}{crash_text}"
 
-            bull_resp = client.messages.create(
+            bull_resp = _retry_api_call(lambda: client.messages.create(
                 model=QUICK_MODEL, max_tokens=500,
                 system=[{"type": "text", "text": BULL_PROMPT,
                          "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": debate_input}]
-            )
+            ))
             _track_usage(QUICK_MODEL, "bull_agent", bull_resp)
             bull_argument = bull_resp.content[0].text.strip()
 
-            bear_resp = client.messages.create(
+            bear_resp = _retry_api_call(lambda: client.messages.create(
                 model=QUICK_MODEL, max_tokens=500,
                 system=[{"type": "text", "text": BEAR_PROMPT,
                          "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": debate_input}]
-            )
+            ))
             _track_usage(QUICK_MODEL, "bear_agent", bear_resp)
             bear_argument = bear_resp.content[0].text.strip()
 
@@ -289,7 +305,7 @@ class Orchestrator:
                     f"20x 레버리지 생존이 최우선입니다."
                 )
 
-            response = client.messages.create(
+            response = _retry_api_call(lambda: client.messages.create(
                 model=DEEP_MODEL,
                 max_tokens=1500,
                 system=[{"type": "text", "text": MODERATOR_PROMPT,
@@ -300,7 +316,7 @@ class Orchestrator:
                     f"위 분석과 토론을 종합하여 최종 컨센서스를 도출하세요.\n"
                     f"현재 추정 regime: {estimated_regime}"
                 )}]
-            )
+            ))
             _track_usage(DEEP_MODEL, "moderator", response)
             raw = response.content[0].text
             if "```json" in raw:
