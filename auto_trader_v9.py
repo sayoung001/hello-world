@@ -2476,8 +2476,9 @@ class ConvergenceTrader:
                 "/시장 — 즉시 시장 분석\n"
                 "/상태 — 봇 상태 요약\n"
                 "/메모리 — Brain 메모리 통계\n"
-                "/<코인>분석 — 알트코인 구조 분석\n"
-                "  예: /sol분석, /eth분석\n"
+                "/<코인>분석 [시간] — 알트코인 구조 분석\n"
+                "  예: /sol분석, /eth분석 1h, /blur분석 1d\n"
+                "  시간: 1m, 5m, 15m, 30m, 1h, 4h(기본), 1d\n"
                 "/돌파 — 돌파 전문가 스캔 (LVN 횡보 강세 알트)\n"
                 "/돌파간격 <시간> — 정기 스캔 주기 변경\n"
                 "  예: /돌파간격 2 (2시간마다), /돌파간격 0.5 (30분마다)\n"
@@ -2594,21 +2595,35 @@ class ConvergenceTrader:
                          "해제: /스퀴즈감시해제 " + coin)
             return
 
-        # /<코인>분석 — 알트코인 구조 분석
-        alt_match = re.match(r'^/([a-zA-Z]+)분석$', text_lower.strip())
+        # /<코인>분석 [시간] — 알트코인 구조 분석
+        alt_match = re.match(r'^/([a-zA-Z0-9]+)분석(?:\s+([\w]+))?$', text.strip())
         if alt_match:
             coin = alt_match.group(1).upper()
+            tf_arg = alt_match.group(2)
             if coin in ("BTC", "BITCOIN"):
                 self.tg.send("ℹ️ BTC 분석은 /분석 또는 /시장 명령어를 사용하세요.")
                 return
             symbol = f"{coin}/USDT"
-            self.tg.send(f"🔍 {coin} 구조 분석 중...")
+
+            valid_tfs = {"1m": ["1m"], "5m": ["5m", "15m"], "15m": ["15m", "1h"],
+                         "30m": ["15m", "30m", "1h"], "1h": ["15m", "1h", "4h"],
+                         "4h": ["15m", "1h", "4h"], "1d": ["1h", "4h", "1d"]}
+            if tf_arg and tf_arg.lower() in valid_tfs:
+                timeframes = valid_tfs[tf_arg.lower()]
+                self.tg.send(f"🔍 {coin} 구조 분석 중... (TF: {', '.join(timeframes)})")
+            elif tf_arg:
+                self.tg.send(f"❌ 지원 시간: 1m, 5m, 15m, 30m, 1h, 4h, 1d\n예: /{coin.lower()}분석 1h")
+                return
+            else:
+                timeframes = None
+                self.tg.send(f"🔍 {coin} 구조 분석 중...")
 
             def _run():
                 try:
                     from agents.analyzers.alt_structure import AltStructureAgent
                     agent = AltStructureAgent(symbol=symbol, exchange=self.exchange,
-                                              cg_client=getattr(self.onchain, '_cg', None))
+                                              cg_client=getattr(self.onchain, '_cg', None),
+                                              timeframes=timeframes)
                     data = agent.collect_data()
                     result = agent.analyze(data)
                     # 차트 이미지 생성 + 전송
