@@ -64,8 +64,10 @@ def run_daily(
     universe/ohlcv_map 중 하나는 제공. index_ohlcv 없으면 지수 자동 다운로드.
     notion 제공 시 게시. llm_client=None이면 기본 Anthropic 생성(run_llm=True일 때).
     """
-    today = datetime.now().strftime("%Y-%m-%d")
-    start = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    # 날짜/기간은 '시장 거래소 현지시각' 기준 (서버 TZ 의존 제거 — 시간대 버그 수정)
+    from stock_auto.config.clock import market_now, market_today
+    today = market_today(market)
+    start = (market_now(market) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     cfg = get_config(market)
 
     # 1) 데이터

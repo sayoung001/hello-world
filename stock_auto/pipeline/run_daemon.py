@@ -18,8 +18,9 @@ APScheduler(zoneinfo)로 거래소 현지시각 기준 트리거 → DST 자동:
 
 from __future__ import annotations
 
+import os
 import threading
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from stock_auto.config.env import get_secrets
@@ -35,15 +36,23 @@ KST = ZoneInfo("Asia/Seoul")
 ET = ZoneInfo("America/New_York")
 
 
+def _active_markets() -> tuple[Market, ...]:
+    """US 집중. KR은 확장성용 — 환경변수 ENABLE_KR=1 일 때만 포함."""
+    if os.environ.get("ENABLE_KR", "").strip() in ("1", "true", "True"):
+        return (Market.US, Market.KR)
+    return (Market.US,)
+
+
 def _recalibrate_and_batch():
     """일일 배치 + 프로파일 자가보정 재구축."""
     from stock_auto.realtime.profile_builder import save_profile, build_and_save
     from stock_auto.pipeline.daily_batch import run_daily
     from stock_auto.integrations.notion_publisher import NotionPublisher
+    from stock_auto.config.clock import now_et
     sec = get_secrets()
-    print(f"[daemon] {datetime.now()} 일일 배치 + 프로파일 재구축")
+    print(f"[daemon] {now_et():%Y-%m-%d %H:%M %Z} 일일 배치 + 프로파일 재구축")
 
-    for market in (Market.US, Market.KR):
+    for market in _active_markets():
         syms = list(load_universe(market).keys())
         # ① 실측 우선 재구축, 부족분 frac 폴백
         emp = observation_store.build_profiles_from_observations(market, syms, min_days=10)
@@ -76,7 +85,8 @@ def _run_monitor_thread(market: Market, session_minutes: int):
     tg = Telegram(sec.telegram_bot_token, sec.telegram_chat_id)
 
     def _record(snap, window):
-        observation_store.record(snap.market, datetime.now().strftime("%Y-%m-%d"),
+        # 날짜는 스냅샷 거래소시각(ET) 기준 — 서버 TZ 무관
+        observation_store.record(snap.market, snap.ts.strftime("%Y-%m-%d"),
                                  snap.symbol, window, snap.cum_volume, snap.cum_turnover)
 
     monitor = SurgeMonitor(profiles, DEFAULT_THRESHOLDS,
@@ -105,18 +115,21 @@ def main() -> int:
         print("❌ apscheduler 필요: pip install apscheduler")
         return 1
 
-    sch = BlockingScheduler(timezone=KST)
+    sch = BlockingScheduler(timezone=ET)   # US 집중 → 기준 TZ를 ET로
+    markets = _active_markets()
     # 일일 배치 + 재구축: ET 17:00(마감+1h), DST 자동
     sch.add_job(_recalibrate_and_batch,
                 CronTrigger(hour=17, minute=0, day_of_week="mon-fri", timezone=ET))
-    # KR 개장 09:00 KST → KR 정규장 약 390분
-    sch.add_job(lambda: _run_monitor_thread(Market.KR, 390),
-                CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=KST))
-    # US 개장 09:30 ET → 약 390분
+    # US 개장 09:30 ET → 약 390분 (정규장)
     sch.add_job(lambda: _run_monitor_thread(Market.US, 390),
                 CronTrigger(hour=9, minute=30, day_of_week="mon-fri", timezone=ET))
+    # KR 개장(확장성): ENABLE_KR=1 일 때만
+    if Market.KR in markets:
+        sch.add_job(lambda: _run_monitor_thread(Market.KR, 390),
+                    CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=KST))
 
-    print("[daemon] 시작 — 일일배치(US마감+1h) / KR·US 개장 모니터 / 자가보정")
+    print(f"[daemon] 시작 — 대상시장 {[m.value for m in markets]} "
+          "| 일일배치(US마감+1h) / 개장 모니터 / 자가보정")
     print("[daemon] Ctrl+C 로 종료")
     try:
         sch.start()

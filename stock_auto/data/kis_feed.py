@@ -149,16 +149,21 @@ class KISFeed:
 
     def __init__(self, app_key: str, app_secret: str, market: Market,
                  env: str = "real", us_exchange: str = "NAS",
-                 debug_raw: int = 0, should_stop=None):
+                 debug_raw: int = 0, should_stop=None,
+                 reconnect: bool = True, recv_timeout: float = 30.0):
         self.app_key = app_key
         self.app_secret = app_secret
         self.market = market
         self.env = env
         self.us_exchange = us_exchange
         self._tr = TR_KR if market == Market.KR else TR_US
-        self._field_count = 46 if market == Market.KR else 26  # 종목당 필드 수(근사)
         self.debug_raw = debug_raw       # >0이면 첫 N개 원시 패킷을 출력(필드 정렬용)
         self.should_stop = should_stop   # 콜백: True면 스트림 종료(데몬 자동정지)
+        self.reconnect = reconnect       # SSH 장기가동: 끊기면 자동 재접속
+        self.recv_timeout = recv_timeout  # recv 블로킹 해소(초) → should_stop 반영
+
+    def _stopped(self) -> bool:
+        return self.should_stop is not None and self.should_stop()
 
     def _tr_key(self, symbol: str) -> str:
         if self.market == Market.KR:
@@ -167,53 +172,72 @@ class KISFeed:
         return f"D{exch}{symbol}"
 
     def stream(self, symbols) -> Iterator[TickSnapshot]:
+        """
+        WebSocket 체결 스트림. SSH 장기가동 대비:
+        - recv_timeout으로 블로킹 해소 → 장 마감/정지 신호를 제때 반영
+        - 끊기면 백오프 후 자동 재접속(reconnect=True)
+        """
+        import time as _time
         try:
             import websocket  # websocket-client
         except ImportError as e:
             raise ImportError("websocket-client 필요: pip install websocket-client") from e
 
-        approval = get_approval_key(self.app_key, self.app_secret, self.env)
-        if not approval:
-            return
-
         url = WS_REAL if self.env == "real" else WS_PAPER
-        ws = websocket.create_connection(url)
-        try:
-            for sym in symbols:
-                ws.send(_subscribe_msg(approval, self._tr, self._tr_key(sym)))
-            parse = parse_kr if self.market == Market.KR else parse_us
+        parse = parse_kr if self.market == Market.KR else parse_us
+        backoff = 2
+        seen = 0
 
-            seen = 0
-            while True:
-                if self.should_stop is not None and self.should_stop():
-                    break
-                raw = ws.recv()
-                if not raw:
-                    continue
-                # 원시 패킷 캡처(필드 정렬 검증용)
-                if self.debug_raw and seen < self.debug_raw:
-                    seen += 1
-                    print(f"[kis-raw {seen}] {raw[:600]}")
-                # 제어 메시지(JSON): 구독응답/PINGPONG
-                if raw[0] in "{[":
-                    if "PINGPONG" in raw:
-                        ws.send(raw)   # 핑퐁 응답
-                    continue
-                # 실시간 데이터: 0|TR|count|body
-                parts = raw.split("|")
-                if len(parts) < 4:
-                    continue
-                tr_id, count, body = parts[1], parts[2], parts[3]
-                if tr_id != self._tr:
-                    continue
-                snap = self._parse_body(body, count, parse)
-                if snap:
-                    yield snap
-        finally:
+        while not self._stopped():
+            approval = get_approval_key(self.app_key, self.app_secret, self.env)
+            if not approval:
+                if not self.reconnect:
+                    return
+                _time.sleep(backoff); backoff = min(backoff * 2, 60); continue
+
+            ws = None
             try:
-                ws.close()
-            except Exception:  # noqa: BLE001
-                pass
+                ws = websocket.create_connection(url, timeout=10)
+                ws.settimeout(self.recv_timeout)
+                for sym in symbols:
+                    ws.send(_subscribe_msg(approval, self._tr, self._tr_key(sym)))
+                backoff = 2   # 연결 성공 → 백오프 리셋
+
+                while not self._stopped():
+                    try:
+                        raw = ws.recv()
+                    except websocket.WebSocketTimeoutException:
+                        continue   # 타임아웃 → 정지신호 재확인 후 계속
+                    if not raw:
+                        continue
+                    if self.debug_raw and seen < self.debug_raw:
+                        seen += 1
+                        print(f"[kis-raw {seen}] {raw[:600]}")
+                    if raw[0] in "{[":
+                        if "PINGPONG" in raw:
+                            ws.send(raw)
+                        continue
+                    parts = raw.split("|")
+                    if len(parts) < 4:
+                        continue
+                    tr_id, count, body = parts[1], parts[2], parts[3]
+                    if tr_id != self._tr:
+                        continue
+                    snap = self._parse_body(body, count, parse)
+                    if snap:
+                        yield snap
+            except Exception as e:  # noqa: BLE001 — 끊김/오류 → 재접속
+                print(f"[kis] 연결 끊김/오류: {type(e).__name__}: {e}")
+            finally:
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+            if not self.reconnect or self._stopped():
+                break
+            print(f"[kis] {backoff}s 후 재접속...")
+            _time.sleep(backoff); backoff = min(backoff * 2, 60)
 
     def _parse_body(self, body: str, count: str, parse):
         """다건 패킷(count>1)은 종목당 필드수로 나눠 '최신(마지막)' 레코드만 파싱."""

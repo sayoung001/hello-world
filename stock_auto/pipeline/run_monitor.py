@@ -69,12 +69,12 @@ def main() -> int:
         print("⚠️ 텔레그램 미설정 — 알림은 콘솔로 출력")
 
     # 자가보정: 각 윈도우 누적거래량을 관측 저장소에 적립 → 다음날 프로파일 재구축
+    # 날짜는 스냅샷의 거래소 시각(ET) 기준 → 서버 TZ 무관(시간대 버그 수정)
     from stock_auto.realtime import observation_store
-    from datetime import datetime as _dt
 
     def _record(snap, window):
         observation_store.record(
-            snap.market, _dt.now().strftime("%Y-%m-%d"), snap.symbol,
+            snap.market, snap.ts.strftime("%Y-%m-%d"), snap.symbol,
             window, snap.cum_volume, snap.cum_turnover)
 
     monitor = SurgeMonitor(
