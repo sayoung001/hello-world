@@ -78,9 +78,11 @@ class TelegramFormatter:
         messages = []
 
         # === 헤더 + 종합 판단 ===
+        bias = getattr(consensus, 'analysis_bias', '')
+        bias_label = {"long": " 📈 롱 관점", "short": " 📉 숏 관점"}.get(bias, "")
         header = (
             f"{'='*30}\n"
-            f"🔍 멀티 에이전트 시장 분석\n"
+            f"🔍 멀티 에이전트 시장 분석{bias_label}\n"
             f"{'='*30}\n"
             f"⏰ {consensus.timestamp}\n\n"
             f"📊 종합 리스크: {RISK_EMOJI.get(consensus.overall_risk, consensus.overall_risk.value)}\n"

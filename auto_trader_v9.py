@@ -2469,6 +2469,8 @@ class ConvergenceTrader:
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "/판결 — 전체 보유 포지션 판결\n"
                 "/분석 — 전체 시장+포지션 분석\n"
+                "/분석롱 — 롱 관점 시장 분석\n"
+                "/분석숏 — 숏 관점 시장 분석\n"
                 "/포지션 <코인> — 개별 포지션 분석\n"
                 "  예: /포지션 ETH\n"
                 "/진입 <코인> — 진입 시그널 판단\n"
@@ -2674,22 +2676,40 @@ class ConvergenceTrader:
             threading.Thread(target=_run, daemon=True).start()
             return
 
-        # /분석 — 전체 시장+포지션 분석 (기존 정기분석과 동일)
+        # /분석, /분석롱, /분석숏 — 전체 시장+포지션 분석
+        analysis_bias = ""
         if text_lower in ("/분석", "/analyze"):
+            analysis_bias = ""
+        elif text_lower in ("/분석롱", "/분석long"):
+            analysis_bias = "long"
+        elif text_lower in ("/분석숏", "/분석short"):
+            analysis_bias = "short"
+        else:
+            analysis_bias = None
+
+        if analysis_bias is not None:
             if not self.agent_hook:
                 self.tg.send("❌ 에이전트 시스템 비활성화")
                 return
             n = len(self.positions)
-            self.tg.send(f"🔍 전체 시장 분석 중... (포지션 {n}건)")
+            bias_label = {"long": " (롱 관점)", "short": " (숏 관점)"}.get(analysis_bias, "")
+            pos_summary = ""
+            if self.positions:
+                dirs = [getattr(p, 'direction', '?') for p in self.positions]
+                long_n = sum(1 for d in dirs if d == 'long')
+                short_n = sum(1 for d in dirs if d == 'short')
+                pos_summary = f" | 롱 {long_n}건, 숏 {short_n}건" if (long_n or short_n) else ""
+            self.tg.send(f"🔍 전체 시장 분석 중...{bias_label} (포지션 {n}건{pos_summary})")
 
             def _run():
                 try:
                     pos_infos = self.agent_hook._convert_positions(self.positions) if self.positions else []
                     orch = self.agent_hook._get_orchestrator()
-                    consensus = orch.run(positions=pos_infos)
+                    consensus = orch.run(positions=pos_infos, bias=analysis_bias)
                     self.agent_hook._memory.store(consensus)
-                    self.agent_hook._shadow.log_analysis(consensus, trigger="분석요청")
-                    self.agent_hook._send_result(consensus, trigger="분석요청")
+                    trigger = f"분석요청{bias_label}"
+                    self.agent_hook._shadow.log_analysis(consensus, trigger=trigger)
+                    self.agent_hook._send_result(consensus, trigger=trigger)
                 except Exception as e:
                     self.tg.send(f"❌ 분석 실패: {e}")
 
