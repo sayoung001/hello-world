@@ -156,8 +156,11 @@ class Orchestrator:
 
         try:
             import anthropic
+            import os
             from agents.core.base import QUICK_MODEL, _track_usage
-            client = anthropic.Anthropic()
+            client = anthropic.Anthropic(
+                api_key=os.environ.get("ANTHROPIC_API_KEY", "")
+            )
 
             debate_input = f"에이전트 분석:\n{summary}{crash_text}"
 
@@ -292,8 +295,11 @@ class Orchestrator:
         # 4. LLM 모더레이션
         try:
             import anthropic
+            import os
             from agents.core.base import _track_usage
-            client = anthropic.Anthropic()
+            client = anthropic.Anthropic(
+                api_key=os.environ.get("ANTHROPIC_API_KEY", "")
+            )
 
             summary = self._build_analysis_summary(weighted_messages)
             debate_text = (f"\n\n## Bull/Bear 토론\n"
