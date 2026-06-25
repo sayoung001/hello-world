@@ -480,6 +480,11 @@ class Position:
     entry_btc_state: str = "N/A"
     profile: str = "standard"         # [V8] 프로필
 
+    # 수익금 기반 트레일링 (텔레그램 /트레일링금액 명령으로 설정)
+    pnl_trail_callback: float = 0     # 콜백 금액 ($) — 0이면 비활성
+    pnl_trail_activation: float = 0   # 활성 수익금 ($) — 0이면 즉시 활성
+    max_pnl: float = 0                # 최고 수익금 ($) 추적
+
     def hold_h(self):
         try: return (datetime.now(KST) - datetime.fromisoformat(self.entry_time)).total_seconds() / 3600
         except: return 0
@@ -504,6 +509,9 @@ class Position:
         roe = self.current_roe(price)
         self.max_fav_roe = max(self.max_fav_roe, max(0, roe))
         self.max_adv_roe = max(self.max_adv_roe, max(0, -roe))
+        if self.pnl_trail_callback > 0:
+            cur_pnl = self.pnl(price)
+            self.max_pnl = max(self.max_pnl, cur_pnl)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1403,6 +1411,23 @@ class ConvergenceTrader:
                     self._close(pos, price, f'TRAIL_{trail_pct}%', closed)
                     continue
 
+            # ── PnL 트레일링: 수익금 기준 최고점 대비 콜백$ 후퇴 시 청산 ──
+            if pos.pnl_trail_callback > 0:
+                cur_pnl = pos.pnl(price)
+                activated = (pos.pnl_trail_activation <= 0 or
+                             pos.max_pnl >= pos.pnl_trail_activation)
+                if activated and pos.max_pnl > 0:
+                    trail_floor = pos.max_pnl - pos.pnl_trail_callback
+                    if cur_pnl <= trail_floor:
+                        self._close(pos, price,
+                                    f'PnL_TRAIL_${pos.pnl_trail_callback:.0f}', closed)
+                        self.tg.send(
+                            f"🔔 PnL 트레일링 청산 | {pos.symbol}\n"
+                            f"최고 수익: ${pos.max_pnl:+,.2f}\n"
+                            f"청산 수익: ${cur_pnl:+,.2f}\n"
+                            f"콜백: ${pos.pnl_trail_callback:.2f}")
+                        continue
+
             # ── [V8-4] EE: 2-4h, -0.5% ──
             if (self.cfg["ENABLE_EARLY_EXIT"] and not pos.ee_checked
                     and hc >= self.cfg["EE_START_CANDLE"]):
@@ -1583,6 +1608,16 @@ class ConvergenceTrader:
                 lines.append(f"    최대유리: +{p.max_fav_roe:.2f}% | EE: {ee_status}")
                 if trail_s:
                     lines.append(f"    {trail_s}")
+                if p.pnl_trail_callback > 0:
+                    pnl_floor = p.max_pnl - p.pnl_trail_callback
+                    act_s = f"활성${p.pnl_trail_activation:.0f}" if p.pnl_trail_activation > 0 else "즉시"
+                    activated = p.pnl_trail_activation <= 0 or p.max_pnl >= p.pnl_trail_activation
+                    status_s = "🟢활성" if activated else "⏳대기"
+                    lines.append(
+                        f"    💰PnL Trail: 콜백${p.pnl_trail_callback:.1f} | "
+                        f"{act_s} | {status_s}")
+                    lines.append(
+                        f"    최고${p.max_pnl:+,.2f} → 청산${pnl_floor:+,.2f}")
 
         # ── 거래소 수동 포지션 (봇 미관리) ──
         bot_keys = {f"{self._norm_sym(p.symbol)}_{p.direction}" for p in self.positions}
@@ -2504,8 +2539,11 @@ class ConvergenceTrader:
                 "/시장 — 즉시 시장 분석\n"
                 "/상태 — 봇 상태 요약\n"
                 "/수익 — 전체 포지션 수익 현황\n"
-                "/트레일링 <콜백%> [활성수익률%] — 전체 포지션 트레일링스탑\n"
-                "  예: /트레일링 1.0 (콜백 1%), /트레일링 0.5 2.0\n"
+                "/트레일링 <콜백%> [활성ROE%] — 바이낸스 트레일링스탑\n"
+                "  예: /트레일링 1.0, /트레일링 0.5 2.0\n"
+                "/트레일링금액 <콜백$> [활성수익금$] — 수익금 트레일링\n"
+                "  예: /트레일링금액 5, /트레일링금액 10 30\n"
+                "  해제: /트레일링금액해제\n"
                 "/메모리 — Brain 메모리 통계\n"
                 "/<코인>분석 [시간] — 알트코인 구조 분석\n"
                 "  예: /sol분석, /eth분석 1h, /blur분석 1d\n"
@@ -2632,6 +2670,92 @@ class ConvergenceTrader:
             if activation_roe is not None:
                 header += f" | 활성 ROE: {activation_roe}%"
             self.tg.send(header + "\n\n" + "\n".join(results))
+            return
+
+        # /트레일링금액 <콜백$> [활성수익금$] — 수익금 기반 트레일링
+        pnl_trail_match = re.match(
+            r'^/트레일링금액\s+([0-9]*\.?[0-9]+)(?:\s+([0-9]*\.?[0-9]+))?$',
+            text.strip()
+        )
+        if pnl_trail_match or text_lower.strip() == "/트레일링금액":
+            if not pnl_trail_match:
+                # 현재 설정 상태 표시
+                active_trails = [p for p in self.positions if p.pnl_trail_callback > 0]
+                status = ""
+                if active_trails:
+                    status = "\n\n📊 현재 설정된 포지션:\n"
+                    for p in active_trails:
+                        d_s = "L" if p.direction == "long" else "S"
+                        act = f"활성 ${p.pnl_trail_activation:.0f}" if p.pnl_trail_activation > 0 else "즉시"
+                        status += (
+                            f"  {d_s} {p.symbol} — 콜백 ${p.pnl_trail_callback:.1f} | "
+                            f"{act} | 최고PnL ${p.max_pnl:+,.2f}\n"
+                        )
+                self.tg.send(
+                    "📌 수익금 트레일링스탑\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    "사용법: /트레일링금액 <콜백$> [활성수익금$]\n\n"
+                    "콜백$: 최고 수익금 대비 이만큼 하락 시 청산\n"
+                    "활성수익금$: 수익금이 이 금액 이상일 때 트레일링 시작\n"
+                    "  (미입력 시 즉시 활성)\n\n"
+                    "예시:\n"
+                    "  /트레일링금액 5 — 최고 수익에서 $5 하락 시 청산\n"
+                    "  /트레일링금액 10 30 — 수익 $30 도달 후, $10 하락 시 청산\n\n"
+                    "해제: /트레일링금액해제\n"
+                    "⚠️ 봇 내부 로직 (15초 폴링)" + status
+                )
+                return
+
+            if not self.positions:
+                self.tg.send("📭 보유 포지션 없음")
+                return
+
+            callback_usd = float(pnl_trail_match.group(1))
+            activation_usd = float(pnl_trail_match.group(2)) if pnl_trail_match.group(2) else 0
+
+            if callback_usd <= 0:
+                self.tg.send("❌ 콜백 금액은 0보다 커야 합니다")
+                return
+
+            results = []
+            for p in self.positions:
+                pr = self.executor.price(p.symbol)
+                cur_pnl = p.pnl(pr) if pr > 0 else 0
+                p.pnl_trail_callback = callback_usd
+                p.pnl_trail_activation = activation_usd
+                p.max_pnl = max(p.max_pnl, cur_pnl)
+                d_s = "L" if p.direction == "long" else "S"
+                act_str = f"활성: ${activation_usd:.0f}" if activation_usd > 0 else "즉시 활성"
+                results.append(
+                    f"✅ {p.symbol} {d_s} — 콜백 ${callback_usd:.1f} | "
+                    f"{act_str} | 현재PnL ${cur_pnl:+,.2f}"
+                )
+            self._save_positions()
+
+            header = (
+                f"🔔 수익금 트레일링 설정 완료\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"콜백: ${callback_usd:.1f}"
+            )
+            if activation_usd > 0:
+                header += f" | 활성: ${activation_usd:.0f}"
+            self.tg.send(header + "\n\n" + "\n".join(results))
+            return
+
+        # /트레일링금액해제 — 수익금 트레일링 해제
+        if text_lower.strip() == "/트레일링금액해제":
+            if not self.positions:
+                self.tg.send("📭 보유 포지션 없음")
+                return
+            count = 0
+            for p in self.positions:
+                if p.pnl_trail_callback > 0:
+                    p.pnl_trail_callback = 0
+                    p.pnl_trail_activation = 0
+                    p.max_pnl = 0
+                    count += 1
+            self._save_positions()
+            self.tg.send(f"✅ {count}개 포지션 수익금 트레일링 해제")
             return
 
         # /돌파간격 <시간> — 정기 스캔 주기 변경
