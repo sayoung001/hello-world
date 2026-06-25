@@ -240,25 +240,36 @@ class TrendReversalDetector:
 
     @staticmethod
     def format_alert(alert: dict) -> str:
-        """텔레그램 알림 메시지 포맷"""
-        direction_kr = "롱" if alert["direction"] == "long" else "숏"
-        trend_kr = "하락" if alert["btc_trend"] == "bearish" else "상승"
-        emoji = "🔻" if alert["btc_trend"] == "bearish" else "🔺"
+        """단일 알림용 포맷 (하위 호환)"""
+        return TrendReversalDetector.format_alerts([alert])
 
-        roe = alert["pos_roe_pct"]
-        roe_emoji = "📈" if roe > 0 else "📉"
+    @staticmethod
+    def format_alerts(alerts: list[dict]) -> str:
+        """여러 포지션을 하나의 알림으로 통합 포맷"""
+        if not alerts:
+            return ""
+        first = alerts[0]
+        trend_kr = "하락" if first["btc_trend"] == "bearish" else "상승"
+        emoji = "🔻" if first["btc_trend"] == "bearish" else "🔺"
 
-        return (
-            f"{emoji} BTC 방향 전환 감지\n"
-            f"{'━'*25}\n"
-            f"BTC: {trend_kr} 전환 (RSI {alert['rsi']})\n"
-            f"  EMA5: ${alert['ema_fast']:,.0f} | EMA15: ${alert['ema_slow']:,.0f}\n"
-            f"  현재가: ${alert['btc_price']:,.0f}\n"
-            f"\n⚠️ 영향 포지션:\n"
-            f"  {alert['symbol']} ({direction_kr}) — 보유 {alert['hold_h']}h\n"
-            f"  {roe_emoji} ROE: {roe:+.1f}% | PnL: {alert['pos_change_pct']:+.2f}%\n"
-            f"\n💡 BTC가 {direction_kr} 포지션 반대로 전환됨\n"
-            f"   SL 확인 및 포지션 점검 권고\n"
-            f"{'━'*25}\n"
-            f"⏰ {alert['timestamp']}"
-        )
+        lines = [
+            f"{emoji} BTC 방향 전환 감지",
+            f"{'━'*25}",
+            f"BTC: {trend_kr} 전환 (RSI {first['rsi']})",
+            f"  EMA5: ${first['ema_fast']:,.0f} | EMA15: ${first['ema_slow']:,.0f}",
+            f"  현재가: ${first['btc_price']:,.0f}",
+            f"\n⚠️ 영향 포지션 ({len(alerts)}개):",
+        ]
+        for a in alerts:
+            direction_kr = "롱" if a["direction"] == "long" else "숏"
+            roe = a["pos_roe_pct"]
+            roe_emoji = "📈" if roe > 0 else "📉"
+            lines.append(
+                f"  {a['symbol']} ({direction_kr}) {a['hold_h']}h | "
+                f"{roe_emoji} ROE {roe:+.1f}%"
+            )
+        lines.append(f"\n💡 BTC가 포지션 반대로 전환됨")
+        lines.append(f"   SL 확인 및 포지션 점검 권고")
+        lines.append(f"{'━'*25}")
+        lines.append(f"⏰ {first['timestamp']}")
+        return "\n".join(lines)

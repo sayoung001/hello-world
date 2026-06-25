@@ -134,11 +134,24 @@ class ReflectionEngine:
                 trade_result=result,
             )
 
-            response = self._client.messages.create(
-                model=QUICK_MODEL,
-                max_tokens=800,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            import time as _time
+            _last_err = None
+            for _attempt in range(4):
+                try:
+                    response = self._client.messages.create(
+                        model=QUICK_MODEL,
+                        max_tokens=800,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    break
+                except Exception as _e:
+                    _last_err = _e
+                    if ("529" in str(_e) or "overloaded" in str(_e).lower()) and _attempt < 3:
+                        _time.sleep(2 ** (_attempt + 1))
+                        continue
+                    raise
+            else:
+                raise _last_err
             raw = response.content[0].text
 
             # JSON 파싱

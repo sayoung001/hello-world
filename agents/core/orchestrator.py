@@ -16,6 +16,22 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from agents.core.base import AgentBase, DEEP_MODEL
+
+
+def _retry_api_call(func, max_retries=3):
+    """529 Overloaded 에러 시 exponential backoff 재시도"""
+    last_err = None
+    for attempt in range(max_retries + 1):
+        try:
+            return func()
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            if ("529" in err_str or "overloaded" in err_str.lower()) and attempt < max_retries:
+                time.sleep(2 ** (attempt + 1))
+                continue
+            raise
+    raise last_err
 from agents.core.protocol import (
     AgentMessage, MarketConsensus, PositionInfo, PositionVerdict,
     RiskLevel, MarketRegime, ActionType,
@@ -46,7 +62,12 @@ MODERATOR_PROMPT = """당신은 크립토 선물 트레이딩 전문가 패널�
   "bull_bear_verdict": "bull_win|bear_win|draw",
   "reasoning": "종합 판단 근거"
 }
-```"""
+```
+
+분석 관점(롱/숏)이 지정된 경우:
+- reasoning에 해당 방향 관점의 진입/유지/청산 판단을 반드시 포함
+- 현재 포지션 정보가 있으면: 포지션 유지 vs 청산 vs 추가 여부를 구체적으로 조언
+- 포지션 없으면: 해당 방향 진입 적합성, 추천 가격, SL/TP를 reasoning에 포함"""
 
 BULL_PROMPT = """당신은 강세론자(Bull)입니다. 에이전트 분석 결과를 보고 시장이 왜 괜찮은지,
 현재 포지션을 유지/확대해야 하는 이유를 200자 이내로 강하게 주장하세요.
@@ -140,21 +161,21 @@ class Orchestrator:
 
             debate_input = f"에이전트 분석:\n{summary}{crash_text}"
 
-            bull_resp = client.messages.create(
+            bull_resp = _retry_api_call(lambda: client.messages.create(
                 model=QUICK_MODEL, max_tokens=500,
                 system=[{"type": "text", "text": BULL_PROMPT,
                          "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": debate_input}]
-            )
+            ))
             _track_usage(QUICK_MODEL, "bull_agent", bull_resp)
             bull_argument = bull_resp.content[0].text.strip()
 
-            bear_resp = client.messages.create(
+            bear_resp = _retry_api_call(lambda: client.messages.create(
                 model=QUICK_MODEL, max_tokens=500,
                 system=[{"type": "text", "text": BEAR_PROMPT,
                          "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": debate_input}]
-            )
+            ))
             _track_usage(QUICK_MODEL, "bear_agent", bear_resp)
             bear_argument = bear_resp.content[0].text.strip()
 
@@ -240,7 +261,9 @@ class Orchestrator:
     # ── Phase 2c: Moderator (종합) ──
 
     def moderate(self, agent_messages: list[AgentMessage],
-                 crash_context: dict | None = None) -> MarketConsensus:
+                 crash_context: dict | None = None,
+                 bias: str = "",
+                 positions: list | None = None) -> MarketConsensus:
         """
         전체 모더레이션 파이프라인:
         1. 초기 regime 추정 (규칙 기반)
@@ -289,18 +312,50 @@ class Orchestrator:
                     f"20x 레버리지 생존이 최우선입니다."
                 )
 
-            response = client.messages.create(
+            bias_instruction = ""
+            if bias in ("long", "short"):
+                direction_kr = "롱(매수)" if bias == "long" else "숏(매도)"
+                bias_instruction = (
+                    f"\n\n## 📌 분석 관점: {direction_kr} 포지션 기준\n"
+                    f"사용자가 {direction_kr} 관점에서 분석을 요청했습니다.\n"
+                    f"- {direction_kr} 진입/유지에 유리한 요소와 불리한 요소를 명확히 구분하세요\n"
+                    f"- {direction_kr} 관점에서의 리스크/리워드 비율을 구체적으로 평가하세요\n"
+                    f"- 추천 진입가, SL, TP를 {direction_kr} 기준으로 제시하세요\n"
+                )
+
+            position_instruction = ""
+            if positions:
+                pos_lines = []
+                for p in positions:
+                    sym = getattr(p, 'symbol', p.get('symbol', '?') if isinstance(p, dict) else '?')
+                    d = getattr(p, 'direction', p.get('direction', '?') if isinstance(p, dict) else '?')
+                    entry = getattr(p, 'entry_price', p.get('entry_price', 0) if isinstance(p, dict) else 0)
+                    roe = getattr(p, 'roe_pct', p.get('roe_pct', 0) if isinstance(p, dict) else 0)
+                    hold = getattr(p, 'hold_candles', p.get('hold_candles', 0) if isinstance(p, dict) else 0)
+                    pos_lines.append(
+                        f"  - {sym} {d.upper()} | 진입: ${entry:,.4f} | "
+                        f"ROE: {roe:+.1f}% | 보유: {hold}캔들"
+                    )
+                position_instruction = (
+                    f"\n\n## 📊 현재 보유 포지션\n"
+                    + "\n".join(pos_lines)
+                    + "\n\n위 포지션 상태를 반드시 고려하여 판단하세요. "
+                    f"현재 포지션의 유지/청산/추가 여부를 reasoning에 포함하세요."
+                )
+
+            response = _retry_api_call(lambda: client.messages.create(
                 model=DEEP_MODEL,
                 max_tokens=1500,
                 system=[{"type": "text", "text": MODERATOR_PROMPT,
                          "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": (
                     f"에이전트 분석 (가중치 적용됨):\n{summary}"
-                    f"{debate_text}{crash_instruction}\n\n"
+                    f"{debate_text}{crash_instruction}"
+                    f"{bias_instruction}{position_instruction}\n\n"
                     f"위 분석과 토론을 종합하여 최종 컨센서스를 도출하세요.\n"
                     f"현재 추정 regime: {estimated_regime}"
                 )}]
-            )
+            ))
             _track_usage(DEEP_MODEL, "moderator", response)
             raw = response.content[0].text
             if "```json" in raw:
@@ -315,14 +370,16 @@ class Orchestrator:
                 warnings=result.get("key_warnings", []) + all_warnings,
                 agent_messages=agent_messages,
             )
-            # 토론 결과를 consensus에 첨부
             consensus.debate = debate
             consensus.bull_bear_verdict = result.get("bull_bear_verdict", "draw")
+            consensus.analysis_bias = bias
             return consensus
 
         except Exception as e:
             print(f"  ⚠️ LLM 모더레이션 실패, 규칙 기반 폴백: {e}")
-            return self._rule_based_moderate(weighted_messages, all_warnings, debate)
+            fallback = self._rule_based_moderate(weighted_messages, all_warnings, debate)
+            fallback.analysis_bias = bias
+            return fallback
 
     def _estimate_regime(self, messages: list[AgentMessage]) -> str:
         """에이전트 분석에서 regime 초기 추정"""
@@ -463,7 +520,8 @@ class Orchestrator:
     # ── 전체 파이프라인 ──
 
     def run(self, positions: list[PositionInfo] | None = None,
-            crash_context: dict | None = None) -> MarketConsensus:
+            crash_context: dict | None = None,
+            bias: str = "") -> MarketConsensus:
         """
         1. Context Layer (Agent 1~6) → 각자 분석
         2. Bull/Bear 토론 + 동적 가중치 → 컨센서스
@@ -471,9 +529,11 @@ class Orchestrator:
 
         :param positions: 현재 보유 포지션 리스트
         :param crash_context: 급락 감지 정보 (긴급 분석 시 CrashDetector에서 전달)
+        :param bias: "long" 또는 "short" — 분석 관점 지정
         """
         is_emergency = crash_context is not None
-        label = "🚨 긴급 멀티 에이전트 분석" if is_emergency else "🔍 멀티 에이전트 시장 분석"
+        bias_label = f" ({bias.upper()})" if bias else ""
+        label = "🚨 긴급 멀티 에이전트 분석" if is_emergency else f"🔍 멀티 에이전트 시장 분석{bias_label}"
 
         print(f"\n{'='*60}")
         print(f"{label} 시작")
@@ -490,7 +550,8 @@ class Orchestrator:
 
         # 2. Moderation (Bull/Bear + 동적 가중치 포함)
         print("\n🤝 [Phase 2] 컨센서스 도출 (Bull/Bear 토론 + 동적 가중치)")
-        consensus = self.moderate(agent_messages, crash_context=crash_context)
+        consensus = self.moderate(agent_messages, crash_context=crash_context,
+                                  bias=bias, positions=positions)
         debate = getattr(consensus, 'debate', {})
         verdict = getattr(consensus, 'bull_bear_verdict', 'N/A')
         print(f"  → 종합 리스크: {consensus.overall_risk.value}")

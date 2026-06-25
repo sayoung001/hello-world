@@ -40,7 +40,8 @@ class AltStructureAgent(AgentBase):
         (+10, "BTC 급등 +10%"),
     ]
 
-    def __init__(self, symbol: str = "SOL/USDT", exchange=None, cg_client=None):
+    def __init__(self, symbol: str = "SOL/USDT", exchange=None, cg_client=None,
+                 timeframes: list[str] | None = None):
         coin = symbol.replace("/USDT", "").replace("USDT", "").upper()
         super().__init__(
             agent_id=f"agent_alt_{coin.lower()}",
@@ -48,6 +49,7 @@ class AltStructureAgent(AgentBase):
             role_description=f"{coin} 가격 구조와 핵심 레벨을 분석하는 Factual 에이전트"
         )
         self._analysis_type = "factual"
+        self.timeframes = timeframes or ["15m", "1h", "4h"]
         self.symbol = f"{coin}/USDT"
         self.coin = coin
         if exchange is None:
@@ -309,12 +311,12 @@ class AltStructureAgent(AgentBase):
         """알트코인 멀티타임프레임 데이터 수집"""
         data = {"coin": self.coin, "symbol": self.symbol}
 
-        for tf in ["15m", "1h", "4h"]:
+        for tf in self.timeframes:
             try:
                 ohlcv = self.exchange.fetch_ohlcv(self.symbol, timeframe=tf, limit=100)
                 df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
-                if tf == "4h":
-                    data["_ohlcv_4h"] = df
+                if tf == self.timeframes[-1]:
+                    data["_ohlcv_main"] = df
                 close = df["close"]
                 high = df["high"]
                 low = df["low"]
@@ -359,10 +361,10 @@ class AltStructureAgent(AgentBase):
             except Exception as e:
                 data[f"{tf}"] = {"error": str(e)}
 
-        ohlcv_4h = data.get("_ohlcv_4h")
-        if ohlcv_4h is not None and not ohlcv_4h.empty:
+        ohlcv_main = data.get("_ohlcv_main")
+        if ohlcv_main is not None and not ohlcv_main.empty:
             try:
-                data["btc_correlation"] = self._compute_btc_correlation(ohlcv_4h)
+                data["btc_correlation"] = self._compute_btc_correlation(ohlcv_main)
             except Exception:
                 data["btc_correlation"] = {}
 
@@ -387,13 +389,14 @@ class AltStructureAgent(AgentBase):
                 crash_context: dict | None = None) -> AgentMessage:
         """알트코인 구조 분석 수행"""
         coin = collected_data.get("coin", self.coin)
-        d4h = collected_data.get("4h", {})
-        d1h = collected_data.get("1h", {})
-        d15m = collected_data.get("15m", {})
+        tfs = self.timeframes
+        d_main = collected_data.get(tfs[-1], {})
+        d_mid = collected_data.get(tfs[1], {}) if len(tfs) > 1 else {}
+        d_fast = collected_data.get(tfs[0], {}) if len(tfs) > 0 else {}
 
-        vp_4h = d4h.get("volume_profile", {})
-        bp_4h = d4h.get("breakout_patterns", {})
-        bp_1h = d1h.get("breakout_patterns", {})
+        vp_4h = d_main.get("volume_profile", {})
+        bp_4h = d_main.get("breakout_patterns", {})
+        bp_1h = d_mid.get("breakout_patterns", {})
         va_4h = vp_4h.get("value_area", {})
 
         vp_info = ""
@@ -404,9 +407,9 @@ class AltStructureAgent(AgentBase):
                        f"- LVN (돌파 가능 구간): {vp_4h.get('lvn', [])}")
 
         pattern_info = ""
-        for label, bp_data in [("4h", bp_4h), ("1h", bp_1h)]:
-            if bp_data and bp_data.get("patterns"):
-                pattern_info += f"\n### {label} 패턴 (편향: {bp_data.get('pattern_bias', 'N/A')})\n"
+        for tf_label, bp_data in [(tfs[-1], bp_4h), (tfs[1] if len(tfs) > 1 else "", bp_1h)]:
+            if tf_label and bp_data and bp_data.get("patterns"):
+                pattern_info += f"\n### {tf_label} 패턴 (편향: {bp_data.get('pattern_bias', 'N/A')})\n"
                 for p in bp_data.get("patterns", []):
                     pattern_info += f"  - {p.get('desc', p.get('type', ''))}\n"
 
@@ -418,7 +421,7 @@ class AltStructureAgent(AgentBase):
 - 상관계수: {btc_corr.get('correlation', 'N/A')} (1.0=완전동조, 0=무관, -1=역행)
 - 베타(β): {btc_corr.get('beta', 'N/A')} (1.0보다 크면 BTC보다 변동성 큼)
 - BTC 현재가: {btc_corr.get('btc_price', 'N/A')}
-- 데이터 기간: 4h봉 {btc_corr.get('data_points', 0)}개
+- 데이터 기간: {tfs[-1]}봉 {btc_corr.get('data_points', 0)}개
 
 ### BTC 시나리오별 {coin} 예상 (β={btc_corr.get('beta', 'N/A')} 기반)"""
             for sc in btc_corr.get("scenarios", []):
@@ -433,31 +436,43 @@ class AltStructureAgent(AgentBase):
 - 소진도가 높을수록(75%+) 해당 이벤트가 종료에 가까움 → 반대 방향 기회
 - 숏스퀴즈 종료 임박 = 숏 진입 기회, 롱캐스케이드 종료 임박 = 롱 반등 기회"""
 
+        tf_main_label = tfs[-1].upper() + "봉"
+        tf_mid_label = tfs[1].upper() + "봉" if len(tfs) > 1 else ""
+        tf_fast_label = tfs[0].upper() + "봉" if len(tfs) > 0 else ""
+
+        mid_section = ""
+        if tf_mid_label and d_mid:
+            mid_section = f"""
+### {tf_mid_label}
+- EMA 12/26: {d_mid.get('ema_12', 'N/A')} / {d_mid.get('ema_26', 'N/A')} (갭: {d_mid.get('ema_gap_pct', 'N/A')}%)
+- RSI: {d_mid.get('rsi', 'N/A')} | ATR: {d_mid.get('atr_pct', 'N/A')}%
+- 거래량 비율: {d_mid.get('volume_ratio', 'N/A')}x"""
+
+        fast_section = ""
+        if tf_fast_label and d_fast:
+            fast_section = f"""
+### {tf_fast_label}
+- EMA 12/26: {d_fast.get('ema_12', 'N/A')} / {d_fast.get('ema_26', 'N/A')}
+- RSI: {d_fast.get('rsi', 'N/A')} | ATR: {d_fast.get('atr_pct', 'N/A')}%"""
+
         prompt = f"""다음 {coin} 데이터를 분석하여 구조적 판단을 내려주세요.
 
 ## 가격 데이터 (멀티타임프레임)
-### 4시간봉
-- 현재가: {d4h.get('current', 'N/A')}
-- 24h 범위: {d4h.get('low_24h', 'N/A')} ~ {d4h.get('high_24h', 'N/A')}
-- 24h 변동: {d4h.get('change_24h_pct', 'N/A')}%
-- EMA 12/26: {d4h.get('ema_12', 'N/A')} / {d4h.get('ema_26', 'N/A')} (갭: {d4h.get('ema_gap_pct', 'N/A')}%)
-- RSI: {d4h.get('rsi', 'N/A')} | ATR: {d4h.get('atr_pct', 'N/A')}%
-- 거래량 비율(최근/평균): {d4h.get('volume_ratio', 'N/A')}x
+### {tf_main_label}
+- 현재가: {d_main.get('current', 'N/A')}
+- 24h 범위: {d_main.get('low_24h', 'N/A')} ~ {d_main.get('high_24h', 'N/A')}
+- 24h 변동: {d_main.get('change_24h_pct', 'N/A')}%
+- EMA 12/26: {d_main.get('ema_12', 'N/A')} / {d_main.get('ema_26', 'N/A')} (갭: {d_main.get('ema_gap_pct', 'N/A')}%)
+- RSI: {d_main.get('rsi', 'N/A')} | ATR: {d_main.get('atr_pct', 'N/A')}%
+- 거래량 비율(최근/평균): {d_main.get('volume_ratio', 'N/A')}x
 
 ### 매물대 분석 (Volume Profile)
 {vp_info or "데이터 없음"}
 
 ### 돌파/반동 패턴
 {pattern_info or "감지된 패턴 없음"}
-
-### 1시간봉
-- EMA 12/26: {d1h.get('ema_12', 'N/A')} / {d1h.get('ema_26', 'N/A')} (갭: {d1h.get('ema_gap_pct', 'N/A')}%)
-- RSI: {d1h.get('rsi', 'N/A')} | ATR: {d1h.get('atr_pct', 'N/A')}%
-- 거래량 비율: {d1h.get('volume_ratio', 'N/A')}x
-
-### 15분봉
-- EMA 12/26: {d15m.get('ema_12', 'N/A')} / {d15m.get('ema_26', 'N/A')}
-- RSI: {d15m.get('rsi', 'N/A')} | ATR: {d15m.get('atr_pct', 'N/A')}%
+{mid_section}
+{fast_section}
 {corr_info}
 {squeeze_info}
 
@@ -492,12 +507,12 @@ BTC 상승 시나리오에서 기대할 수 있는 수익률을 20x 레버리지
         if result.get("risk_level") == "DANGER":
             warnings.append(f"⚠️ {coin} 구조적 위험 감지")
 
-        rsi_4h = d4h.get("rsi", 50)
-        if isinstance(rsi_4h, (int, float)):
-            if rsi_4h > 75:
-                warnings.append(f"🔴 {coin} 4h RSI {rsi_4h:.0f} — 과매수")
-            elif rsi_4h < 25:
-                warnings.append(f"🟢 {coin} 4h RSI {rsi_4h:.0f} — 과매도")
+        rsi_main = d_main.get("rsi", 50)
+        if isinstance(rsi_main, (int, float)):
+            if rsi_main > 75:
+                warnings.append(f"🔴 {coin} {tfs[-1]} RSI {rsi_main:.0f} — 과매수")
+            elif rsi_main < 25:
+                warnings.append(f"🟢 {coin} {tfs[-1]} RSI {rsi_main:.0f} — 과매도")
 
         return self._build_message(
             data=result,
@@ -508,7 +523,7 @@ BTC 상승 시나리오에서 기대할 수 있는 수익률을 20x 레버리지
 
     def _fallback_analysis(self, data: dict) -> dict:
         """LLM 파싱 실패 시 규칙 기반 폴백"""
-        d4h = data.get("4h", {})
+        d4h = data.get(self.timeframes[-1], {})
         price = d4h.get("current", 0)
         ema12 = d4h.get("ema_12", 0)
         ema26 = d4h.get("ema_26", 0)
@@ -588,12 +603,14 @@ BTC 상승 시나리오에서 기대할 수 있는 수익률을 20x 레버리지
 
     def generate_chart(self, collected_data: dict, analysis_msg: AgentMessage) -> bytes:
         """분석 결과를 차트 이미지(PNG bytes)로 생성"""
-        ohlcv_df = collected_data.get("_ohlcv_4h", pd.DataFrame())
+        ohlcv_df = collected_data.get("_ohlcv_main", pd.DataFrame())
+        main_tf = self.timeframes[-1].upper()
         return generate_alt_chart(
             coin=self.coin,
             ohlcv_df=ohlcv_df,
             analysis_result=analysis_msg.data,
             collected_data=collected_data,
+            main_tf=main_tf,
         )
 
     def format_telegram(self, msg: AgentMessage, collected_data: dict | None = None) -> str:
@@ -695,7 +712,7 @@ BTC 상승 시나리오에서 기대할 수 있는 수익률을 20x 레버리지
 
         btc_scenario_text = d.get("btc_scenario_analysis", "")
         if btc_scenario_text:
-            lines.append(f"\n📋 시나리오 평가: {btc_scenario_text[:200]}")
+            lines.append(f"\n📋 시나리오 평가: {btc_scenario_text}")
 
         squeeze = (collected_data or {}).get("squeeze_detection", {})
         if squeeze and squeeze.get("event_type") and squeeze.get("event_type") != "none":
@@ -711,6 +728,8 @@ BTC 상승 시나리오에서 기대할 수 있는 수익률을 20x 레버리지
 
         reasoning = d.get("reasoning", "")
         if reasoning:
-            lines.append(f"\n💡 {reasoning[:300]}")
+            lines.append(f"\n💡 {reasoning}")
 
-        return "\n".join(lines)
+        full_msg = "\n".join(lines)
+        # 텔레그램 4000자 제한 → 복수 메시지로 분할은 호출부에서 처리
+        return full_msg

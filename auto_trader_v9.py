@@ -480,6 +480,11 @@ class Position:
     entry_btc_state: str = "N/A"
     profile: str = "standard"         # [V8] 프로필
 
+    # 수익금 기반 트레일링 (텔레그램 /트레일링금액 명령으로 설정)
+    pnl_trail_callback: float = 0     # 콜백 금액 ($) — 0이면 비활성
+    pnl_trail_activation: float = 0   # 활성 수익금 ($) — 0이면 즉시 활성
+    max_pnl: float = 0                # 최고 수익금 ($) 추적
+
     def hold_h(self):
         try: return (datetime.now(KST) - datetime.fromisoformat(self.entry_time)).total_seconds() / 3600
         except: return 0
@@ -504,6 +509,9 @@ class Position:
         roe = self.current_roe(price)
         self.max_fav_roe = max(self.max_fav_roe, max(0, roe))
         self.max_adv_roe = max(self.max_adv_roe, max(0, -roe))
+        if self.pnl_trail_callback > 0:
+            cur_pnl = self.pnl(price)
+            self.max_pnl = max(self.max_pnl, cur_pnl)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -618,7 +626,7 @@ class Executor:
             ps = "LONG" if direction == "long" else "SHORT"
             side = "buy" if direction == "long" else "sell"
             o = self.ex.create_order(sym, "market", side, qty, params={"positionSide": ps})
-            ap = float(o.get("average", entry))
+            ap = float(o.get("average") or o.get("price") or entry)
 
             # 슬리피지 검증
             slippage = abs(ap - entry) / entry * 100
@@ -782,8 +790,8 @@ class Executor:
             # [V9-FIX] 헤지모드: positionSide와 reduceOnly 충돌 → reduceOnly 제거
             o = self.ex.create_order(sym, "market", side, qty,
                 params={"positionSide": ps})
-            fill_price = float(o.get("average", price))
-            fill_qty = float(o.get("filled", qty))
+            fill_price = float(o.get("average") or o.get("price") or price)
+            fill_qty = float(o.get("filled") or qty)
             print(f"  {sym} 청산 체결: price={fill_price} qty={fill_qty}")
             self._cancel_all_orders(sym)
             self.invalidate_balance()  # [V9.2] 잔고 캐시 갱신
@@ -887,6 +895,32 @@ class Executor:
             if 'PROFIT' in combined:
                 has_tp = True
         return {'sl': has_sl, 'tp': has_tp}
+
+    def place_trailing_stop(self, sym, direction, qty, callback_rate, activation_price=None):
+        """바이낸스 TRAILING_STOP_MARKET 주문 설정
+
+        :param callback_rate: 콜백 비율 (0.1 ~ 5.0%)
+        :param activation_price: 트레일링 활성 가격 (None이면 즉시 활성)
+        :return: order id 또는 None
+        """
+        if self.cfg["PAPER_TRADE"]:
+            return "paper_trail"
+        callback_rate = max(0.1, min(5.0, callback_rate))
+        ps = "LONG" if direction == "long" else "SHORT"
+        sl_side = "sell" if direction == "long" else "buy"
+        qty = self.rnd_qty(sym, qty)
+        params = {"positionSide": ps, "callbackRate": callback_rate}
+        if activation_price:
+            params["activationPrice"] = self.rnd_price(sym, activation_price)
+        try:
+            o = self.ex.create_order(sym, "TRAILING_STOP_MARKET", sl_side, qty, params=params)
+            oid = o.get("id", "")
+            print(f"  {sym} 트레일링스탑 설정: callback={callback_rate}% "
+                  f"activation={activation_price or '즉시'} id={oid}")
+            return oid
+        except Exception as e:
+            self._alert(f"트레일링스탑 실패 {sym}: {e}")
+            return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1377,6 +1411,23 @@ class ConvergenceTrader:
                     self._close(pos, price, f'TRAIL_{trail_pct}%', closed)
                     continue
 
+            # ── PnL 트레일링: 수익금 기준 최고점 대비 콜백$ 후퇴 시 청산 ──
+            if pos.pnl_trail_callback > 0:
+                cur_pnl = pos.pnl(price)
+                activated = (pos.pnl_trail_activation <= 0 or
+                             pos.max_pnl >= pos.pnl_trail_activation)
+                if activated and pos.max_pnl > 0:
+                    trail_floor = pos.max_pnl - pos.pnl_trail_callback
+                    if cur_pnl <= trail_floor:
+                        self._close(pos, price,
+                                    f'PnL_TRAIL_${pos.pnl_trail_callback:.0f}', closed)
+                        self.tg.send(
+                            f"🔔 PnL 트레일링 청산 | {pos.symbol}\n"
+                            f"최고 수익: ${pos.max_pnl:+,.2f}\n"
+                            f"청산 수익: ${cur_pnl:+,.2f}\n"
+                            f"콜백: ${pos.pnl_trail_callback:.2f}")
+                        continue
+
             # ── [V8-4] EE: 2-4h, -0.5% ──
             if (self.cfg["ENABLE_EARLY_EXIT"] and not pos.ee_checked
                     and hc >= self.cfg["EE_START_CANDLE"]):
@@ -1557,6 +1608,16 @@ class ConvergenceTrader:
                 lines.append(f"    최대유리: +{p.max_fav_roe:.2f}% | EE: {ee_status}")
                 if trail_s:
                     lines.append(f"    {trail_s}")
+                if p.pnl_trail_callback > 0:
+                    pnl_floor = p.max_pnl - p.pnl_trail_callback
+                    act_s = f"활성${p.pnl_trail_activation:.0f}" if p.pnl_trail_activation > 0 else "즉시"
+                    activated = p.pnl_trail_activation <= 0 or p.max_pnl >= p.pnl_trail_activation
+                    status_s = "🟢활성" if activated else "⏳대기"
+                    lines.append(
+                        f"    💰PnL Trail: 콜백${p.pnl_trail_callback:.1f} | "
+                        f"{act_s} | {status_s}")
+                    lines.append(
+                        f"    최고${p.max_pnl:+,.2f} → 청산${pnl_floor:+,.2f}")
 
         # ── 거래소 수동 포지션 (봇 미관리) ──
         bot_keys = {f"{self._norm_sym(p.symbol)}_{p.direction}" for p in self.positions}
@@ -2469,15 +2530,24 @@ class ConvergenceTrader:
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "/판결 — 전체 보유 포지션 판결\n"
                 "/분석 — 전체 시장+포지션 분석\n"
+                "/분석롱 — 롱 관점 시장 분석\n"
+                "/분석숏 — 숏 관점 시장 분석\n"
                 "/포지션 <코인> — 개별 포지션 분석\n"
                 "  예: /포지션 ETH\n"
                 "/진입 <코인> — 진입 시그널 판단\n"
                 "  예: /진입 SOL\n"
                 "/시장 — 즉시 시장 분석\n"
                 "/상태 — 봇 상태 요약\n"
+                "/수익 — 전체 포지션 수익 현황\n"
+                "/트레일링 <콜백%> [활성ROE%] — 바이낸스 트레일링스탑\n"
+                "  예: /트레일링 1.0, /트레일링 0.5 2.0\n"
+                "/트레일링금액 <콜백$> [활성수익금$] — 수익금 트레일링\n"
+                "  예: /트레일링금액 5, /트레일링금액 10 30\n"
+                "  해제: /트레일링금액해제\n"
                 "/메모리 — Brain 메모리 통계\n"
-                "/<코인>분석 — 알트코인 구조 분석\n"
-                "  예: /sol분석, /eth분석\n"
+                "/<코인>분석 [시간] — 알트코인 구조 분석\n"
+                "  예: /sol분석, /eth분석 1h, /blur분석 1d\n"
+                "  시간: 1m, 5m, 15m, 30m, 1h, 4h(기본), 1d\n"
                 "/돌파 — 돌파 전문가 스캔 (LVN 횡보 강세 알트)\n"
                 "/돌파간격 <시간> — 정기 스캔 주기 변경\n"
                 "  예: /돌파간격 2 (2시간마다), /돌파간격 0.5 (30분마다)\n"
@@ -2487,6 +2557,205 @@ class ConvergenceTrader:
                 "  예: /스퀴즈감시 BTC (해제: /스퀴즈감시해제 BTC)\n"
                 "/help — 이 도움말"
             )
+            return
+
+        # /수익 — 전체 포지션 수익 현황
+        if text_lower in ("/수익", "/pnl", "/profit"):
+            if not self.positions:
+                self.tg.send("📭 보유 포지션 없음")
+                return
+            lev = self.cfg["LEVERAGE"]
+            lines = [
+                "💰 전체 포지션 수익 현황",
+                f"━━━━━━━━━━━━━━━━━━━━",
+            ]
+            total_pnl = 0.0
+            total_margin = 0.0
+            for p in self.positions:
+                pr = self.executor.price(p.symbol)
+                if pr <= 0:
+                    continue
+                pnl_usd = p.pnl(pr)
+                roe_spot = p.current_roe(pr)
+                roe_lev = roe_spot * lev
+                margin = p.quantity * p.entry_price / lev
+                total_pnl += pnl_usd
+                total_margin += margin
+                d_s = "📈L" if p.direction == "long" else "📉S"
+                pnl_emoji = "🟢" if pnl_usd >= 0 else "🔴"
+                lines.append(
+                    f"\n{d_s} {p.symbol}\n"
+                    f"  진입: {p.entry_price:,.4f} → 현재: {pr:,.4f}\n"
+                    f"  {pnl_emoji} PnL: ${pnl_usd:+,.2f} | ROE: {roe_lev:+.1f}%\n"
+                    f"  증거금: ${margin:,.2f} | 보유: {p.hold_h():.1f}h"
+                )
+
+            total_emoji = "🟢" if total_pnl >= 0 else "🔴"
+            total_roe = (total_pnl / total_margin * 100) if total_margin > 0 else 0
+            lines.append(f"\n{'━'*20}")
+            lines.append(
+                f"{total_emoji} 합계: ${total_pnl:+,.2f} "
+                f"(ROE {total_roe:+.1f}%)\n"
+                f"총 증거금: ${total_margin:,.2f} | "
+                f"포지션: {len(self.positions)}개"
+            )
+            self.tg.send("\n".join(lines))
+            return
+
+        # /트레일링 <콜백%> [활성수익률%] — 전체 포지션 트레일링스탑
+        trail_match = re.match(
+            r'^/트레일링\s+([0-9]*\.?[0-9]+)(?:\s+([0-9]*\.?[0-9]+))?$',
+            text.strip()
+        )
+        if trail_match or text_lower.strip() == "/트레일링":
+            if not trail_match:
+                self.tg.send(
+                    "📌 트레일링스탑 설정\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    "사용법: /트레일링 <콜백%> [활성수익률%]\n\n"
+                    "콜백%: 최고점 대비 후퇴 시 청산 (0.1~5.0)\n"
+                    "활성수익률%: 이 수익률 도달 시 트레일링 시작\n"
+                    "  (미입력 시 즉시 활성)\n\n"
+                    "예시:\n"
+                    "  /트레일링 1.0 — 콜백 1%, 즉시 활성\n"
+                    "  /트레일링 0.5 2.0 — 콜백 0.5%, 수익 2% 도달시 활성\n\n"
+                    "⚠️ 바이낸스 서버사이드 실행 (봇 꺼져도 작동)\n"
+                    "⚠️ 기존 SL/TP 주문은 유지됩니다"
+                )
+                return
+
+            if not self.positions:
+                self.tg.send("📭 보유 포지션 없음")
+                return
+
+            callback_rate = float(trail_match.group(1))
+            activation_roe = float(trail_match.group(2)) if trail_match.group(2) else None
+
+            if callback_rate < 0.1 or callback_rate > 5.0:
+                self.tg.send("❌ 콜백 범위: 0.1% ~ 5.0%")
+                return
+
+            lev = self.cfg["LEVERAGE"]
+            results = []
+            for p in self.positions:
+                pr = self.executor.price(p.symbol)
+                if pr <= 0:
+                    results.append(f"❌ {p.symbol}: 가격 조회 실패")
+                    continue
+
+                activation_price = None
+                if activation_roe is not None:
+                    spot_pct = activation_roe / lev
+                    if p.direction == "long":
+                        activation_price = p.entry_price * (1 + spot_pct / 100)
+                    else:
+                        activation_price = p.entry_price * (1 - spot_pct / 100)
+
+                oid = self.executor.place_trailing_stop(
+                    p.symbol, p.direction, p.quantity,
+                    callback_rate, activation_price
+                )
+                if oid:
+                    d_s = "L" if p.direction == "long" else "S"
+                    act_str = f"활성: ${activation_price:,.4f} (ROE {activation_roe}%)" if activation_price else "즉시 활성"
+                    results.append(f"✅ {p.symbol} {d_s} — 콜백 {callback_rate}% | {act_str}")
+                else:
+                    results.append(f"❌ {p.symbol}: 설정 실패")
+
+            header = (
+                f"🔄 트레일링스탑 설정 결과\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"콜백: {callback_rate}%"
+            )
+            if activation_roe is not None:
+                header += f" | 활성 ROE: {activation_roe}%"
+            self.tg.send(header + "\n\n" + "\n".join(results))
+            return
+
+        # /트레일링금액 <콜백$> [활성수익금$] — 수익금 기반 트레일링
+        pnl_trail_match = re.match(
+            r'^/트레일링금액\s+([0-9]*\.?[0-9]+)(?:\s+([0-9]*\.?[0-9]+))?$',
+            text.strip()
+        )
+        if pnl_trail_match or text_lower.strip() == "/트레일링금액":
+            if not pnl_trail_match:
+                # 현재 설정 상태 표시
+                active_trails = [p for p in self.positions if p.pnl_trail_callback > 0]
+                status = ""
+                if active_trails:
+                    status = "\n\n📊 현재 설정된 포지션:\n"
+                    for p in active_trails:
+                        d_s = "L" if p.direction == "long" else "S"
+                        act = f"활성 ${p.pnl_trail_activation:.0f}" if p.pnl_trail_activation > 0 else "즉시"
+                        status += (
+                            f"  {d_s} {p.symbol} — 콜백 ${p.pnl_trail_callback:.1f} | "
+                            f"{act} | 최고PnL ${p.max_pnl:+,.2f}\n"
+                        )
+                self.tg.send(
+                    "📌 수익금 트레일링스탑\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    "사용법: /트레일링금액 <콜백$> [활성수익금$]\n\n"
+                    "콜백$: 최고 수익금 대비 이만큼 하락 시 청산\n"
+                    "활성수익금$: 수익금이 이 금액 이상일 때 트레일링 시작\n"
+                    "  (미입력 시 즉시 활성)\n\n"
+                    "예시:\n"
+                    "  /트레일링금액 5 — 최고 수익에서 $5 하락 시 청산\n"
+                    "  /트레일링금액 10 30 — 수익 $30 도달 후, $10 하락 시 청산\n\n"
+                    "해제: /트레일링금액해제\n"
+                    "⚠️ 봇 내부 로직 (15초 폴링)" + status
+                )
+                return
+
+            if not self.positions:
+                self.tg.send("📭 보유 포지션 없음")
+                return
+
+            callback_usd = float(pnl_trail_match.group(1))
+            activation_usd = float(pnl_trail_match.group(2)) if pnl_trail_match.group(2) else 0
+
+            if callback_usd <= 0:
+                self.tg.send("❌ 콜백 금액은 0보다 커야 합니다")
+                return
+
+            results = []
+            for p in self.positions:
+                pr = self.executor.price(p.symbol)
+                cur_pnl = p.pnl(pr) if pr > 0 else 0
+                p.pnl_trail_callback = callback_usd
+                p.pnl_trail_activation = activation_usd
+                p.max_pnl = max(p.max_pnl, cur_pnl)
+                d_s = "L" if p.direction == "long" else "S"
+                act_str = f"활성: ${activation_usd:.0f}" if activation_usd > 0 else "즉시 활성"
+                results.append(
+                    f"✅ {p.symbol} {d_s} — 콜백 ${callback_usd:.1f} | "
+                    f"{act_str} | 현재PnL ${cur_pnl:+,.2f}"
+                )
+            self._save_positions()
+
+            header = (
+                f"🔔 수익금 트레일링 설정 완료\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"콜백: ${callback_usd:.1f}"
+            )
+            if activation_usd > 0:
+                header += f" | 활성: ${activation_usd:.0f}"
+            self.tg.send(header + "\n\n" + "\n".join(results))
+            return
+
+        # /트레일링금액해제 — 수익금 트레일링 해제
+        if text_lower.strip() == "/트레일링금액해제":
+            if not self.positions:
+                self.tg.send("📭 보유 포지션 없음")
+                return
+            count = 0
+            for p in self.positions:
+                if p.pnl_trail_callback > 0:
+                    p.pnl_trail_callback = 0
+                    p.pnl_trail_activation = 0
+                    p.max_pnl = 0
+                    count += 1
+            self._save_positions()
+            self.tg.send(f"✅ {count}개 포지션 수익금 트레일링 해제")
             return
 
         # /돌파간격 <시간> — 정기 스캔 주기 변경
@@ -2594,21 +2863,35 @@ class ConvergenceTrader:
                          "해제: /스퀴즈감시해제 " + coin)
             return
 
-        # /<코인>분석 — 알트코인 구조 분석
-        alt_match = re.match(r'^/([a-zA-Z]+)분석$', text_lower.strip())
+        # /<코인>분석 [시간] — 알트코인 구조 분석
+        alt_match = re.match(r'^/([a-zA-Z0-9]+)분석(?:\s+([\w]+))?$', text.strip())
         if alt_match:
             coin = alt_match.group(1).upper()
+            tf_arg = alt_match.group(2)
             if coin in ("BTC", "BITCOIN"):
                 self.tg.send("ℹ️ BTC 분석은 /분석 또는 /시장 명령어를 사용하세요.")
                 return
             symbol = f"{coin}/USDT"
-            self.tg.send(f"🔍 {coin} 구조 분석 중...")
+
+            valid_tfs = {"1m": ["1m"], "5m": ["5m", "15m"], "15m": ["15m", "1h"],
+                         "30m": ["15m", "30m", "1h"], "1h": ["15m", "1h", "4h"],
+                         "4h": ["15m", "1h", "4h"], "1d": ["1h", "4h", "1d"]}
+            if tf_arg and tf_arg.lower() in valid_tfs:
+                timeframes = valid_tfs[tf_arg.lower()]
+                self.tg.send(f"🔍 {coin} 구조 분석 중... (TF: {', '.join(timeframes)})")
+            elif tf_arg:
+                self.tg.send(f"❌ 지원 시간: 1m, 5m, 15m, 30m, 1h, 4h, 1d\n예: /{coin.lower()}분석 1h")
+                return
+            else:
+                timeframes = None
+                self.tg.send(f"🔍 {coin} 구조 분석 중...")
 
             def _run():
                 try:
                     from agents.analyzers.alt_structure import AltStructureAgent
                     agent = AltStructureAgent(symbol=symbol, exchange=self.exchange,
-                                              cg_client=getattr(self.onchain, '_cg', None))
+                                              cg_client=getattr(self.onchain, '_cg', None),
+                                              timeframes=timeframes)
                     data = agent.collect_data()
                     result = agent.analyze(data)
                     # 차트 이미지 생성 + 전송
@@ -2659,22 +2942,40 @@ class ConvergenceTrader:
             threading.Thread(target=_run, daemon=True).start()
             return
 
-        # /분석 — 전체 시장+포지션 분석 (기존 정기분석과 동일)
+        # /분석, /분석롱, /분석숏 — 전체 시장+포지션 분석
+        analysis_bias = ""
         if text_lower in ("/분석", "/analyze"):
+            analysis_bias = ""
+        elif text_lower in ("/분석롱", "/분석long"):
+            analysis_bias = "long"
+        elif text_lower in ("/분석숏", "/분석short"):
+            analysis_bias = "short"
+        else:
+            analysis_bias = None
+
+        if analysis_bias is not None:
             if not self.agent_hook:
                 self.tg.send("❌ 에이전트 시스템 비활성화")
                 return
             n = len(self.positions)
-            self.tg.send(f"🔍 전체 시장 분석 중... (포지션 {n}건)")
+            bias_label = {"long": " (롱 관점)", "short": " (숏 관점)"}.get(analysis_bias, "")
+            pos_summary = ""
+            if self.positions:
+                dirs = [getattr(p, 'direction', '?') for p in self.positions]
+                long_n = sum(1 for d in dirs if d == 'long')
+                short_n = sum(1 for d in dirs if d == 'short')
+                pos_summary = f" | 롱 {long_n}건, 숏 {short_n}건" if (long_n or short_n) else ""
+            self.tg.send(f"🔍 전체 시장 분석 중...{bias_label} (포지션 {n}건{pos_summary})")
 
             def _run():
                 try:
                     pos_infos = self.agent_hook._convert_positions(self.positions) if self.positions else []
                     orch = self.agent_hook._get_orchestrator()
-                    consensus = orch.run(positions=pos_infos)
+                    consensus = orch.run(positions=pos_infos, bias=analysis_bias)
                     self.agent_hook._memory.store(consensus)
-                    self.agent_hook._shadow.log_analysis(consensus, trigger="분석요청")
-                    self.agent_hook._send_result(consensus, trigger="분석요청")
+                    trigger = f"분석요청{bias_label}"
+                    self.agent_hook._shadow.log_analysis(consensus, trigger=trigger)
+                    self.agent_hook._send_result(consensus, trigger=trigger)
                 except Exception as e:
                     self.tg.send(f"❌ 분석 실패: {e}")
 

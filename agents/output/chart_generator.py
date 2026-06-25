@@ -75,6 +75,7 @@ def generate_alt_chart(
     ohlcv_df: pd.DataFrame,
     analysis_result: dict,
     collected_data: dict,
+    main_tf: str = "4H",
 ) -> bytes:
     """
     알트코인 구조 분석 차트 → PNG bytes.
@@ -99,13 +100,21 @@ def generate_alt_chart(
     long_e = analysis_result.get("long_entry", {})
     short_e = analysis_result.get("short_entry", {})
 
-    d4h = collected_data.get("4h", {})
-    d1h = collected_data.get("1h", {})
-    rsi_4h = d4h.get("rsi", 0)
-    rsi_1h = d1h.get("rsi", 0)
-    atr_pct = d4h.get("atr_pct", 0)
-    ema_gap = d4h.get("ema_gap_pct", 0)
-    vol_ratio = d4h.get("volume_ratio", 0)
+    tf_key = main_tf.lower()
+    available_tfs = [k for k in collected_data if k not in (
+        "coin", "btc_correlation", "squeeze_detection", "_ohlcv_main")]
+    if tf_key not in collected_data and available_tfs:
+        tf_key = available_tfs[-1]
+    mid_candidates = [t for t in available_tfs if t != tf_key]
+    mid_key = mid_candidates[len(mid_candidates)//2] if mid_candidates else tf_key
+
+    d_main = collected_data.get(tf_key, {})
+    d_mid = collected_data.get(mid_key, {})
+    rsi_4h = d_main.get("rsi", 0)
+    rsi_1h = d_mid.get("rsi", 0)
+    atr_pct = d_main.get("atr_pct", 0)
+    ema_gap = d_main.get("ema_gap_pct", 0)
+    vol_ratio = d_main.get("volume_ratio", 0)
 
     # ── 레이아웃 ──
     fig = plt.figure(figsize=(18, 11), facecolor="#1a1a2e")
@@ -197,7 +206,7 @@ def generate_alt_chart(
                     color="#ffa726", linewidth=1.0, alpha=0.7)
 
     # 차트 스타일
-    ax.set_title(f"{coin}/USDT  4H", color="white", fontsize=14,
+    ax.set_title(f"{coin}/USDT  {main_tf}", color="white", fontsize=14,
                  fontweight="bold", pad=10)
     ax.tick_params(colors="white", labelsize=8)
     for sp in ["top", "right"]:
@@ -259,7 +268,7 @@ def generate_alt_chart(
     _t(0.05, y, "Confidence", "#888", 7)
     _t(0.30, y, f"{conf:.0%}", "#fff", 9)
     y -= dy
-    _t(0.05, y, f"RSI  4h:{rsi_4h:.1f}  1h:{rsi_1h:.1f}", "#ccc", 7.5)
+    _t(0.05, y, f"RSI  {tf_key}:{rsi_4h:.1f}  {mid_key}:{rsi_1h:.1f}", "#ccc", 7.5)
     _t(0.55, y, f"ATR:{atr_pct:.3f}%  Vol:{vol_ratio:.1f}x", "#ccc", 7.5)
     y -= dy * 1.1
     _sep(y); y -= dy * 0.7
@@ -353,25 +362,29 @@ def generate_alt_chart(
 
     _sep(y); y -= dy * 0.7
 
-    # ── 패턴 ──
-    if patterns:
-        _t(0.05, y, "Patterns", "#bbbbbb", 8, True)
-        y -= dy
-        for p in patterns[:3]:
-            _t(0.08, y, f"- {p[:40]}", "#e0e0e0", 7)
+    # ── EMA / BTC Correlation ──
+    btc_corr = collected_data.get("btc_correlation", {})
+    if btc_corr:
+        beta = btc_corr.get("beta", 0)
+        corr = btc_corr.get("correlation", 0)
+        if beta or corr:
+            _t(0.05, y, "BTC Correlation", "#bbbbbb", 8, True)
+            y -= dy
+            _t(0.08, y, f"Corr: {corr:.3f}  Beta: {beta:.2f}", "#e0e0e0", 7.5)
             y -= dy * 0.8
-        y -= dy * 0.3
+            for sc in btc_corr.get("scenarios", [])[:3]:
+                pnl = sc.get("lev20x_pnl_pct", 0)
+                emoji_c = "#69f0ae" if pnl > 0 else "#ff5252"
+                btc_pct = sc.get("btc_pct", 0)
+                _t(0.08, y, f"BTC {btc_pct:+d}%", "#aaa", 7)
+                _t(0.35, y, f"-> {sc.get('expected_alt_price', '')}", "#ccc", 7)
+                _t(0.70, y, f"20x: {pnl:+.0f}%", emoji_c, 7, True)
+                y -= dy * 0.8
+            y -= dy * 0.3
 
-    # ── 분석 요약 ──
-    if reasoning and y > 0.06:
-        _t(0.05, y, "Analysis", "#bbbbbb", 8, True)
-        y -= dy
-        text = reasoning[:250]
-        while text and y > 0.02:
-            line = text[:42]
-            text = text[42:]
-            _t(0.05, y, line, "#e0e0e0", 7)
-            y -= dy * 0.85
+    # ── EMA Gap ──
+    _t(0.05, y, "EMA Gap", "#888", 7)
+    _t(0.30, y, f"{ema_gap:.3f}%", "#fff", 8)
 
     # 워터마크
     fig.text(0.5, 0.005, "Auto Trade System  |  20x Leverage  |  Alt Structure Analysis",

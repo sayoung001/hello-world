@@ -160,18 +160,28 @@ class AgentBase(ABC):
         else:
             system_content = system_prompt
 
-        try:
-            response = self.client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                system=system_content,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            _track_usage(model, self.agent_id, response)
-            return response.content[0].text
-        except Exception:
-            _usage_stats["errors"] += 1
-            raise
+        last_err = None
+        for attempt in range(4):
+            try:
+                response = self.client.messages.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    system=system_content,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                _track_usage(model, self.agent_id, response)
+                return response.content[0].text
+            except Exception as e:
+                last_err = e
+                err_str = str(e)
+                if "529" in err_str or "overloaded" in err_str.lower():
+                    wait = 2 ** (attempt + 1)
+                    time.sleep(wait)
+                    continue
+                _usage_stats["errors"] += 1
+                raise
+        _usage_stats["errors"] += 1
+        raise last_err
 
     def llm_json(self, prompt: str, system: str = "", deep: bool = False,
                  max_tokens: int = 4096, cache_system: bool = True) -> dict:
