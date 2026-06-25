@@ -626,7 +626,7 @@ class Executor:
             ps = "LONG" if direction == "long" else "SHORT"
             side = "buy" if direction == "long" else "sell"
             o = self.ex.create_order(sym, "market", side, qty, params={"positionSide": ps})
-            ap = float(o.get("average", entry))
+            ap = float(o.get("average") or o.get("price") or entry)
 
             # 슬리피지 검증
             slippage = abs(ap - entry) / entry * 100
@@ -790,8 +790,8 @@ class Executor:
             # [V9-FIX] 헤지모드: positionSide와 reduceOnly 충돌 → reduceOnly 제거
             o = self.ex.create_order(sym, "market", side, qty,
                 params={"positionSide": ps})
-            fill_price = float(o.get("average", price))
-            fill_qty = float(o.get("filled", qty))
+            fill_price = float(o.get("average") or o.get("price") or price)
+            fill_qty = float(o.get("filled") or qty)
             print(f"  {sym} 청산 체결: price={fill_price} qty={fill_qty}")
             self._cancel_all_orders(sym)
             self.invalidate_balance()  # [V9.2] 잔고 캐시 갱신
