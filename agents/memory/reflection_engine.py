@@ -98,9 +98,9 @@ class ReflectionEngine:
         if not self._client:
             # AgentBase에서 클라이언트 생성 시도
             try:
-                import os
                 import anthropic
-                key = os.environ.get("ANTHROPIC_API_KEY", "")
+                from agents.core.base import _resolve_api_key
+                key = _resolve_api_key()
                 if not key:
                     return None
                 self._client = anthropic.Anthropic(api_key=key)
