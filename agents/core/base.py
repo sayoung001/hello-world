@@ -25,6 +25,15 @@ from agents.core.protocol import AgentMessage, RiskLevel
 QUICK_MODEL = "claude-haiku-4-5-20251001"
 DEEP_MODEL = "claude-sonnet-4-6"
 
+
+def _resolve_api_key() -> str | None:
+    """Anthropic API 키 탐색 — 여러 환경변수 후보 확인"""
+    for env_name in ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "API_KEY"):
+        key = os.environ.get(env_name, "").strip()
+        if key:
+            return key
+    return None
+
 # 토큰당 비용 (USD, 2026-04 기준 추정)
 _COST_PER_1K = {
     QUICK_MODEL: {"input": 0.0008, "output": 0.004},
@@ -129,9 +138,11 @@ class AgentBase(ABC):
         if self._client is None:
             if anthropic is None:
                 raise ImportError("anthropic 패키지 필요: pip install anthropic")
-            self._client = anthropic.Anthropic(
-                api_key=os.environ.get("ANTHROPIC_API_KEY", "")
-            )
+            key = _resolve_api_key()
+            if key:
+                self._client = anthropic.Anthropic(api_key=key)
+            else:
+                self._client = anthropic.Anthropic()
         return self._client
 
     def llm_call(self, prompt: str, system: str = "", deep: bool = False,
