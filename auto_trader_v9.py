@@ -485,6 +485,12 @@ class Position:
     pnl_trail_activation: float = 0   # 활성 수익금 ($) — 0이면 즉시 활성
     max_pnl: float = 0                # 최고 수익금 ($) 추적
 
+    # 휩쏘(가짜돌파) 감지
+    squeeze_high: float = 0           # 스퀴즈 상단
+    squeeze_low: float = 0            # 스퀴즈 하단
+    entry_volume_ratio: float = 0     # 진입 시 거래량 비율
+    whipsaw_alerted: bool = False     # 휩쏘 알림 전송 완료?
+
     def hold_h(self):
         try: return (datetime.now(KST) - datetime.fromisoformat(self.entry_time)).total_seconds() / 3600
         except: return 0
@@ -1294,6 +1300,9 @@ class ConvergenceTrader:
             vol_surge=signal.get('vol_surge',0),
             entry_btc_state=btc_state,
             profile=self.profile_name,
+            squeeze_high=signal.get('details',{}).get('squeeze',{}).get('squeeze_high',0),
+            squeeze_low=signal.get('details',{}).get('squeeze',{}).get('squeeze_low',0),
+            entry_volume_ratio=signal.get('volume_ratio',0),
         )
         self.positions.append(pos)
         self._save_positions()
@@ -1334,6 +1343,7 @@ class ConvergenceTrader:
                f"  adx: {adx_v:.0f} | vol: ×{vr_v:.1f} | RSI: {rsi_v:.0f}\n"
                f"  수렴: {sq_candles}캔들 | BTC squeeze: {sqz_s}\n"
                f"  vol_surge: ×{vol_surge_v:.2f}\n"
+               f"  스퀴즈: {pos.squeeze_low:,.6f}~{pos.squeeze_high:,.6f}\n"
                f"━━━━━━━━━━━━━━━━━━━━\n"
                f"📊 전략: {strat}\n"
                f"  {strat_desc}\n"
@@ -1428,6 +1438,11 @@ class ConvergenceTrader:
                             f"콜백: ${pos.pnl_trail_callback:.2f}")
                         continue
 
+            # ── 휩쏘(가짜돌파) 감지: 3캔들 내 스퀴즈 복귀 + 저거래량 ──
+            if (not pos.whipsaw_alerted and pos.squeeze_high > 0
+                    and hc <= 3):
+                self._check_whipsaw(pos, price)
+
             # ── [V8-4] EE: 2-4h, -0.5% ──
             if (self.cfg["ENABLE_EARLY_EXIT"] and not pos.ee_checked
                     and hc >= self.cfg["EE_START_CANDLE"]):
@@ -1444,6 +1459,101 @@ class ConvergenceTrader:
         for p in closed:
             if p in self.positions: self.positions.remove(p)
         if closed: self._save_positions()
+
+    # ── 휩쏘(가짜돌파) 감지 ──
+
+    def _check_whipsaw(self, pos: Position, price: float):
+        """
+        가짜돌파 감지: 돌파 후 스퀴즈 범위 복귀 + 거래량/캔들구조/OI 종합 점수.
+        스코어 3점 이상 시 텔레그램 경고 알림.
+        """
+        # 1) 스퀴즈 복귀 체크: 가격이 스퀴즈 범위 안으로 돌아왔는지
+        in_squeeze = pos.squeeze_low <= price <= pos.squeeze_high
+        if not in_squeeze:
+            return
+
+        score = 0
+        details = []
+        ohlcv = None
+
+        # 2) 거래량 체크: 현재 거래량이 돌파 시 대비 낮으면 가짜돌파 의심
+        try:
+            ohlcv = self.exchange.fetch_ohlcv(pos.symbol, '15m', limit=5)
+            if ohlcv and len(ohlcv) >= 2:
+                cur_vol = float(ohlcv[-1][5])
+                prev_vol = float(ohlcv[-2][5])
+                avg_vol = sum(float(r[5]) for r in ohlcv) / len(ohlcv)
+                if avg_vol > 0:
+                    cur_ratio = cur_vol / avg_vol
+                    if pos.entry_volume_ratio > 0 and cur_ratio < pos.entry_volume_ratio * 0.5:
+                        score += 2
+                        details.append(f"거래량 급감 (현재×{cur_ratio:.1f} vs 진입×{pos.entry_volume_ratio:.1f})")
+                    elif cur_ratio < 0.8:
+                        score += 1
+                        details.append(f"저거래량 (×{cur_ratio:.1f})")
+        except Exception:
+            pass
+
+        # 3) 캔들 구조: 긴 꼬리 = 거부 반응 (되돌림 확인)
+        try:
+            if ohlcv and len(ohlcv) >= 1:
+                o, h, l, c = float(ohlcv[-1][1]), float(ohlcv[-1][2]), float(ohlcv[-1][3]), float(ohlcv[-1][4])
+                body = abs(c - o)
+                full_range = h - l
+                if full_range > 0:
+                    body_ratio = body / full_range
+                    if body_ratio < 0.3:
+                        score += 1
+                        details.append(f"도지/긴꼬리 캔들 (바디 {body_ratio:.0%})")
+                    if pos.direction == 'long' and c < o:
+                        score += 1
+                        details.append("음봉 (롱 방향 반대)")
+                    elif pos.direction == 'short' and c > o:
+                        score += 1
+                        details.append("양봉 (숏 방향 반대)")
+        except Exception:
+            pass
+
+        # 4) OI 변화: OI 감소 = 포지션 청산 = 추세 약화
+        oi_info = ""
+        try:
+            cg = getattr(self.onchain, '_cg', None)
+            clean_sym = pos.symbol.replace('/USDT','').replace('USDT','').replace('1000','')
+            oi = cg.get_oi_change(clean_sym, "1h") if cg else None
+            if oi:
+                change = oi.get('change_pct', 0)
+                if change < -1.0:
+                    score += 2
+                    oi_info = f"OI {change:+.1f}% (대량 이탈)"
+                    details.append(oi_info)
+                elif change < -0.3:
+                    score += 1
+                    oi_info = f"OI {change:+.1f}% (감소)"
+                    details.append(oi_info)
+                else:
+                    oi_info = f"OI {change:+.1f}%"
+        except Exception:
+            pass
+
+        # 스코어 3점 이상: 휩쏘 경고
+        if score >= 3:
+            pos.whipsaw_alerted = True
+            self._save_positions()
+            kr_dir = "롱" if pos.direction == 'long' else "숏"
+            roe_lev = pos.current_roe_lev(price)
+            sq_range = f"{pos.squeeze_low:,.6f} ~ {pos.squeeze_high:,.6f}"
+            detail_str = "\n".join(f"  • {d}" for d in details)
+            msg = (f"⚠️ 휩쏘(가짜돌파) 감지 | {kr_dir} {pos.symbol}\n"
+                   f"━━━━━━━━━━━━━━━━━━━━\n"
+                   f"위험 스코어: {score}/7\n"
+                   f"{detail_str}\n"
+                   f"━━━━━━━━━━━━━━━━━━━━\n"
+                   f"현재가: {price:,.6f} (ROE {roe_lev:+.0f}%)\n"
+                   f"스퀴즈: {sq_range}\n"
+                   f"보유: {pos.hold_candles_15m()}캔들\n"
+                   f"━━━━━━━━━━━━━━━━━━━━\n"
+                   f"💡 SL 조기 청산 또는 수동 확인 권장")
+            self.tg.send(msg)
 
     # ── 청산 ──
 
