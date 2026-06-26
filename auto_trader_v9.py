@@ -1148,6 +1148,22 @@ class ConvergenceTrader:
                 # [V9.1] vol_surge 계산 (보조 정보 — 텔레그램 표시용)
                 result['vol_surge'] = self._calc_vol_surge(df)
 
+                # 돌파 봉 캔들 데이터 (진입 전 휩쏘 필터용)
+                last = df.iloc[-1]
+                prev3 = df.iloc[-4:-1] if len(df) >= 4 else df.iloc[:0]
+                result['_breakout_candle'] = {
+                    'open': float(last['Open']), 'high': float(last['High']),
+                    'low': float(last['Low']), 'close': float(last['Close']),
+                    'volume': float(last['Volume']),
+                }
+                if len(prev3) > 0:
+                    result['_prev3_avg_vol'] = float(prev3['Volume'].mean())
+                    result['_prev3_avg_range'] = float(
+                        (prev3['High'] - prev3['Low']).mean())
+                else:
+                    result['_prev3_avg_vol'] = 0
+                    result['_prev3_avg_range'] = 0
+
                 oc = self.onchain.get_all(sym)
                 gap_pct_val = result.get('details', {}).get('gap_pct', 0)
                 result.update({'onchain': oc, 'adx_value': adx, 'adx': adx,
@@ -1201,6 +1217,21 @@ class ConvergenceTrader:
             if not self.btc_trend.is_squeeze:
                 print(f"  BTC squeeze 아님: {sym} 대기 (gap:{self.btc_trend.gap_pct:.3f}%)")
                 return
+
+        # [V10] 진입 전 휩쏘(가짜돌파) 사전 필터
+        ws_pre = self._whipsaw_pre_filter(signal)
+        if ws_pre and ws_pre['score'] >= 4:
+            print(f"  🚫 휩쏘 사전차단: {sym} {d} (스코어 {ws_pre['score']}/8)")
+            self.tg.send(
+                f"🚫 휩쏘 사전차단 | {d.upper()} {sym}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"위험 스코어: {ws_pre['score']}/8\n"
+                + "\n".join(f"  • {r}" for r in ws_pre['reasons']) +
+                f"\n━━━━━━━━━━━━━━━━━━━━\n"
+                f"→ 진입 보류 (자동 스킵)")
+            return
+        elif ws_pre and ws_pre['score'] >= 2:
+            signal['_whipsaw_warning'] = ws_pre
 
         # [Phase F] 진입 전 리스크 평가
         if self.agent_hook is not None:
@@ -1358,6 +1389,11 @@ class ConvergenceTrader:
                f"  수량: {result['qty']:.4f} | 마진: ${margin:.0f}\n"
                f"  R:{risk_pct}% {self.cfg['SIZING']} P:{self.cfg['MAX_POSITIONS']}\n"
                f"  BTC7: {btc_state}({btc_val:+d}) | 잔고: ${bal:,.0f}")
+        ws_warn = signal.get('_whipsaw_warning')
+        if ws_warn:
+            msg += (f"\n━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⚠️ 휩쏘 주의 (스코어 {ws_warn['score']}/8)\n"
+                    + "\n".join(f"  • {r}" for r in ws_warn['reasons']))
         self.tg.send(msg)
 
     # ── 포지션 관리 ──
@@ -1438,9 +1474,9 @@ class ConvergenceTrader:
                             f"콜백: ${pos.pnl_trail_callback:.2f}")
                         continue
 
-            # ── 휩쏘(가짜돌파) 감지: 3캔들 내 스퀴즈 복귀 + 저거래량 ──
+            # ── 휩쏘(가짜돌파/가짜하락) 감지: 6캔들 내 스퀴즈 복귀 감시 ──
             if (not pos.whipsaw_alerted and pos.squeeze_high > 0
-                    and hc <= 3):
+                    and hc <= 6):
                 self._check_whipsaw(pos, price)
 
             # ── [V8-4] EE: 2-4h, -0.5% ──
@@ -1462,29 +1498,158 @@ class ConvergenceTrader:
 
     # ── 휩쏘(가짜돌파) 감지 ──
 
+    def _whipsaw_pre_filter(self, signal: dict) -> dict | None:
+        """
+        진입 전 휩쏘 사전 필터 (8점 만점).
+        돌파 봉 자체의 품질 + BTC 트렌드 역방향 + 스탑헌팅 패턴을 점검.
+
+        롱 가짜돌파: 하락장에서 급등 → squeeze_high 위로 튀었지만 윗꼬리 길고 거래량 부족
+        숏 가짜하락: 상승장에서 급락 → squeeze_low 아래로 튀었지만 아랫꼬리 길고 거래량 부족
+        """
+        candle = signal.get('_breakout_candle')
+        if not candle:
+            return None
+
+        d = signal['direction']
+        score = 0
+        reasons = []
+
+        o, h, l, c = candle['open'], candle['high'], candle['low'], candle['close']
+        body = abs(c - o)
+        full_range = h - l
+        if full_range <= 0:
+            return None
+
+        squeeze = signal.get('details', {}).get('squeeze', {})
+        sq_high = squeeze.get('squeeze_high', 0)
+        sq_low = squeeze.get('squeeze_low', 0)
+        sq_range = sq_high - sq_low if sq_high > sq_low else 0
+
+        # ── 1) 돌파 봉 꼬리 분석 (방향별) ──
+        if d == 'long':
+            upper_wick = h - max(o, c)
+            lower_wick = min(o, c) - l
+            # 윗꼬리가 바디보다 길면 = 매도 거부 (가짜돌파)
+            if body > 0 and upper_wick / body > 1.5:
+                score += 2
+                reasons.append(f"윗꼬리 과대 (꼬리/바디 {upper_wick/body:.1f}배) — 매도압력")
+            elif body > 0 and upper_wick / body > 0.8:
+                score += 1
+                reasons.append(f"윗꼬리 경고 (꼬리/바디 {upper_wick/body:.1f}배)")
+            # squeeze_high 위로 살짝만 돌파한 경우 (스탑헌팅 의심)
+            if sq_high > 0 and c > sq_high:
+                penetration = (c - sq_high) / sq_range * 100 if sq_range > 0 else 0
+                if penetration < 10:
+                    score += 1
+                    reasons.append(f"돌파 깊이 미미 ({penetration:.0f}%) — 스탑헌팅 의심")
+        else:  # short
+            lower_wick = min(o, c) - l
+            upper_wick = h - max(o, c)
+            # 아랫꼬리가 바디보다 길면 = 매수 거부 (가짜하락)
+            if body > 0 and lower_wick / body > 1.5:
+                score += 2
+                reasons.append(f"아랫꼬리 과대 (꼬리/바디 {lower_wick/body:.1f}배) — 매수압력")
+            elif body > 0 and lower_wick / body > 0.8:
+                score += 1
+                reasons.append(f"아랫꼬리 경고 (꼬리/바디 {lower_wick/body:.1f}배)")
+            # squeeze_low 아래로 살짝만 돌파한 경우
+            if sq_low > 0 and c < sq_low:
+                penetration = (sq_low - c) / sq_range * 100 if sq_range > 0 else 0
+                if penetration < 10:
+                    score += 1
+                    reasons.append(f"돌파 깊이 미미 ({penetration:.0f}%) — 스탑헌팅 의심")
+
+        # ── 2) 돌파 봉 바디 비율 ──
+        body_ratio = body / full_range
+        if body_ratio < 0.2:
+            score += 1
+            reasons.append(f"도지 캔들 (바디 {body_ratio:.0%}) — 방향 미확정")
+
+        # ── 3) BTC 트렌드 역방향 ──
+        if self.btc_trend:
+            bt = self.btc_trend.trend
+            if d == 'long' and bt <= -2:
+                score += 2
+                reasons.append(f"하락장 롱 돌파 ({self.btc_trend.trend_name}) — 숏스퀴즈 가능성")
+            elif d == 'long' and bt == -1:
+                score += 1
+                reasons.append(f"약세장 롱 돌파 ({self.btc_trend.trend_name})")
+            elif d == 'short' and bt >= 2:
+                score += 2
+                reasons.append(f"상승장 숏 돌파 ({self.btc_trend.trend_name}) — 롱스퀴즈 가능성")
+            elif d == 'short' and bt == 1:
+                score += 1
+                reasons.append(f"약상승장 숏 돌파 ({self.btc_trend.trend_name})")
+
+        # ── 4) 직전 3봉 패턴: 저거래량 횡보 → 돌파 = 유동성 사냥 ──
+        prev3_vol = signal.get('_prev3_avg_vol', 0)
+        prev3_range = signal.get('_prev3_avg_range', 0)
+        if prev3_vol > 0 and candle['volume'] > 0:
+            vol_spike = candle['volume'] / prev3_vol
+            # 돌파 봉 거래량이 직전 3봉 대비 낮으면 의심
+            if vol_spike < 0.7:
+                score += 1
+                reasons.append(f"돌파 거래량 부족 (직전3봉 대비 ×{vol_spike:.1f})")
+        if prev3_range > 0 and full_range > prev3_range * 3:
+            score += 1
+            reasons.append(f"급변동 (직전3봉 대비 레인지 {full_range/prev3_range:.1f}배) — 팍 튀는 패턴")
+
+        if score == 0:
+            return None
+        return {'score': score, 'reasons': reasons}
+
     def _check_whipsaw(self, pos: Position, price: float):
         """
-        가짜돌파 감지: 돌파 후 스퀴즈 범위 복귀 + 거래량/캔들구조/OI 종합 점수.
-        스코어 3점 이상 시 텔레그램 경고 알림.
+        진입 후 휩쏘 감지: 6캔들 내 스퀴즈 복귀 + 방향별 구체적 패턴 분석.
+        스코어 3점 이상 시 텔레그램 경고 알림 (10점 만점).
+
+        롱 포지션: 가짜돌파 — 가격이 squeeze_high 위로 갔다가 다시 내려옴
+        숏 포지션: 가짜하락 — 가격이 squeeze_low 아래로 갔다가 다시 올라옴
         """
-        # 1) 스퀴즈 복귀 체크: 가격이 스퀴즈 범위 안으로 돌아왔는지
-        in_squeeze = pos.squeeze_low <= price <= pos.squeeze_high
-        if not in_squeeze:
-            return
+        # 방향별 스퀴즈 복귀 체크
+        if pos.direction == 'long':
+            # 롱: 가격이 squeeze_high 아래로 되돌아왔으면 가짜돌파 의심
+            if price > pos.squeeze_high:
+                return  # 아직 돌파 유지 중 → 정상
+        else:
+            # 숏: 가격이 squeeze_low 위로 되돌아왔으면 가짜하락 의심
+            if price < pos.squeeze_low:
+                return  # 아직 돌파 유지 중 → 정상
 
         score = 0
         details = []
         ohlcv = None
+        hc = pos.hold_candles_15m()
 
-        # 2) 거래량 체크: 현재 거래량이 돌파 시 대비 낮으면 가짜돌파 의심
+        # ── 1) 되돌림 깊이 (방향별) ──
+        if pos.direction == 'long':
+            if price <= pos.squeeze_low:
+                score += 3
+                details.append(f"완전 복귀 — 스퀴즈 하단 이하 (가짜돌파 확정)")
+            elif price <= (pos.squeeze_high + pos.squeeze_low) / 2:
+                score += 2
+                details.append(f"스퀴즈 중심 이하로 되돌림 (깊은 복귀)")
+            else:
+                score += 1
+                details.append(f"스퀴즈 상단 이하 복귀 (얕은 되돌림)")
+        else:  # short
+            if price >= pos.squeeze_high:
+                score += 3
+                details.append(f"완전 복귀 — 스퀴즈 상단 이상 (가짜하락 확정)")
+            elif price >= (pos.squeeze_high + pos.squeeze_low) / 2:
+                score += 2
+                details.append(f"스퀴즈 중심 이상으로 되돌림 (깊은 복귀)")
+            else:
+                score += 1
+                details.append(f"스퀴즈 하단 이상 복귀 (얕은 되돌림)")
+
+        # ── 2) 거래량 분석 ──
         try:
             ohlcv = self.exchange.fetch_ohlcv(pos.symbol, '15m', limit=5)
             if ohlcv and len(ohlcv) >= 2:
-                cur_vol = float(ohlcv[-1][5])
-                prev_vol = float(ohlcv[-2][5])
                 avg_vol = sum(float(r[5]) for r in ohlcv) / len(ohlcv)
                 if avg_vol > 0:
-                    cur_ratio = cur_vol / avg_vol
+                    cur_ratio = float(ohlcv[-1][5]) / avg_vol
                     if pos.entry_volume_ratio > 0 and cur_ratio < pos.entry_volume_ratio * 0.5:
                         score += 2
                         details.append(f"거래량 급감 (현재×{cur_ratio:.1f} vs 진입×{pos.entry_volume_ratio:.1f})")
@@ -1494,65 +1659,91 @@ class ConvergenceTrader:
         except Exception:
             pass
 
-        # 3) 캔들 구조: 긴 꼬리 = 거부 반응 (되돌림 확인)
+        # ── 3) 캔들 구조 (방향별) ──
         try:
             if ohlcv and len(ohlcv) >= 1:
-                o, h, l, c = float(ohlcv[-1][1]), float(ohlcv[-1][2]), float(ohlcv[-1][3]), float(ohlcv[-1][4])
+                o, h, l, c = (float(ohlcv[-1][1]), float(ohlcv[-1][2]),
+                              float(ohlcv[-1][3]), float(ohlcv[-1][4]))
                 body = abs(c - o)
                 full_range = h - l
                 if full_range > 0:
-                    body_ratio = body / full_range
-                    if body_ratio < 0.3:
-                        score += 1
-                        details.append(f"도지/긴꼬리 캔들 (바디 {body_ratio:.0%})")
-                    if pos.direction == 'long' and c < o:
-                        score += 1
-                        details.append("음봉 (롱 방향 반대)")
-                    elif pos.direction == 'short' and c > o:
-                        score += 1
-                        details.append("양봉 (숏 방향 반대)")
+                    if pos.direction == 'long':
+                        upper_wick = h - max(o, c)
+                        if body > 0 and upper_wick / body > 1.0:
+                            score += 1
+                            details.append(f"윗꼬리 캔들 — 매도 압력 지속")
+                        if c < o:
+                            score += 1
+                            details.append(f"음봉 — 롱 포지션에 불리")
+                    else:
+                        lower_wick = min(o, c) - l
+                        if body > 0 and lower_wick / body > 1.0:
+                            score += 1
+                            details.append(f"아랫꼬리 캔들 — 매수 압력 지속")
+                        if c > o:
+                            score += 1
+                            details.append(f"양봉 — 숏 포지션에 불리")
         except Exception:
             pass
 
-        # 4) OI 변화: OI 감소 = 포지션 청산 = 추세 약화
-        oi_info = ""
+        # ── 4) OI 변화 (방향별 해석) ──
         try:
             cg = getattr(self.onchain, '_cg', None)
             clean_sym = pos.symbol.replace('/USDT','').replace('USDT','').replace('1000','')
             oi = cg.get_oi_change(clean_sym, "1h") if cg else None
             if oi:
                 change = oi.get('change_pct', 0)
-                if change < -1.0:
-                    score += 2
-                    oi_info = f"OI {change:+.1f}% (대량 이탈)"
-                    details.append(oi_info)
-                elif change < -0.3:
-                    score += 1
-                    oi_info = f"OI {change:+.1f}% (감소)"
-                    details.append(oi_info)
+                if pos.direction == 'long':
+                    # 롱 가짜돌파: OI 감소 = 롱 청산 진행 = 돌파 실패
+                    if change < -1.0:
+                        score += 2
+                        details.append(f"OI {change:+.1f}% 급감 — 롱 포지션 청산 진행")
+                    elif change < -0.3:
+                        score += 1
+                        details.append(f"OI {change:+.1f}% 감소 — 추세 약화")
                 else:
-                    oi_info = f"OI {change:+.1f}%"
+                    # 숏 가짜하락: OI 감소 = 숏 청산 진행 = 하락 실패
+                    if change < -1.0:
+                        score += 2
+                        details.append(f"OI {change:+.1f}% 급감 — 숏 포지션 청산 진행")
+                    elif change < -0.3:
+                        score += 1
+                        details.append(f"OI {change:+.1f}% 감소 — 하락 추세 약화")
         except Exception:
             pass
+
+        # ── 5) 되돌림 속도: 빠른 복귀일수록 위험 ──
+        if hc <= 1 and score >= 2:
+            score += 1
+            details.append(f"1캔들 내 급속 복귀 — 스탑헌팅 패턴")
 
         # 스코어 3점 이상: 휩쏘 경고
         if score >= 3:
             pos.whipsaw_alerted = True
             self._save_positions()
+            if pos.direction == 'long':
+                label = "가짜돌파"
+                icon = "📉"
+                tip = "스퀴즈 상단 이탈이 실패 → SL 조기 청산 또는 사이즈 축소 고려"
+            else:
+                label = "가짜하락"
+                icon = "📈"
+                tip = "스퀴즈 하단 이탈이 실패 → SL 조기 청산 또는 사이즈 축소 고려"
             kr_dir = "롱" if pos.direction == 'long' else "숏"
             roe_lev = pos.current_roe_lev(price)
             sq_range = f"{pos.squeeze_low:,.6f} ~ {pos.squeeze_high:,.6f}"
             detail_str = "\n".join(f"  • {d}" for d in details)
-            msg = (f"⚠️ 휩쏘(가짜돌파) 감지 | {kr_dir} {pos.symbol}\n"
+            msg = (f"{icon} {label} 감지 | {kr_dir} {pos.symbol}\n"
                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                   f"위험 스코어: {score}/7\n"
+                   f"위험 스코어: {score}/10\n"
                    f"{detail_str}\n"
                    f"━━━━━━━━━━━━━━━━━━━━\n"
                    f"현재가: {price:,.6f} (ROE {roe_lev:+.0f}%)\n"
+                   f"진입가: {pos.entry_price:,.6f}\n"
                    f"스퀴즈: {sq_range}\n"
-                   f"보유: {pos.hold_candles_15m()}캔들\n"
+                   f"보유: {hc}캔들 ({pos.hold_h():.1f}시간)\n"
                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                   f"💡 SL 조기 청산 또는 수동 확인 권장")
+                   f"💡 {tip}")
             self.tg.send(msg)
 
     # ── 청산 ──
