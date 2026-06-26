@@ -2856,6 +2856,11 @@ class ConvergenceTrader:
                 "  예: /스퀴즈 BTC, /스퀴즈 ETH\n"
                 "/스퀴즈감시 <코인> — 1분마다 감시, 소진 100%시 알람\n"
                 "  예: /스퀴즈감시 BTC (해제: /스퀴즈감시해제 BTC)\n"
+                "/휩쏘 — 전체 포지션 휩쏘 감지 현황\n"
+                "/휩쏘체크 <코인> — 특정 포지션 상세 휩쏘 분석\n"
+                "  예: /휩쏘체크 ETH\n"
+                "/휩쏘리셋 [코인] — 휩쏘 알림 리셋 (재감시)\n"
+                "  예: /휩쏘리셋 ETH, /휩쏘리셋 (전체)\n"
                 "/help — 이 도움말"
             )
             return
@@ -3369,6 +3374,207 @@ class ConvergenceTrader:
                         f"승률 {c['winrate']:.0%} ({c['trades']}건)"
                     )
             self.tg.send("\n".join(lines))
+            return
+
+        # /휩쏘 — 전체 포지션 휩쏘 상태 조회 + 수동 체크
+        if text_lower in ("/휩쏘", "/whipsaw"):
+            if not self.positions:
+                self.tg.send("📭 보유 포지션 없음")
+                return
+            lines = ["🔍 휩쏘 감지 현황", f"{'━' * 20}"]
+            for pos in self.positions:
+                price = self.executor.price(pos.symbol)
+                if price <= 0:
+                    continue
+                kr_dir = "롱" if pos.direction == 'long' else "숏"
+                roe_lev = pos.current_roe_lev(price)
+                hc = pos.hold_candles_15m()
+
+                # 스퀴즈 범위 대비 현재가 위치
+                if pos.squeeze_high > 0 and pos.squeeze_low > 0:
+                    sq_range = pos.squeeze_high - pos.squeeze_low
+                    if pos.direction == 'long':
+                        if price > pos.squeeze_high:
+                            dist = (price - pos.squeeze_high) / sq_range * 100
+                            status = f"✅ 돌파유지 (+{dist:.0f}%)"
+                        elif price > (pos.squeeze_high + pos.squeeze_low) / 2:
+                            status = "⚠️ 상단 복귀 (얕은 되돌림)"
+                        elif price > pos.squeeze_low:
+                            status = "🔴 중심 이하 (깊은 되돌림)"
+                        else:
+                            status = "🚨 완전복귀 (가짜돌파)"
+                    else:
+                        if price < pos.squeeze_low:
+                            dist = (pos.squeeze_low - price) / sq_range * 100
+                            status = f"✅ 돌파유지 (+{dist:.0f}%)"
+                        elif price < (pos.squeeze_high + pos.squeeze_low) / 2:
+                            status = "⚠️ 하단 복귀 (얕은 되돌림)"
+                        elif price < pos.squeeze_high:
+                            status = "🔴 중심 이상 (깊은 되돌림)"
+                        else:
+                            status = "🚨 완전복귀 (가짜하락)"
+                else:
+                    status = "ℹ️ 스퀴즈 데이터 없음"
+
+                alerted = "알림완료" if pos.whipsaw_alerted else "감시중" if hc <= 6 else "감시종료"
+                lines.append(
+                    f"\n{kr_dir} {pos.symbol} (ROE {roe_lev:+.0f}%)\n"
+                    f"  {status}\n"
+                    f"  스퀴즈: {pos.squeeze_low:,.4f} ~ {pos.squeeze_high:,.4f}\n"
+                    f"  현재가: {price:,.4f} | {hc}캔들 | {alerted}"
+                )
+
+            # OI 정보 추가
+            cg = getattr(self.onchain, '_cg', None)
+            if cg:
+                lines.append(f"\n{'━' * 20}\n📊 OI 변화:")
+                for pos in self.positions:
+                    try:
+                        clean = pos.symbol.replace('/USDT','').replace('USDT','').replace('1000','')
+                        oi = cg.get_oi_change(clean, "1h")
+                        if oi:
+                            change = oi['change_pct']
+                            trend = "📈" if change > 0.5 else "📉" if change < -0.5 else "➡️"
+                            lines.append(f"  {clean}: {trend} OI {change:+.1f}%")
+                    except Exception:
+                        pass
+
+            self.tg.send("\n".join(lines))
+            return
+
+        # /휩쏘체크 <코인> — 특정 포지션 상세 휩쏘 분석
+        if text_lower.startswith(("/휩쏘체크", "/whipsawcheck")):
+            sym = self._parse_symbol(text)
+            if not sym:
+                self.tg.send("사용법: /휩쏘체크 <코인>\n예: /휩쏘체크 ETH")
+                return
+            pos = next((p for p in self.positions if p.symbol == sym), None)
+            if not pos:
+                self.tg.send(f"❌ {sym} 포지션 없음")
+                return
+
+            price = self.executor.price(pos.symbol)
+            if price <= 0:
+                self.tg.send(f"❌ {sym} 가격 조회 실패")
+                return
+
+            kr_dir = "롱" if pos.direction == 'long' else "숏"
+            roe_lev = pos.current_roe_lev(price)
+            hc = pos.hold_candles_15m()
+
+            lines = [
+                f"🔍 휩쏘 상세 분석 | {kr_dir} {sym}",
+                f"{'━' * 20}",
+            ]
+
+            # 스퀴즈 위치 분석
+            if pos.squeeze_high > 0:
+                sq_mid = (pos.squeeze_high + pos.squeeze_low) / 2
+                sq_range = pos.squeeze_high - pos.squeeze_low
+                lines.append(f"📐 스퀴즈 범위:")
+                lines.append(f"  상단: {pos.squeeze_high:,.6f}")
+                lines.append(f"  중심: {sq_mid:,.6f}")
+                lines.append(f"  하단: {pos.squeeze_low:,.6f}")
+                lines.append(f"  레인지: {sq_range:,.6f} ({sq_range/price*100:.2f}%)")
+
+                if pos.direction == 'long':
+                    if price > pos.squeeze_high:
+                        dist_pct = (price - pos.squeeze_high) / sq_range * 100
+                        lines.append(f"\n✅ 돌파 유지 중 (상단 대비 +{dist_pct:.0f}%)")
+                    else:
+                        lines.append(f"\n🔴 스퀴즈 복귀 — 가짜돌파 의심")
+                else:
+                    if price < pos.squeeze_low:
+                        dist_pct = (pos.squeeze_low - price) / sq_range * 100
+                        lines.append(f"\n✅ 돌파 유지 중 (하단 대비 +{dist_pct:.0f}%)")
+                    else:
+                        lines.append(f"\n🔴 스퀴즈 복귀 — 가짜하락 의심")
+
+            # 거래량 분석
+            try:
+                ohlcv = self.exchange.fetch_ohlcv(sym, '15m', limit=5)
+                if ohlcv and len(ohlcv) >= 2:
+                    avg_vol = sum(float(r[5]) for r in ohlcv) / len(ohlcv)
+                    cur_vol = float(ohlcv[-1][5])
+                    cur_ratio = cur_vol / avg_vol if avg_vol > 0 else 0
+                    vol_icon = "✅" if cur_ratio >= 1.0 else "⚠️" if cur_ratio >= 0.5 else "🔴"
+                    lines.append(f"\n📊 거래량:")
+                    lines.append(f"  현재: ×{cur_ratio:.1f} (5봉 평균 대비)")
+                    lines.append(f"  진입시: ×{pos.entry_volume_ratio:.1f}")
+                    lines.append(f"  {vol_icon} {'정상' if cur_ratio >= 1.0 else '부족' if cur_ratio >= 0.5 else '급감'}")
+
+                    # 캔들 구조
+                    o, h, l, c = (float(ohlcv[-1][1]), float(ohlcv[-1][2]),
+                                  float(ohlcv[-1][3]), float(ohlcv[-1][4]))
+                    body = abs(c - o)
+                    full_range = h - l
+                    if full_range > 0:
+                        body_pct = body / full_range * 100
+                        upper_w = (h - max(o, c)) / full_range * 100
+                        lower_w = (min(o, c) - l) / full_range * 100
+                        candle_type = "양봉 📈" if c > o else "음봉 📉" if c < o else "도지 ➡️"
+                        lines.append(f"\n🕯️ 현재 캔들: {candle_type}")
+                        lines.append(f"  바디: {body_pct:.0f}% | 윗꼬리: {upper_w:.0f}% | 아랫꼬리: {lower_w:.0f}%")
+                        if pos.direction == 'long' and upper_w > 50:
+                            lines.append(f"  🔴 윗꼬리 과대 — 매도 압력")
+                        elif pos.direction == 'short' and lower_w > 50:
+                            lines.append(f"  🔴 아랫꼬리 과대 — 매수 압력")
+            except Exception:
+                pass
+
+            # OI 분석
+            try:
+                cg = getattr(self.onchain, '_cg', None)
+                clean = sym.replace('/USDT','').replace('USDT','').replace('1000','')
+                oi = cg.get_oi_change(clean, "1h") if cg else None
+                if oi:
+                    change = oi['change_pct']
+                    oi_icon = "📈" if change > 0.5 else "📉" if change < -0.5 else "➡️"
+                    lines.append(f"\n📈 OI (미결제약정):")
+                    lines.append(f"  변화: {oi_icon} {change:+.1f}%")
+                    if pos.direction == 'long' and change < -0.5:
+                        lines.append(f"  ⚠️ OI 감소 — 롱 포지션 청산 진행 가능성")
+                    elif pos.direction == 'short' and change < -0.5:
+                        lines.append(f"  ⚠️ OI 감소 — 숏 포지션 청산 진행 가능성")
+                    elif change > 1.0:
+                        lines.append(f"  ✅ OI 증가 — 신규 포지션 유입 (추세 지속)")
+            except Exception:
+                pass
+
+            # 종합 판정
+            lines.append(f"\n{'━' * 20}")
+            lines.append(f"현재가: {price:,.6f} | ROE: {roe_lev:+.0f}%")
+            lines.append(f"보유: {hc}캔들 ({pos.hold_h():.1f}시간)")
+            alerted = "✅ 알림 발송됨" if pos.whipsaw_alerted else "감시 중" if hc <= 6 else "감시 종료"
+            lines.append(f"상태: {alerted}")
+
+            self.tg.send("\n".join(lines))
+            return
+
+        # /휩쏘리셋 <코인> — 휩쏘 알림 리셋 (재감시)
+        if text_lower.startswith(("/휩쏘리셋", "/whipsawreset")):
+            sym = self._parse_symbol(text)
+            if not sym:
+                # 전체 리셋
+                reset_count = 0
+                for pos in self.positions:
+                    if pos.whipsaw_alerted:
+                        pos.whipsaw_alerted = False
+                        reset_count += 1
+                if reset_count > 0:
+                    self._save_positions()
+                    self.tg.send(f"🔄 휩쏘 알림 리셋: {reset_count}개 포지션 재감시 시작")
+                else:
+                    self.tg.send("ℹ️ 리셋할 포지션 없음 (이미 감시 중)")
+                return
+            pos = next((p for p in self.positions if p.symbol == sym), None)
+            if not pos:
+                self.tg.send(f"❌ {sym} 포지션 없음")
+                return
+            pos.whipsaw_alerted = False
+            self._save_positions()
+            kr_dir = "롱" if pos.direction == 'long' else "숏"
+            self.tg.send(f"🔄 {kr_dir} {sym} 휩쏘 알림 리셋 — 재감시 시작")
             return
 
     def _parse_symbol(self, text: str) -> str:
