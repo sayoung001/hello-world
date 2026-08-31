@@ -77,6 +77,10 @@ def screen_universe(
     stock_sector_etf = stock_sector_etf or {}
     sector_status = sector_status or {}
 
+    # 횡단면 모멘텀 — 유니버스 전체를 한 번에 계산해 상대 순위를 매긴다
+    from stock_auto.strategy.cross_sectional import momentum_features
+    mom = momentum_features(ohlcv_map)
+
     rows: list[dict] = []
     exit_rows: list[dict] = []
     failures: dict[str, str] = {}
@@ -133,6 +137,12 @@ def screen_universe(
                 "close": float(last["Close"]),
                 "rsi_14": float(last.get("rsi_14", 0.0)),
                 "adx": float(last.get("adx", 0.0)),
+                "atr": float(last.get("atr", 0.0)),
+                "rvol": float(last.get("rvol", 0.0)),
+                # 횡단면 모멘텀 (Gu·Kelly·Xiu가 지목한 세 축 중 모멘텀)
+                "mom_rank": mom.get(symbol, {}).get("mom_rank"),
+                "mom_12_1": mom.get(symbol, {}).get("mom_12_1"),
+                "mom_vol_adj": mom.get(symbol, {}).get("mom_vol_adj"),
                 "target": levels.get("target"),
                 "stop": levels.get("stop"),
                 "rr_ratio": levels.get("rr_ratio"),

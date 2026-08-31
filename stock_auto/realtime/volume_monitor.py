@@ -285,9 +285,12 @@ class SurgeMonitor:
         eval_windows: tuple[int, ...] = EVAL_WINDOWS_MIN,
         cooldown_sec: int = DEDUP_COOLDOWN_SEC,
         on_observation: Optional[Callable[[TickSnapshot, int], None]] = None,
+        threshold_provider: Optional[Callable[[Market, int], SurgeThresholds]] = None,
     ):
         self.profiles = profiles
         self.thresholds = thresholds
+        # 적응형 임계(실측 분위수). None이면 고정 thresholds 사용
+        self.threshold_provider = threshold_provider
         self.on_signal = on_signal or (lambda s: print(s.to_telegram()))
         self.eval_windows = eval_windows
         self.cooldown_sec = cooldown_sec
@@ -356,7 +359,9 @@ class SurgeMonitor:
             trade_count_1m_ago=count_1m,
             secs_since_prev_count=secs,
         )
-        th = self.thresholds[snap.market]
+        th = (self.threshold_provider(snap.market, window)
+              if self.threshold_provider is not None
+              else self.thresholds[snap.market])
         surge, reasons = is_surge(metrics, th)
         if not surge:
             return None

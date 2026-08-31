@@ -94,11 +94,31 @@ def run_daily(
             sector_label_map=sector_label_map, top_n=top_n)
         print(f"[batch] 추천 {len(result.agents.recommendations)}건 생성")
 
+    # 3.5) 결과 라벨링 루프: 추천 전 건을 기록 (실행 여부 무관 — 선택 편향 방지)
+    try:
+        n = _record_signals(result)
+        print(f"[batch] 신호 기록 {n}건 적립 (라벨링 대기)")
+    except Exception as e:  # noqa: BLE001 — 기록 실패가 배치를 막지 않게
+        print(f"[batch] 신호 기록 실패: {type(e).__name__}: {e}")
+
     # 4) Notion 게시
     if notion is not None and getattr(notion, "enabled", False):
         _publish_notion(notion, notion_db_id, notion_parent_page,
                         result, sector_label_map or {})
     return result
+
+
+def _record_signals(result: BatchResult) -> int:
+    """추천 후보를 신호 저장소에 적립 → labeler가 나중에 결과를 붙인다."""
+    from stock_auto.tracking import store
+    if result.screen.candidates.empty:
+        return 0
+    by_ticker = {r.get("ticker"): r for r in result.agents.recommendations}
+    records = [
+        store.from_screen_row(row, result.date, by_ticker.get(row.get("symbol")))
+        for row in result.screen.candidates.to_dict("records")
+    ]
+    return store.append(records)
 
 
 def _publish_notion(notion, db_id, parent_page, result: BatchResult,

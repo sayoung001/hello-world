@@ -10,3 +10,5 @@ data/shadow_logs/
 data/memory/
 data/profiles/
 data/ohlcv_cache/
+data/tracking/
+data/observations/

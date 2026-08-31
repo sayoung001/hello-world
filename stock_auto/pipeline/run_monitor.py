@@ -52,6 +52,10 @@ def main() -> int:
     ap.add_argument("--market", choices=["US", "KR"], default="KR")
     ap.add_argument("--symbols", nargs="*", help="감시 종목(미지정 시 유니버스 샘플)")
     ap.add_argument("--us-exchange", default="NAS", choices=["NAS", "NYS", "AMS"])
+    ap.add_argument("--quantile", type=float, default=0.99,
+                    help="적응 임계 분위수 (0.99 = 상위 1%%)")
+    ap.add_argument("--fixed-thresholds", action="store_true",
+                    help="적응 임계 끄고 고정 임계 사용")
     args = ap.parse_args()
 
     market = Market(args.market)
@@ -77,10 +81,30 @@ def main() -> int:
             snap.market, snap.ts.strftime("%Y-%m-%d"), snap.symbol,
             window, snap.cum_volume, snap.cum_turnover)
 
+    # 적응형 임계: 실측 RVOL 분포의 상위 분위수를 컷으로. 표본 부족 시 고정 임계 폴백
+    provider = None
+    if not args.fixed_thresholds:
+        from stock_auto.realtime.adaptive_thresholds import build
+        at = build(market, profiles, quantile=args.quantile)
+        print("[monitor] " + at.summary())
+        provider = at.provider()
+
+    # 알림도 결과 라벨링 대상 — 정밀도를 측정하려면 전 건을 기록해야 한다
+    from stock_auto.tracking import store as sig_store
+    tg_send = surge_alert_callback(tg) if tg.enabled else (lambda s: print(s.to_telegram()))
+
+    def _on_signal(sig):
+        tg_send(sig)
+        try:
+            sig_store.append([sig_store.from_surge_signal(
+                sig, sig.ts.strftime("%Y-%m-%d"))])
+        except Exception as e:  # noqa: BLE001
+            print(f"[monitor] 알림 기록 실패: {type(e).__name__}: {e}")
+
     monitor = SurgeMonitor(
         profiles, thresholds=DEFAULT_THRESHOLDS,
-        on_signal=surge_alert_callback(tg) if tg.enabled else None,
-        on_observation=_record)
+        on_signal=_on_signal, on_observation=_record,
+        threshold_provider=provider)
 
     feed = KISFeed(sec.kis_app_key, sec.kis_app_secret, market,
                    env=sec.kis_env, us_exchange=args.us_exchange)
