@@ -19,13 +19,18 @@ sector_analysis.py — 섹터 분석 모듈
 
 import pandas as pd
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # 서버환경 호환
-import matplotlib.pyplot as plt
 import os
 from datetime import datetime, timedelta
-from tqdm import tqdm
 import warnings
+
+# matplotlib / tqdm 은 차트·진행바 전용이므로 지연 로드한다.
+# 일일 배치가 diagnose_sector_status 만 쓰려고 이 모듈을 import 할 때
+# 차트 라이브러리까지 요구하면 배치가 불필요하게 무거워지고 설치 의존이 생긴다.
+def _plt():
+    import matplotlib
+    matplotlib.use('Agg')  # 서버환경 호환
+    import matplotlib.pyplot as plt
+    return plt
 
 warnings.filterwarnings('ignore')
 
@@ -124,6 +129,7 @@ def diagnose_sector_status(df, last_row, regime_info):
 def save_sector_chart(df, ticker, sector_name, status, status_score,
                       folder_path, hurdle, vp, regime_info):
     """섹터 차트 저장 (가격, 이평선, 볼린저, 매수신호, 매물대)"""
+    plt = _plt()
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 9),
                                     gridspec_kw={'height_ratios': [3, 1]})
 
@@ -221,6 +227,7 @@ def analyze_sectors(market='US', save_charts=True):
     start_date = (datetime.now() - timedelta(days=400)).strftime('%Y-%m-%d')
     results = []
 
+    from tqdm import tqdm
     for ticker, info in tqdm(tickers.items()):
         try:
             # 1. 데이터 다운로드
@@ -448,6 +455,7 @@ if __name__ == '__main__':
 
     # 폰트 설정 (Windows)
     try:
+        plt = _plt()
         plt.rcParams['font.family'] = 'Malgun Gothic'
         plt.rcParams['axes.unicode_minus'] = False
     except Exception:

@@ -31,6 +31,8 @@ def main() -> int:
     ap.add_argument("--live-universe", action="store_true",
                     help="FDR 상장목록 사용(기본은 샘플)")
     ap.add_argument("--top-n", type=int, default=15)
+    ap.add_argument("--no-sector", action="store_true",
+                    help="섹터 게이트 비활성 (섹터 ETF 다운로드 생략)")
     args = ap.parse_args()
 
     market = Market(args.market)
@@ -48,6 +50,22 @@ def main() -> int:
         print("[run] LLM 생략" +
               ("" if args.no_llm else " (ANTHROPIC_API_KEY 없음)"))
 
+    # 섹터 게이트 — 섹터 ETF 진단 → 하락위험(0) 섹터 종목 매수 차단
+    from stock_auto.sector.sector_status import (
+        compute_sector_status, labels_for_symbols, summary_lines)
+    sector_scores: dict[str, int] = {}
+    sector_labels: dict[str, str] = {}
+    if not args.no_sector:
+        sector_scores, sector_labels = compute_sector_status(market)
+        if sector_scores:
+            print(f"[run] 섹터 게이트 ON — {len(sector_scores)}개 진단")
+            for line in summary_lines(sector_scores, sector_labels, market):
+                print(f"       {line}")
+        else:
+            print("[run] 섹터 진단 실패 — 게이트 비활성으로 진행")
+    label_map = (labels_for_symbols(uni_map, sector_labels)
+                 if sector_labels else None)
+
     # Notion
     notion = NotionPublisher(token=sec.notion_token) if sec.has_notion else None
     if notion:
@@ -57,6 +75,10 @@ def main() -> int:
         market=market,
         universe=symbols,
         stock_sector_etf=uni_map,
+        sector_status=sector_scores or None,
+        sector_label_map=label_map,
+        sector_lines=(summary_lines(sector_scores, sector_labels, market)
+                      if sector_scores else None),
         llm_client=None,                 # base가 .env의 키로 실제 생성
         notion=notion,
         notion_db_id=sec.notion_reco_db_id or None,
@@ -80,6 +102,16 @@ def main() -> int:
         print(result.screen.candidates[cols].to_string(index=False))
     else:
         print("  매수 후보 없음 (매크로/섹터 게이트 또는 임계 미달)")
+
+    # 매도(청산) 신호 — 보유 종목 점검용
+    exits = result.screen.exits
+    print("\n===== 매도 신호 =====")
+    if exits is not None and not exits.empty:
+        for r in exits.itertuples():
+            print(f"  [EXIT] {r.symbol} — Exit_Score {r.exit_score}/5 · 종가 {r.close:,.2f}")
+        print("  ※ 보유 중인 종목이면 청산 조건을 점검하세요")
+    else:
+        print("  없음")
     return 0
 
 

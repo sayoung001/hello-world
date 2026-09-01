@@ -31,6 +31,7 @@ class BatchResult:
     date: str
     screen: ScreenResult
     agents: AgentPipelineResult = field(default_factory=AgentPipelineResult)
+    sector_lines: list[str] = field(default_factory=list)   # 섹터 현황 요약(게시용)
 
 
 def _load_map(symbols: list[str], market: Market, start: str,
@@ -52,6 +53,7 @@ def run_daily(
     stock_sector_etf: Optional[dict[str, str]] = None,
     sector_status: Optional[dict[str, int]] = None,
     sector_label_map: Optional[dict[str, str]] = None,
+    sector_lines: Optional[list[str]] = None,
     llm_client: Any = None,
     notion: Any = None,
     notion_db_id: Optional[str] = None,
@@ -85,7 +87,8 @@ def run_daily(
     print(f"[batch] {market.value} 매크로 L{screen.macro.level}({screen.macro.label}) "
           f"| 후보 {len(screen.candidates)} | 실패 {len(screen.failures)}")
 
-    result = BatchResult(market=market, date=today, screen=screen)
+    result = BatchResult(market=market, date=today, screen=screen,
+                         sector_lines=list(sector_lines or []))
 
     # 3) 추천 상위 N LLM 분석
     if run_llm and not screen.candidates.empty:
@@ -134,10 +137,16 @@ def _publish_notion(notion, db_id, parent_page, result: BatchResult,
     # 일자 요약
     if parent_page:
         sl = result.screen.scored_all
-        lines = [] if sl.empty else [
+        score_lines = [] if sl.empty else [
             f"{r.symbol}: Eff {r.effective_score:.2f} / 레짐 R{r.stock_regime}"
             for r in sl.head(10).itertuples()]
+        ex = result.screen.exits
+        exit_lines = [] if (ex is None or ex.empty) else [
+            f"{r.symbol}: Exit_Score {r.exit_score}/5 · 종가 {r.close:,.2f}"
+            for r in ex.itertuples()]
         blocks = daily_summary_blocks(
-            result.screen.macro.label, result.screen.macro.level, lines)
+            result.screen.macro.label, result.screen.macro.level,
+            score_lines, sector_lines=result.sector_lines or None,
+            exit_lines=exit_lines or None)
         notion.create_summary_page(
             parent_page, f"[{result.market.value}] {result.date} 분석", blocks)

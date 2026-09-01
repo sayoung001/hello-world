@@ -62,10 +62,27 @@ def _recalibrate_and_batch():
         if rest:
             build_and_save(rest, market)
         print(f"[daemon] {market.value} 프로파일: 실측 {len(emp)} / frac {len(rest)}")
-        # ② 추천 배치
+
+        # ② 섹터 게이트 — 하락위험 섹터 종목 매수 차단
+        from stock_auto.sector.sector_status import (
+            compute_sector_status, labels_for_symbols, summary_lines)
+        uni_map = load_universe(market)
+        try:
+            sec_scores, sec_labels = compute_sector_status(market)
+        except Exception as e:  # noqa: BLE001 — 섹터 실패가 배치를 막지 않게
+            print(f"[daemon] 섹터 진단 실패: {type(e).__name__}: {e}")
+            sec_scores, sec_labels = {}, {}
+        print(f"[daemon] {market.value} 섹터 게이트: {len(sec_scores)}개 진단")
+
+        # ③ 추천 배치
         notion = NotionPublisher(token=sec.notion_token) if sec.has_notion else None
         run_daily(market=market, universe=syms,
-                  stock_sector_etf=load_universe(market),
+                  stock_sector_etf=uni_map,
+                  sector_status=sec_scores or None,
+                  sector_label_map=(labels_for_symbols(uni_map, sec_labels)
+                                    if sec_labels else None),
+                  sector_lines=(summary_lines(sec_scores, sec_labels, market)
+                                if sec_scores else None),
                   notion=notion, notion_db_id=sec.notion_reco_db_id or None,
                   notion_parent_page=sec.notion_parent_page_id or None,
                   run_llm=sec.has_anthropic)
@@ -89,9 +106,33 @@ def _run_monitor_thread(market: Market, session_minutes: int):
         observation_store.record(snap.market, snap.ts.strftime("%Y-%m-%d"),
                                  snap.symbol, window, snap.cum_volume, snap.cum_turnover)
 
+    # 적응형 임계 — 실측 RVOL 분포의 상위 분위수. 표본 부족 시 고정 임계 폴백
+    try:
+        from stock_auto.realtime.adaptive_thresholds import build as build_at
+        at = build_at(market, profiles)
+        print("[daemon] " + at.summary())
+        provider = at.provider()
+    except Exception as e:  # noqa: BLE001 — 임계 산출 실패가 모니터를 막지 않게
+        print(f"[daemon] 적응 임계 산출 실패({type(e).__name__}) → 고정 임계 사용")
+        provider = None
+
+    # 알림도 결과 라벨링 대상 — 정밀도 측정을 위해 전 건 기록
+    from stock_auto.tracking import store as sig_store
+    tg_send = (surge_alert_callback(tg) if tg.enabled
+               else (lambda s: print(s.to_telegram())))
+
+    def _on_signal(sig):
+        tg_send(sig)
+        try:
+            sig_store.append([sig_store.from_surge_signal(
+                sig, sig.ts.strftime("%Y-%m-%d"))])
+        except Exception as e:  # noqa: BLE001
+            print(f"[daemon] 알림 기록 실패: {type(e).__name__}: {e}")
+
     monitor = SurgeMonitor(profiles, DEFAULT_THRESHOLDS,
-                           on_signal=surge_alert_callback(tg) if tg.enabled else None,
-                           on_observation=_record)
+                           on_signal=_on_signal,
+                           on_observation=_record,
+                           threshold_provider=provider)
     deadline = datetime.now() + timedelta(minutes=session_minutes)
     feed = KISFeed(sec.kis_app_key, sec.kis_app_secret, market, env=sec.kis_env,
                    should_stop=lambda: datetime.now() >= deadline)

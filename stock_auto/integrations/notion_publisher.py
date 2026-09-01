@@ -83,14 +83,23 @@ def _num(v: Any) -> Optional[float]:
 
 
 def daily_summary_blocks(macro_label: str, macro_level: int,
-                         sector_lines: list[str], disclaimer: bool = True) -> list:
+                         score_lines: list[str],
+                         sector_lines: Optional[list[str]] = None,
+                         exit_lines: Optional[list[str]] = None,
+                         disclaimer: bool = True) -> list:
     """일자 요약 페이지 본문 블록."""
-    blocks = [
-        _heading(f"매크로 레짐: {macro_label} (L{macro_level})"),
-        _heading("섹터 현황", level=3),
-    ]
-    for line in sector_lines:
+    blocks = [_heading(f"매크로 레짐: {macro_label} (L{macro_level})")]
+    if sector_lines:
+        blocks.append(_heading("섹터 현황", level=3))
+        for line in sector_lines:
+            blocks.append(_bullet(line))
+    blocks.append(_heading("종목 점수 상위", level=3))
+    for line in score_lines:
         blocks.append(_bullet(line))
+    if exit_lines:
+        blocks.append(_heading("매도 신호 — 보유 시 청산 점검", level=3))
+        for line in exit_lines:
+            blocks.append(_bullet(line))
     if disclaimer:
         blocks.append(_callout(
             "본 정보는 분석 보조용이며 투자 권유가 아닙니다. 투자 책임은 본인에게 있습니다."))
