@@ -47,32 +47,39 @@ def _cache_path(symbol: str, market: Market) -> Path:
     return CACHE_DIR / market.value / f"{symbol}.csv"
 
 
+def _meta_path(symbol: str, market: Market) -> Path:
+    return CACHE_DIR / market.value / f"{symbol}.meta.json"
+
+
 def download_ohlcv(
     symbol: str,
     start: str,
     end: Optional[str] = None,
     market: Market = Market.US,
-) -> pd.DataFrame:
-    """FDR → yfinance 순으로 일봉을 받아 표준 형식으로 반환."""
+) -> tuple[pd.DataFrame, str]:
+    """
+    일봉을 받아 (표준 DataFrame, 소스명)을 반환.
+
+    ★ US는 yfinance(auto_adjust=True)를 1차로 쓴다.
+      소스마다 수정주가 정책이 다르면 종목 간 점수 비교(횡단면 모멘텀·상대 순위)가
+      근본적으로 어긋난다. A는 FDR, B는 yfinance 같은 혼합을 막기 위해
+      **시장별로 우선순위를 고정**하고, 실제로 쓴 소스를 캐시에 기록한다.
+    """
     last_err: Optional[Exception] = None
-    # 1차 FDR
-    try:
-        import FinanceDataReader as fdr
-        df = fdr.DataReader(symbol, start, end)
-        if df is not None and len(df) > 0:
-            return _normalize(df)
-    except Exception as e:  # noqa: BLE001
-        last_err = e
-    # 2차 yfinance (미국)
-    if market == Market.US:
+    order = (("yfinance", "fdr") if market == Market.US else ("fdr", "yfinance"))
+    for src in order:
         try:
-            import yfinance as yf
-            df = yf.download(symbol, start=start, end=end, progress=False,
-                             auto_adjust=True)
-            if df is not None and len(df) > 0:
-                if isinstance(df.columns, pd.MultiIndex):
+            if src == "fdr":
+                import FinanceDataReader as fdr
+                df = fdr.DataReader(symbol, start, end)
+            else:
+                import yfinance as yf
+                df = yf.download(symbol, start=start, end=end, progress=False,
+                                 auto_adjust=True)
+                if df is not None and isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
-                return _normalize(df)
+            if df is not None and len(df) > 0:
+                return _normalize(df), src
         except Exception as e:  # noqa: BLE001
             last_err = e
     raise RuntimeError(f"{symbol} 다운로드 실패: {last_err}")
@@ -115,8 +122,14 @@ def load_or_download(
     ★ 캐시를 무조건 신뢰하면 매일 도는 배치가 첫날 데이터에 영원히 고정된다.
       (신호가 매일 동일 → 기록은 중복으로 걸러져 0건 적립 → 시스템이 멈춘 줄 모른다)
       따라서 '있어야 할 마지막 봉'과 캐시의 마지막 봉을 비교해 판단한다.
+
+    ★ 수정주가 정합성: 액면분할·배당이 발생하면 조정계수가 바뀐다. 캐시 앞부분은
+      옛 계수, 새로 받은 뒷부분은 새 계수가 되어 **시계열 중간에 인위적 가격 점프**가
+      생기고 ATR·모멘텀·MA 배열·레짐이 전부 오염된다. 배치는 정상 종료하며 아무도 모른다.
+      → 병합 전에 겹치는 날짜의 종가를 비교해 괴리가 크면 캐시를 통째로 버린다.
     """
     path = _cache_path(symbol, market)
+    prev_src = _read_meta(symbol, market)
     cached: Optional[pd.DataFrame] = None
     if use_cache and path.exists():
         try:
@@ -133,14 +146,87 @@ def load_or_download(
             if fresh and covers:
                 return cached
 
-    df = download_ohlcv(symbol, start, end, market)
+    df, src = download_ohlcv(symbol, start, end, market)
+    if cached is not None and not cached.empty:
+        if prev_src and prev_src != src:
+            print(f"[data] {symbol} 소스 변경 {prev_src}→{src} — 캐시 폐기 후 재구축")
+            cached = None
+        elif _adjustment_changed(cached, df, symbol):
+            cached = None
     if cached is not None and not cached.empty:
         # 과거 구간은 캐시를, 겹치는 날짜는 새로 받은 값을 우선한다
         df = pd.concat([cached, df])
         df = df[~df.index.duplicated(keep="last")].sort_index()
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path)
+    _write_meta(symbol, market, src, len(df),
+                pd.Timestamp(df.index[-1]).strftime("%Y-%m-%d"))
     return df
+
+
+# 겹치는 날짜의 종가가 이 비율 이상 다르면 조정계수가 바뀐 것으로 본다
+ADJUST_TOLERANCE = 0.005      # 0.5%
+
+
+def _adjustment_changed(cached: pd.DataFrame, fresh: pd.DataFrame,
+                        symbol: str) -> bool:
+    """겹치는 구간의 종가를 비교해 수정주가 계수 변경 여부를 판정."""
+    common = cached.index.intersection(fresh.index)
+    if len(common) < 5:
+        return False          # 겹치는 구간이 없으면 판정 불가 → 병합 진행
+    a = cached.loc[common, "Close"].astype(float)
+    b = fresh.loc[common, "Close"].astype(float)
+    denom = b.replace(0, pd.NA).abs()
+    diff = ((a - b).abs() / denom).dropna()
+    if diff.empty:
+        return False
+    worst = float(diff.max())
+    if worst > ADJUST_TOLERANCE:
+        print(f"[data] ⚠️ {symbol} 수정주가 불일치 최대 {worst * 100:.2f}% "
+              f"(허용 {ADJUST_TOLERANCE * 100:.1f}%) — 분할/배당 조정으로 보고 캐시 폐기")
+        return True
+    return False
+
+
+def _write_meta(symbol: str, market: Market, source: str,
+                rows: int, last_bar: str) -> None:
+    import json
+    from stock_auto.config.clock import now_et
+    p = _meta_path(symbol, market)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({
+        "symbol": symbol, "market": market.value, "source": source,
+        "rows": rows, "last_bar": last_bar,
+        "updated_at": now_et().strftime("%Y-%m-%d %H:%M %Z"),
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def _read_meta(symbol: str, market: Market) -> Optional[str]:
+    """캐시를 만든 소스명. 없으면 None."""
+    import json
+    p = _meta_path(symbol, market)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8")).get("source")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def cache_sources(market: Market = Market.US) -> dict[str, int]:
+    """캐시된 종목들이 어느 소스에서 왔는지 집계 — 소스 혼합 점검용."""
+    import json
+    from collections import Counter
+    c: Counter = Counter()
+    base = CACHE_DIR / market.value
+    if not base.exists():
+        return {}
+    for p in base.glob("*.meta.json"):
+        try:
+            c[json.loads(p.read_text(encoding="utf-8")).get("source", "?")] += 1
+        except Exception:  # noqa: BLE001
+            c["?"] += 1
+    return dict(c)
 
 
 def make_synthetic(

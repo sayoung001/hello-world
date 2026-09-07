@@ -27,8 +27,14 @@ REGIME_LABEL = {0: "약세(관망)", 1: "하락초기", 2: "보합", 3: "상승�
 @dataclass
 class MacroRegime:
     market: Market
-    level: int                       # 종합 레짐(구성 지수 중 최소 = 보수적)
+    level: int                       # 종합 레짐(그룹 내 max → 그룹 간 min)
     per_index: dict[str, int] = field(default_factory=dict)
+    per_group: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def detail(self) -> str:
+        """'US500 R3 · IXIC R2 · QQQ R3' 형태 — 어떤 지수가 게이트를 막았는지 보이게."""
+        return " · ".join(f"{k} R{v}" for k, v in self.per_index.items()) or "지수 데이터 없음"
 
     @property
     def label(self) -> str:
@@ -59,8 +65,18 @@ def compute_macro_regime(index_ohlcv: dict[str, pd.DataFrame],
         ind = add_market_regime(ind)
         if "Regime" in ind.columns and len(ind) > 0:
             per[sym] = int(ind["Regime"].iloc[-1])
-    level = min(per.values()) if per else 2   # 데이터 없으면 중립 가정
-    return MacroRegime(market=market, level=level, per_index=per)
+
+    # 그룹 내부는 max(상관 지수는 한 표), 그룹 사이는 min(서로 다른 시장이므로 보수적 AND).
+    # 예: 나스닥종합(IXIC)과 QQQ는 사실상 같은 시장이라 둘을 각각 세면
+    #     나스닥에만 두 표를 주게 되어 게이트가 근거 없이 빡빡해진다.
+    groups = getattr(cfg, "index_groups", None) or tuple((s,) for s in cfg.index_symbols)
+    per_group: dict[str, int] = {}
+    for g in groups:
+        vals = [per[s] for s in g if s in per]
+        if vals:
+            per_group["/".join(g)] = max(vals)
+    level = min(per_group.values()) if per_group else 2   # 데이터 없으면 중립 가정
+    return MacroRegime(market=market, level=level, per_index=per, per_group=per_group)
 
 
 def macro_gate_ok(macro: MacroRegime) -> bool:

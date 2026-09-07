@@ -54,6 +54,8 @@ def run_daily(
     sector_status: Optional[dict[str, int]] = None,
     sector_label_map: Optional[dict[str, str]] = None,
     sector_lines: Optional[list[str]] = None,
+    earnings_blocked: Optional[dict[str, bool]] = None,
+    earnings_days: Optional[dict[str, Any]] = None,
     llm_client: Any = None,
     notion: Any = None,
     notion_db_id: Optional[str] = None,
@@ -83,9 +85,12 @@ def run_daily(
     # 2) 규칙 기반 스캔 (무토큰)
     screen = screen_universe(
         ohlcv_map, market, index_ohlcv=index_ohlcv, top_n=top_n,
-        stock_sector_etf=stock_sector_etf, sector_status=sector_status)
+        stock_sector_etf=stock_sector_etf, sector_status=sector_status,
+        earnings_blocked=earnings_blocked, earnings_days=earnings_days)
+    n_gated = 0 if screen.gated is None else len(screen.gated)
     print(f"[batch] {market.value} 매크로 L{screen.macro.level}({screen.macro.label}) "
-          f"| 후보 {len(screen.candidates)} | 실패 {len(screen.failures)}")
+          f"[{screen.macro.detail}] | 후보 {len(screen.candidates)} "
+          f"| 게이트 차단 {n_gated} | 실패 {len(screen.failures)}")
 
     result = BatchResult(market=market, date=today, screen=screen,
                          sector_lines=list(sector_lines or []))
@@ -124,9 +129,8 @@ def _record_signals(result: BatchResult) -> int:
     다르게 적어도(공백·대소문자·오기) 계획 필드가 조용히 유실되지 않는다.
     """
     from stock_auto.tracking import store
-    if result.screen.candidates.empty:
-        return 0
-    rows = result.screen.candidates.to_dict("records")
+    rows = ([] if result.screen.candidates.empty
+            else result.screen.candidates.to_dict("records"))
     recos = list(result.agents.recommendations)
     by_ticker = {r.get("ticker"): r for r in recos}
     records = []
@@ -134,6 +138,14 @@ def _record_signals(result: BatchResult) -> int:
         reco = recos[i] if i < len(recos) else by_ticker.get(row.get("symbol"))
         date = str(row.get("bar_date") or result.screen.as_of or result.date)
         records.append(store.from_screen_row(row, date, reco))
+
+    # 게이트에 막힌 원신호도 동일하게 기록한다(LLM 추천은 없다).
+    # 이게 없으면 하락장 구간 데이터가 통째로 비어 게이트의 실효성을 검증할 수 없다.
+    gated = result.screen.gated
+    if gated is not None and not gated.empty:
+        for row in gated.to_dict("records"):
+            date = str(row.get("bar_date") or result.screen.as_of or result.date)
+            records.append(store.from_screen_row(row, date, None))
     return store.append(records)
 
 

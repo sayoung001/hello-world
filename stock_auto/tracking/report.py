@@ -20,7 +20,10 @@ MOM_BINS = [(0.0, 0.25), (0.25, 0.50), (0.50, 0.75), (0.75, 1.01)]
 
 def _f(v) -> Optional[float]:
     try:
-        return None if v is None or v == "" else float(v)
+        if v is None or v == "":
+            return None
+        f = float(v)
+        return None if f != f else f     # NaN도 '값 없음'
     except (TypeError, ValueError):
         return None
 
@@ -165,22 +168,20 @@ def build_report(rows: list[dict], title: str = "신호 성과 리포트") -> st
                  f"{ss['avg_ret']:+.2f}% | {_fmt_pf(ss['pf'])} |")
     L += [""]
 
+    # ── 게이트 실효성 ──
+    L += _gate_section(labeled)
+
     # ── 실행 여부 ──
-    exec_rows = [r for r in labeled if r.get("executed")]
-    if exec_rows:
-        L += ["## 5. 실행 여부별 (선택 편향 점검)", "",
-              "| 실행 | 건수 | 승률 | 평균수익 |", "|---|---:|---:|---:|"]
-        for val in ("yes", "no"):
-            ss = _stats([r for r in exec_rows if r.get("executed") == val])
-            if ss["n"]:
-                L.append(f"| {val} | {ss['n']} | {ss['win_rate']:.0f}% | "
-                         f"{ss['avg_ret']:+.2f}% |")
-        L += ["",
-              "> 실행한 것과 안 한 것의 성과가 크게 다르면 "
-              "사람의 판단이 실제로 알파를 더하고 있다는 뜻입니다(또는 그 반대).", ""]
+    L += _triage_section(labeled, rows)
 
     # ── 다음 행동 ──
-    L += ["## 6. 다음 행동", ""]
+    L += ["## 7. 다음 행동", ""]
+    n_untriaged = sum(1 for r in rows
+                      if r.get("source") == "batch" and not r.get("gated_by")
+                      and not r.get("executed"))
+    if n_untriaged:
+        L += [f"- **실행 여부 미입력 {n_untriaged}건** — "
+              "`python -m stock_auto.pipeline.triage` (소급 입력 불가, 매일 처리 권장)"]
     if len(labeled) < 200:
         L += [f"- 표본 {len(labeled)}건 — 캘리브레이션 학습에는 **200건 이상** 권장. "
               f"수집 계속.", ]
@@ -190,6 +191,91 @@ def build_report(rows: list[dict], title: str = "신호 성과 리포트") -> st
     L += ["- 구간별 승률이 단조 증가하지 않으면 점수 가중치 재검토 필요",
           "- 폭주 알림 승률이 배치 추천보다 현저히 낮으면 임계값 상향 검토", ""]
     return "\n".join(L)
+
+
+def _gate_section(labeled: list[dict]) -> list[str]:
+    """
+    게이트(매크로/섹터/실적)가 실제로 손실을 막았는지.
+
+    차단분도 기록하기 때문에 비로소 가능한 비교다. 차단분의 성과가 통과분보다
+    좋다면 그 게이트는 수익 기회를 버리고 있다는 뜻이다.
+    """
+    passed = [r for r in labeled if not r.get("gated_by")]
+    blocked = [r for r in labeled if r.get("gated_by")]
+    L = ["## 5. 게이트 실효성 (통과분 vs 차단분)", ""]
+    if not blocked:
+        L += ["> 차단된 신호가 아직 라벨링되지 않았습니다. "
+              "게이트가 한 번도 발동하지 않았거나(상승장) 기록 기간이 짧습니다.", ""]
+        return L
+    L += ["| 구분 | 건수 | 승률 | 평균수익 | PF |", "|---|---:|---:|---:|---:|"]
+    for name, sub in (("게이트 통과(실제 추천)", passed), ("게이트 차단", blocked)):
+        s = _stats(sub)
+        if s["n"] == 0:
+            L.append(f"| {name} | 0 | – | – | – |")
+        else:
+            L.append(f"| {name} | {s['n']} | {s['win_rate']:.0f}% | "
+                     f"{s['avg_ret']:+.2f}% | {_fmt_pf(s['pf'])} |")
+    # 사유별
+    by_reason: dict[str, list] = defaultdict(list)
+    for r in blocked:
+        for reason in str(r.get("gated_by", "")).split(","):
+            if reason:
+                by_reason[reason].append(r)
+    if by_reason:
+        L += ["", "### 차단 사유별", "",
+              "| 사유 | 건수 | 승률 | 평균수익 |", "|---|---:|---:|---:|"]
+        label = {"macro": "매크로 레짐", "sector": "섹터 하락위험",
+                 "earnings": "실적 발표 임박"}
+        for reason in sorted(by_reason):
+            s = _stats(by_reason[reason])
+            if s["n"]:
+                L.append(f"| {label.get(reason, reason)} | {s['n']} | "
+                         f"{s['win_rate']:.0f}% | {s['avg_ret']:+.2f}% |")
+    ps, bs = _stats(passed), _stats(blocked)
+    if ps["n"] >= 20 and bs["n"] >= 20:
+        if bs["avg_ret"] > ps["avg_ret"]:
+            L += ["", "> ⚠️ **차단분의 성과가 통과분보다 좋습니다.** "
+                  "게이트가 수익 기회를 버리고 있을 수 있습니다 — 임계 완화를 검토하세요.", ""]
+        else:
+            L += ["", f"> 게이트가 평균 {ps['avg_ret'] - bs['avg_ret']:+.2f}%p 만큼 "
+                  "성과를 지키고 있습니다.", ""]
+    else:
+        L += ["", "> 양쪽 표본이 20건 이상 쌓여야 판단할 수 있습니다.", ""]
+    return L
+
+
+def _triage_section(labeled: list[dict], all_rows: list[dict]) -> list[str]:
+    """사람의 실행 판단이 알파를 더하는가 — 반자동 시스템의 핵심 지표."""
+    L = ["## 6. 실행 여부별 (선택 편향 점검)", ""]
+    exec_rows = [r for r in labeled if r.get("executed") in ("yes", "no")]
+    untriaged = sum(1 for r in all_rows
+                    if r.get("source") == "batch" and not r.get("gated_by")
+                    and not r.get("executed"))
+    if not exec_rows:
+        L += [f"> 실행 여부가 입력된 기록이 없습니다 (미입력 {untriaged}건). ",
+              "> `python -m stock_auto.pipeline.triage` 로 입력하세요. "
+              "**소급 입력이 불가하므로 매일 처리해야 합니다.**", ""]
+        return L
+    L += ["| 실행 | 건수 | 승률 | 평균수익 | PF |", "|---|---:|---:|---:|---:|"]
+    for val, name in (("yes", "샀다"), ("no", "안 샀다")):
+        s = _stats([r for r in exec_rows if r.get("executed") == val])
+        if s["n"]:
+            L.append(f"| {name} | {s['n']} | {s['win_rate']:.0f}% | "
+                     f"{s['avg_ret']:+.2f}% | {_fmt_pf(s['pf'])} |")
+    ys = _stats([r for r in exec_rows if r.get("executed") == "yes"])
+    ns = _stats([r for r in exec_rows if r.get("executed") == "no"])
+    L += [""]
+    if ys["n"] >= 20 and ns["n"] >= 20:
+        d = ys["avg_ret"] - ns["avg_ret"]
+        verdict = ("사람의 선별이 알파를 더하고 있습니다" if d > 0 else
+                   "사람의 선별이 오히려 성과를 깎고 있습니다 — 규칙대로 전 건 실행을 검토하세요")
+        L += [f"> 산 것이 안 산 것보다 평균 **{d:+.2f}%p**. {verdict}.", ""]
+    else:
+        L += ["> 양쪽 20건 이상 쌓이면 사람의 개입 가치가 판정됩니다 "
+              f"(현재 샀다 {ys['n']} / 안 샀다 {ns['n']}).", ""]
+    if untriaged:
+        L += [f"> 미입력 {untriaged}건이 남아 있습니다.", ""]
+    return L
 
 
 def _monotonic_check(rows: list[dict], key: str,
@@ -217,7 +303,7 @@ def calibration_dataset(rows: list[dict]) -> list[dict]:
     """
     feats = ["effective_score", "money_score", "price_score", "liquidity_score",
              "penalty", "stock_regime", "macro_regime", "sector_status_score",
-             "rsi_14", "adx", "rvol", "mom_rank", "rr_ratio"]
+             "rsi_14", "adx", "rvol", "mom_rank", "rr_ratio", "days_to_earnings"]
     out = []
     for r in rows:
         if r.get("exit_type") not in ("tp", "sl"):
@@ -226,5 +312,8 @@ def calibration_dataset(rows: list[dict]) -> list[dict]:
         rec["y"] = 1 if r["exit_type"] == "tp" else 0
         rec["symbol"] = r.get("symbol")
         rec["date"] = r.get("date")
+        # 게이트 차단분도 학습에 넣는다 — 게이트는 '실행 결정'이지 '신호 품질'이 아니다.
+        # 차단분을 빼면 하락 레짐 구간이 통째로 빠져 점수→승률 곡선이 상승장에 과적합된다.
+        rec["gated_by"] = r.get("gated_by", "")
         out.append(rec)
     return out

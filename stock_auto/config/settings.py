@@ -26,22 +26,38 @@ class MarketConfig:
     currency: str
     # 매크로 레짐용 지수 심볼 (FinanceDataReader 기준)
     index_symbols: tuple[str, ...]
-    # 스크리닝 유니버스 사전필터 — 5일 평균 거래대금 하한(시장 통화)
-    turnover_floor: float
+    # 상관이 높은 지수를 한 그룹으로 묶는다. 그룹 안은 max(둘 중 나은 쪽),
+    # 그룹 사이는 min(보수적 AND). 상관 지수를 각각 한 표로 세면 사실상
+    # 같은 시장에 두 표를 줘서 게이트가 이유 없이 빡빡해진다.
+    index_groups: tuple[tuple[str, ...], ...]
+    # 일봉 스크리닝 사전필터 — 5일 평균 '일간' 거래대금 하한(시장 통화)
+    daily_turnover_floor: float
+    # 실시간 폭주 감지 — '윈도우 누적' 거래대금 하한(시장 통화). 척도가 다르다.
+    surge_turnover_floor: float
+
+    @property
+    def turnover_floor(self) -> float:
+        """구버전 호환 별칭 — 일봉 스크리닝 하한을 가리킨다."""
+        return self.daily_turnover_floor
 
 
 MARKET_CONFIG: dict[Market, MarketConfig] = {
     Market.US: MarketConfig(
         market=Market.US,
         currency="USD",
-        index_symbols=("US500", "QQQ"),   # S&P500(FDR 'US500'), 나스닥100 ETF
-        turnover_floor=2_000_000,         # $2M
+        # S&P500(FDR 'US500'), 나스닥 종합(IXIC), 나스닥100 ETF(QQQ)
+        index_symbols=("US500", "IXIC", "QQQ"),
+        index_groups=(("US500",), ("IXIC", "QQQ")),
+        daily_turnover_floor=20_000_000,   # $20M/일 — 실행 가능한 유동성 하한
+        surge_turnover_floor=2_000_000,    # $2M/윈도우
     ),
     Market.KR: MarketConfig(
         market=Market.KR,
         currency="KRW",
         index_symbols=("KS11", "KQ11"),   # KOSPI, KOSDAQ
-        turnover_floor=5_000_000_000,     # 50억 원
+        index_groups=(("KS11",), ("KQ11",)),
+        daily_turnover_floor=15_000_000_000,   # 150억 원/일
+        surge_turnover_floor=5_000_000_000,    # 50억 원/윈도우
     ),
 }
 

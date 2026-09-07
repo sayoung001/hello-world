@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 
 from stock_auto.config.settings import Market
-from stock_auto.config.universe import load_universe
+from stock_auto.config.universe import resolve_universe
 from stock_auto.realtime.profile_builder import build_and_save, save_profile
 from stock_auto.realtime import observation_store
 
@@ -31,7 +31,7 @@ def main() -> int:
     args = ap.parse_args()
 
     market = Market(args.market)
-    symbols = args.symbols or list(load_universe(market).keys())
+    symbols = args.symbols or list(resolve_universe(market).keys())
 
     empirical: dict[str, int] = {}
     if args.from_observations:

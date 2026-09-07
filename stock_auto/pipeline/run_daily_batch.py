@@ -19,7 +19,7 @@ import argparse
 
 from stock_auto.config.env import get_secrets
 from stock_auto.config.settings import Market
-from stock_auto.config.universe import load_universe, fdr_universe
+from stock_auto.config.universe import load_universe, resolve_universe
 from stock_auto.integrations.notion_publisher import NotionPublisher
 from stock_auto.pipeline.daily_batch import run_daily
 
@@ -28,21 +28,26 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="주식 일일 배치")
     ap.add_argument("--market", choices=["US", "KR"], default="US")
     ap.add_argument("--no-llm", action="store_true", help="LLM 추천 분석 생략")
-    ap.add_argument("--live-universe", action="store_true",
-                    help="FDR 상장목록 사용(기본은 샘플)")
+    ap.add_argument("--sample-universe", action="store_true",
+                    help="샘플 20종목만 사용(디버깅용). 기본은 지수 구성종목 라이브")
     ap.add_argument("--top-n", type=int, default=15)
     ap.add_argument("--no-sector", action="store_true",
                     help="섹터 게이트 비활성 (섹터 ETF 다운로드 생략)")
+    ap.add_argument("--no-earnings", action="store_true",
+                    help="실적 발표일 게이트 비활성")
     args = ap.parse_args()
 
     market = Market(args.market)
     sec = get_secrets()
 
     # 유니버스 + 섹터 ETF
-    uni_map = (fdr_universe(market) if args.live_universe
-               else load_universe(market))
+    uni_map = (load_universe(market) if args.sample_universe
+               else resolve_universe(market))
     symbols = list(uni_map.keys())
-    print(f"[run] {market.value} 유니버스 {len(symbols)}종목")
+    print(f"[run] {market.value} 유니버스 N={len(symbols)}")
+    if len(symbols) < 100 and not args.sample_universe:
+        print("[run] ⚠️ 유니버스가 100종목 미만입니다 — 라이브 조회 실패 폴백일 수 있습니다. "
+              "표본 축적 속도가 크게 떨어집니다(금융분석 문서 3장).")
 
     # LLM 게이트
     run_llm = sec.has_anthropic and not args.no_llm
@@ -66,6 +71,18 @@ def main() -> int:
     label_map = (labels_for_symbols(uni_map, sector_labels)
                  if sector_labels else None)
 
+    # 실적 발표일 게이트 — 갭이 손절을 건너뛰는 구간을 진입에서 제외
+    earn_blocked: dict = {}
+    earn_days: dict = {}
+    if not args.no_earnings and market == Market.US:
+        from stock_auto.data import earnings
+        try:
+            earnings.refresh(symbols)
+            earn_blocked, earn_days = earnings.blocked_map(symbols)
+            print("[run] " + earnings.summary_line(earn_blocked, earn_days))
+        except Exception as e:  # noqa: BLE001
+            print(f"[run] 실적 캘린더 실패({type(e).__name__}) — 게이트 비활성으로 진행")
+
     # Notion
     notion = NotionPublisher(token=sec.notion_token) if sec.has_notion else None
     if notion:
@@ -79,6 +96,8 @@ def main() -> int:
         sector_label_map=label_map,
         sector_lines=(summary_lines(sector_scores, sector_labels, market)
                       if sector_scores else None),
+        earnings_blocked=earn_blocked or None,
+        earnings_days=earn_days or None,
         llm_client=None,                 # base가 .env의 키로 실제 생성
         notion=notion,
         notion_db_id=sec.notion_reco_db_id or None,
@@ -102,6 +121,16 @@ def main() -> int:
         print(result.screen.candidates[cols].to_string(index=False))
     else:
         print("  매수 후보 없음 (매크로/섹터 게이트 또는 임계 미달)")
+
+    # 게이트에 막힌 원신호 — 기록은 되며, 게이트 실효성 검증에 쓰인다
+    gated = result.screen.gated
+    if gated is not None and not gated.empty:
+        print(f"\n===== 게이트 차단 {len(gated)}건 (기록됨) =====")
+        for r in gated.head(10).itertuples():
+            de = getattr(r, "days_to_earnings", None)
+            extra = f" · 실적 D-{de}" if de is not None and de == de else ""
+            print(f"  [{r.gated_by}] {r.symbol} — Eff {r.effective_score}{extra}")
+        print("  ※ 차단분도 라벨링됩니다 → 리포트에서 '게이트 통과분 vs 차단분' 비교")
 
     # 매도(청산) 신호 — 보유 종목 점검용
     exits = result.screen.exits

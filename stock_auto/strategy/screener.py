@@ -45,15 +45,20 @@ class ScreenResult:
     macro: MacroRegime
     failures: dict[str, str] = field(default_factory=dict)
     as_of: str = ""                          # 판단 근거가 된 마지막 봉의 날짜(최댓값)
+    gated: Optional[pd.DataFrame] = None     # 원신호는 섰으나 게이트에 막힌 종목
 
 
 def _passes_prefilter(df: pd.DataFrame, market: Market) -> bool:
-    """거래대금 하한 사전필터 — 토큰 없이 유니버스 축소."""
+    """거래대금 하한 사전필터 — 토큰 없이 유니버스 축소.
+
+    daily_turnover_floor(일평균)를 쓴다. 실시간 폭주 감지의 surge_turnover_floor
+    (윈도우 누적)와는 척도가 달라 같은 값을 쓰면 안 된다.
+    """
     cfg = get_config(market)
     if df is None or len(df) < 60:
         return False
     tv = (df["Close"] * df["Volume"]).rolling(5).mean().iloc[-1]
-    return bool(tv >= cfg.turnover_floor)
+    return bool(tv >= cfg.daily_turnover_floor)
 
 
 def screen_universe(
@@ -63,6 +68,8 @@ def screen_universe(
     top_n: int = TOP_N_FOR_AGENTS,
     stock_sector_etf: Optional[dict[str, str]] = None,
     sector_status: Optional[dict[str, int]] = None,
+    earnings_blocked: Optional[dict[str, bool]] = None,
+    earnings_days: Optional[dict[str, Optional[int]]] = None,
 ) -> ScreenResult:
     """
     ohlcv_map: {symbol: 표준 OHLCV df (DatetimeIndex)}
@@ -77,6 +84,8 @@ def screen_universe(
     gate_ok = macro_gate_ok(macro)
     stock_sector_etf = stock_sector_etf or {}
     sector_status = sector_status or {}
+    earnings_blocked = earnings_blocked or {}
+    earnings_days = earnings_days or {}
 
     # 횡단면 모멘텀 — 유니버스 전체를 한 번에 계산해 상대 순위를 매긴다
     from stock_auto.strategy.cross_sectional import momentum_features
@@ -109,11 +118,25 @@ def screen_universe(
             sec_etf = stock_sector_etf.get(symbol, "-")
             sec_score = sector_status.get(sec_etf)  # None이면 미상
 
-            # 매크로 AND 게이트 + 섹터 게이트
+            # 게이트: 규칙엔진의 원신호(raw)와 '실행 가능한 신호'를 분리한다.
             #   - 매크로 약세(레짐0) → 차단 (§3.7)
             #   - 섹터 하락위험(score 0) → 차단 (§3.2)
+            #   - 실적 발표 D-3 ~ D+1 → 차단 (금융분석 4-1)
+            # ★ 차단된 신호도 기록해야 한다. 차단분을 버리면 하락장 구간 데이터가
+            #   통째로 비어 "게이트가 실제로 효과가 있었는가"를 영원히 검증할 수 없다.
+            #   → gated_by에 차단 사유를 남기고 라벨링은 동일하게 붙인다.
+            raw_buy = bool(last.get("Final_Buy", False))
             sector_ok = (sec_score is None) or (sec_score >= 1)
-            final_buy = bool(last.get("Final_Buy", False)) and gate_ok and sector_ok
+            earn_blocked = bool(earnings_blocked.get(symbol, False))
+            reasons = []
+            if not gate_ok:
+                reasons.append("macro")
+            if not sector_ok:
+                reasons.append("sector")
+            if earn_blocked:
+                reasons.append("earnings")
+            gated_by = ",".join(reasons)
+            final_buy = raw_buy and not reasons
 
             active = get_active_strategies(last)
             levels = calculate_strategy_levels(last, active)
@@ -138,6 +161,9 @@ def screen_universe(
                 "macro_gate": gate_ok,
                 "sector_etf": sec_etf,
                 "sector_status_score": sec_score,
+                "raw_buy": raw_buy,
+                "gated_by": gated_by,
+                "days_to_earnings": earnings_days.get(symbol),
                 "final_buy": final_buy,
                 "close": float(last["Close"]),
                 "rsi_14": float(last.get("rsi_14", 0.0)),
@@ -174,5 +200,8 @@ def screen_universe(
     scored_all = scored_all.sort_values("effective_score", ascending=False)
     candidates = (scored_all[scored_all["final_buy"]]
                   .head(top_n).reset_index(drop=True))
+    # 원신호는 섰는데 게이트에 막힌 것 — 기록 대상(게이트 실효성 검증용)
+    gated = (scored_all[scored_all["raw_buy"] & (scored_all["gated_by"] != "")]
+             .head(top_n * 2).reset_index(drop=True))
     return ScreenResult(candidates, scored_all, exits, macro, failures,
-                        as_of=as_of)
+                        as_of=as_of, gated=gated)

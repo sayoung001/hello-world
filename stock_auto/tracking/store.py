@@ -38,7 +38,13 @@ class SignalRecord:
     recommend: str = ""            # BUY / WATCH / AVOID
     horizon: str = ""              # 단타 / 중단기 / 스윙
     conviction: Optional[float] = None
-    executed: str = ""             # ""(미분류) | yes | no  ← 트리아지 입력
+    executed: str = ""             # ""(미분류) | yes | no | skip  ← 트리아지 입력
+    executed_at: str = ""          # 트리아지 입력 시각(ET)
+    triage_note: str = ""          # 사람이 남긴 한 줄 사유
+    # 게이트에 막힌 신호도 기록한다(선택 편향·검증 공백 방지).
+    # "" = 통과 / "macro" / "sector" / "earnings" (복수는 쉼표 구분)
+    gated_by: str = ""
+    days_to_earnings: Optional[int] = None
 
     # ── 피처 (캘리브레이션 학습용) ──
     close: Optional[float] = None
@@ -142,18 +148,70 @@ def pending(base: str = DEFAULT_PATH) -> list[dict[str, Any]]:
     return [r for r in load(base) if not r.get("exit_type")]
 
 
-def set_executed(signal_id: str, executed: str,
+EXECUTED_VALUES = ("yes", "no", "skip")
+
+
+def set_executed(signal_id: str, executed: str, note: str = "",
                  base: str = DEFAULT_PATH) -> bool:
-    """트리아지 입력(실행/보류/무시) 반영."""
+    """트리아지 입력(실행/미실행/보류) 반영. 입력 시각과 사유도 함께 남긴다."""
+    if executed not in EXECUTED_VALUES:
+        raise ValueError(f"executed는 {EXECUTED_VALUES} 중 하나여야 합니다: {executed!r}")
+    from stock_auto.config.clock import now_et
     rows = load(base)
     hit = False
     for r in rows:
         if r.get("signal_id") == signal_id:
             r["executed"] = executed
+            r["executed_at"] = now_et().strftime("%Y-%m-%d %H:%M %Z")
+            if note:
+                r["triage_note"] = note
             hit = True
     if hit:
         save_all(rows, base)
     return hit
+
+
+def set_executed_many(updates: dict[str, tuple[str, str]],
+                      base: str = DEFAULT_PATH) -> int:
+    """{signal_id: (executed, note)} 를 한 번에 반영 — CSV를 1회만 다시 쓴다."""
+    from stock_auto.config.clock import now_et
+    for ex, _ in updates.values():
+        if ex not in EXECUTED_VALUES:
+            raise ValueError(f"executed는 {EXECUTED_VALUES} 중 하나여야 합니다: {ex!r}")
+    rows = load(base)
+    stamp = now_et().strftime("%Y-%m-%d %H:%M %Z")
+    n = 0
+    for r in rows:
+        u = updates.get(r.get("signal_id", ""))
+        if u:
+            r["executed"], note = u[0], u[1]
+            r["executed_at"] = stamp
+            if note:
+                r["triage_note"] = note
+            n += 1
+    if n:
+        save_all(rows, base)
+    return n
+
+
+def untriaged(base: str = DEFAULT_PATH, source: Optional[str] = "batch",
+              include_gated: bool = False) -> list[dict[str, Any]]:
+    """
+    아직 실행 여부가 입력되지 않은 기록.
+
+    기본적으로 게이트에 막힌 신호는 제외한다 — 사람에게 보여준 적이 없는 신호에
+    "샀냐"고 묻는 것은 의미가 없다.
+    """
+    out = []
+    for r in load(base):
+        if r.get("executed"):
+            continue
+        if source and r.get("source") != source:
+            continue
+        if not include_gated and r.get("gated_by"):
+            continue
+        out.append(r)
+    return out
 
 
 # ── 상위 파이프라인에서 기록 만들기 ────────────────────────────────────────
@@ -165,8 +223,14 @@ def from_screen_row(row: dict, date: str, reco: Optional[dict] = None
     return SignalRecord(
         date=date, market=str(row.get("market", "US")),
         symbol=str(row.get("symbol", "")), source="batch",
+        gated_by=str(row.get("gated_by", "") or ""),
+        days_to_earnings=_i(row.get("days_to_earnings")),
         recommend=str((reco or {}).get("recommend", "")),
-        horizon=str((reco or {}).get("horizon", "")),
+        # LLM 추천이 없는 기록(게이트 차단분)은 규칙엔진의 styles를 보유기간으로 쓴다.
+        # 비우면 라벨러가 DEFAULT_HOLD(5일)로 대체해 통과분(단타 3일)과 보유기간이
+        # 달라지고, '게이트 통과 vs 차단' 비교가 서로 다른 조건의 비교가 된다.
+        horizon=(str((reco or {}).get("horizon", ""))
+                 or _style_horizon(row.get("styles"))),
         conviction=_f((reco or {}).get("conviction")),
         close=_f(row.get("close")),
         effective_score=_f(row.get("effective_score")),
@@ -205,9 +269,24 @@ def from_surge_signal(sig, date: str) -> SignalRecord:
     )
 
 
+_STYLE_ORDER = ("단타", "중단기", "스윙")
+
+
+def _style_horizon(styles: Any) -> str:
+    """screener의 styles('단타,중단기') → 보유기간 1개. 가장 짧은 쪽을 택한다(보수적)."""
+    if not styles:
+        return ""
+    parts = {s.strip() for s in str(styles).split(",") if s.strip()}
+    return next((s for s in _STYLE_ORDER if s in parts), "")
+
+
 def _f(v) -> Optional[float]:
+    """숫자 변환. NaN도 '값 없음'으로 본다 — pandas 컬럼에 None이 섞이면 NaN이 된다."""
     try:
-        return None if v is None or v == "" else float(v)
+        if v is None or v == "":
+            return None
+        f = float(v)
+        return None if f != f else f     # NaN 체크
     except (TypeError, ValueError):
         return None
 

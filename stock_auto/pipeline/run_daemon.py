@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 
 from stock_auto.config.env import get_secrets
 from stock_auto.config.settings import Market
-from stock_auto.config.universe import load_universe
+from stock_auto.config.universe import resolve_universe
 from stock_auto.realtime.volume_monitor import (
     SurgeMonitor, HistoricalProfile, DEFAULT_THRESHOLDS)
 from stock_auto.realtime import observation_store
@@ -63,7 +63,9 @@ def _recalibrate_and_batch():
         print(f"[daemon] 결과 라벨링 실패: {type(e).__name__}: {e}")
 
     for market in _active_markets():
-        syms = list(load_universe(market).keys())
+        uni_map = resolve_universe(market)
+        syms = list(uni_map.keys())
+        print(f"[daemon] {market.value} 유니버스 N={len(syms)}")
         # ① 실측 우선 재구축, 부족분 frac 폴백
         emp = observation_store.build_profiles_from_observations(market, syms, min_days=10)
         for s, prof in emp.items():
@@ -76,7 +78,6 @@ def _recalibrate_and_batch():
         # ② 섹터 게이트 — 하락위험 섹터 종목 매수 차단
         from stock_auto.sector.sector_status import (
             compute_sector_status, labels_for_symbols, summary_lines)
-        uni_map = load_universe(market)
         try:
             sec_scores, sec_labels = compute_sector_status(market)
         except Exception as e:  # noqa: BLE001 — 섹터 실패가 배치를 막지 않게
@@ -84,10 +85,24 @@ def _recalibrate_and_batch():
             sec_scores, sec_labels = {}, {}
         print(f"[daemon] {market.value} 섹터 게이트: {len(sec_scores)}개 진단")
 
-        # ③ 추천 배치
+        # ③ 실적 발표일 게이트 — 갭이 손절을 건너뛰는 구간을 진입에서 제외
+        earn_blocked: dict = {}
+        earn_days: dict = {}
+        if market == Market.US:
+            try:
+                from stock_auto.data import earnings
+                earnings.refresh(syms)
+                earn_blocked, earn_days = earnings.blocked_map(syms)
+                print("[daemon] " + earnings.summary_line(earn_blocked, earn_days))
+            except Exception as e:  # noqa: BLE001 — 실적 수집 실패가 배치를 막지 않게
+                print(f"[daemon] 실적 캘린더 실패: {type(e).__name__}: {e}")
+
+        # ④ 추천 배치
         notion = NotionPublisher(token=sec.notion_token) if sec.has_notion else None
         run_daily(market=market, universe=syms,
                   stock_sector_etf=uni_map,
+                  earnings_blocked=earn_blocked or None,
+                  earnings_days=earn_days or None,
                   sector_status=sec_scores or None,
                   sector_label_map=(labels_for_symbols(uni_map, sec_labels)
                                     if sec_labels else None),
@@ -104,7 +119,11 @@ def _run_monitor_thread(market: Market, session_minutes: int):
     if not sec.has_kis:
         print("[daemon] KIS 키 없음 — 모니터 생략")
         return
-    syms = list(load_universe(market).keys())
+    # 실시간은 KIS 등록 건수 제한이 있다 — 유니버스 전체가 아니라
+    # 보유·직전 후보 우선으로 추린 감시 목록만 구독한다.
+    from stock_auto.realtime.watchlist import build as build_watchlist
+    syms = build_watchlist(market, list(resolve_universe(market).keys()))
+    print(f"[daemon] {market.value} 실시간 감시 {len(syms)}종목")
 
     # 프로파일 로드
     from stock_auto.pipeline.run_monitor import _load_profiles

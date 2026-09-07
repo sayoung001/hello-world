@@ -24,7 +24,7 @@ from stock_auto.realtime.volume_monitor import (
 )
 from stock_auto.data.kis_feed import KISFeed
 from stock_auto.notify.telegram import Telegram, surge_alert_callback
-from stock_auto.config.universe import load_universe
+from stock_auto.config.universe import resolve_universe
 
 
 def _load_profiles(market: Market, symbols: list[str],
@@ -64,8 +64,15 @@ def main() -> int:
         print("❌ KIS_APP_KEY / KIS_APP_SECRET 가 .env에 필요합니다.")
         return 1
 
-    symbols = args.symbols or list(load_universe(market).keys())
-    print(f"[monitor] {market.value} 감시 {len(symbols)}종목: {symbols}")
+    if args.symbols:
+        symbols = args.symbols
+    else:
+        # KIS 실시간 등록 한도가 있으므로 유니버스 전체가 아니라
+        # 보유·직전 배치 후보 우선으로 추린 감시 목록을 쓴다.
+        from stock_auto.realtime.watchlist import build as build_watchlist
+        symbols = build_watchlist(market, list(resolve_universe(market).keys()))
+    print(f"[monitor] {market.value} 감시 {len(symbols)}종목: {symbols[:15]}"
+          + (" …" if len(symbols) > 15 else ""))
 
     profiles = _load_profiles(market, symbols)
     tg = Telegram(sec.telegram_bot_token, sec.telegram_chat_id)

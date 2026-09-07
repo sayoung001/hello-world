@@ -134,7 +134,10 @@ def _mk(kind: str, ts, price: float, entry: float,
 
 def _f(v) -> Optional[float]:
     try:
-        return None if v is None or v == "" else float(v)
+        if v is None or v == "":
+            return None
+        f = float(v)
+        return None if f != f else f     # NaN도 '값 없음'
     except (TypeError, ValueError):
         return None
 
