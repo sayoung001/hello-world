@@ -44,6 +44,7 @@ class ScreenResult:
     exits: pd.DataFrame                      # 매도 신호 종목
     macro: MacroRegime
     failures: dict[str, str] = field(default_factory=dict)
+    as_of: str = ""                          # 판단 근거가 된 마지막 봉의 날짜(최댓값)
 
 
 def _passes_prefilter(df: pd.DataFrame, market: Market) -> bool:
@@ -120,6 +121,10 @@ def screen_universe(
             rows.append({
                 "symbol": symbol,
                 "market": market.value,
+                # 판단 근거가 된 마지막 봉의 날짜. 실행일(오늘)과 다를 수 있다
+                # (당일 봉 미공개·휴장·데이터 지연). 라벨러의 전진 구간 기준일이므로
+                # '실행일'이 아니라 반드시 '봉 날짜'로 기록해야 한다.
+                "bar_date": pd.Timestamp(df.index[-1]).strftime("%Y-%m-%d"),
                 "effective_score": float(last.get("Effective_Score", 0.0)),
                 "money_score": float(last.get("Money_Score", 0.0)),
                 "price_score": float(last.get("Price_Score", 0.0)),
@@ -165,7 +170,9 @@ def screen_universe(
     if scored_all.empty:
         return ScreenResult(scored_all, scored_all, exits, macro, failures)
 
+    as_of = str(scored_all["bar_date"].max())
     scored_all = scored_all.sort_values("effective_score", ascending=False)
     candidates = (scored_all[scored_all["final_buy"]]
                   .head(top_n).reset_index(drop=True))
-    return ScreenResult(candidates, scored_all, exits, macro, failures)
+    return ScreenResult(candidates, scored_all, exits, macro, failures,
+                        as_of=as_of)

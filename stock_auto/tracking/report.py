@@ -159,7 +159,9 @@ def build_report(rows: list[dict], title: str = "신호 성과 리포트") -> st
         by_reg[str(r.get("macro_regime", "?"))].append(r)
     for reg in sorted(by_reg):
         ss = _stats(by_reg[reg])
-        L.append(f"| L{reg} | {ss['n']} | {ss['win_rate']:.0f}% | "
+        # 알림 기록에는 매크로 레짐이 없다 — 'L' 같은 빈 라벨 대신 '미상'으로 표기
+        name = f"L{reg}" if str(reg).strip() not in ("", "?", "None") else "미상"
+        L.append(f"| {name} | {ss['n']} | {ss['win_rate']:.0f}% | "
                  f"{ss['avg_ret']:+.2f}% | {_fmt_pf(ss['pf'])} |")
     L += [""]
 

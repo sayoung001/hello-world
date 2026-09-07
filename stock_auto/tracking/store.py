@@ -182,8 +182,12 @@ def from_screen_row(row: dict, date: str, reco: Optional[dict] = None
         mom_rank=_f(row.get("mom_rank")), mom_12_1=_f(row.get("mom_12_1")),
         atr=_f(row.get("atr")),
         entry_rule=str((reco or {}).get("entry_rule", "")),
-        stop=_f((reco or {}).get("stop", row.get("stop"))),
-        target=_f(targets[0] if targets else row.get("target")),
+        # 키가 있어도 값이 None/빈값이면 규칙엔진 값으로 폴백해야 한다
+        # (dict.get(key, default)는 키가 존재하면 default를 쓰지 않는다)
+        stop=_f((reco or {}).get("stop")) if _f((reco or {}).get("stop")) is not None
+             else _f(row.get("stop")),
+        target=_f(targets[0]) if targets and _f(targets[0]) is not None
+               else _f(row.get("target")),
         rr_ratio=_f(row.get("rr_ratio")),
         p10_pct=_f(pnl.get("p10_pct")), p50_pct=_f(pnl.get("p50_pct")),
         p90_pct=_f(pnl.get("p90_pct")),

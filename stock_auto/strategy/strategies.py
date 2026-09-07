@@ -3,7 +3,8 @@ strategies.py — 매매 전략 모듈 (v2.1 — 실효 점수 체계)
 ==========================================================
 [v2.1 핵심 변경]
   기존: Composite_Score = 기술적 신호 개수 합산
-  변경: Effective_Score = Technical × Liquidity × (1 - Penalty)
+  변경: Effective_Score = Technical × Liquidity - Penalty
+        (원본 주석은 '× (1 - Penalty)'로 적혀 있었으나 구현은 감산이다 — 구현 기준으로 정정)
 
   "기술적 가능성"이 아니라 "자금이 실제로 밀어줄 확률"을 측정
 

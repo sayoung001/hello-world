@@ -45,11 +45,28 @@ from stock_auto.strategy.regime_v2 import add_market_regime, detect_regime_trans
 # 설정
 # ============================================================
 
-TODAY = datetime.now().strftime('%Y-%m-%d')
-BASE_DIR = f"./Results/Sector_Analysis/{TODAY}"
-GOOD_DIR = f"{BASE_DIR}/Good_Sectors"
-BAD_DIR = f"{BASE_DIR}/Bad_Sectors"
-SUMMARY_FILE = f"{BASE_DIR}/Sector_Status_Summary.csv"
+# 날짜는 '호출 시점'에 거래소(ET) 기준으로 계산한다.
+# 모듈 임포트 시점에 상수로 굳히면 상시 구동 데몬에서 첫날 날짜가 그대로 고정되어
+# 이후 산출물이 전부 첫날 폴더에 쌓이고 브리핑 날짜도 틀리게 된다.
+def today_str() -> str:
+    from stock_auto.config.clock import now_et
+    return now_et().strftime('%Y-%m-%d')
+
+
+def base_dir() -> str:
+    return f"./Results/Sector_Analysis/{today_str()}"
+
+
+def good_dir() -> str:
+    return f"{base_dir()}/Good_Sectors"
+
+
+def bad_dir() -> str:
+    return f"{base_dir()}/Bad_Sectors"
+
+
+def summary_file() -> str:
+    return f"{base_dir()}/Sector_Status_Summary.csv"
 
 # ── 미국 섹터 ETF 리스트 (GICS 11개 + 반도체) ──
 US_SECTOR_TICKERS = {
@@ -213,8 +230,8 @@ def analyze_sectors(market='US', save_charts=True):
     """
     tickers = US_SECTOR_TICKERS if market == 'US' else KR_SECTOR_TICKERS
 
-    os.makedirs(GOOD_DIR, exist_ok=True)
-    os.makedirs(BAD_DIR, exist_ok=True)
+    os.makedirs(good_dir(), exist_ok=True)
+    os.makedirs(bad_dir(), exist_ok=True)
 
     print(f"🚀 [섹터 분석] {market} 주요 {len(tickers)}개 산업군 진단 시작...\n")
 
@@ -268,7 +285,7 @@ def analyze_sectors(market='US', save_charts=True):
 
             # 6. 차트 저장
             if save_charts:
-                target_folder = GOOD_DIR if is_good else BAD_DIR
+                target_folder = good_dir() if is_good else bad_dir()
                 save_sector_chart(
                     df, ticker, info['name'], status_label, status_score,
                     target_folder, hurdle, vp, regime_info
@@ -315,7 +332,7 @@ def analyze_sectors(market='US', save_charts=True):
         df_res = pd.DataFrame(results)
         df_res = df_res.sort_values(by=['Status_Score', 'Effective_Score'],
                                      ascending=[False, False])
-        df_res.to_csv(SUMMARY_FILE, index=False, encoding='utf-8-sig')
+        df_res.to_csv(summary_file(), index=False, encoding='utf-8-sig')
 
         good_count = df_res['Is_Good'].sum()
         bad_count = len(df_res) - good_count
@@ -323,9 +340,9 @@ def analyze_sectors(market='US', save_charts=True):
         print(f"\n✅ 섹터 분석 완료!")
         print(f"  🟢 Good (상승/매수): {good_count}개")
         print(f"  🔴 Bad  (하락/관망): {bad_count}개")
-        print(f"  📂 Good 차트: {GOOD_DIR}")
-        print(f"  📂 Bad  차트: {BAD_DIR}")
-        print(f"  📄 요약 CSV: {SUMMARY_FILE}")
+        print(f"  📂 Good 차트: {good_dir()}")
+        print(f"  📂 Bad  차트: {bad_dir()}")
+        print(f"  📄 요약 CSV: {summary_file()}")
 
         # 요약 출력
         print(f"\n{'='*60}")
@@ -353,7 +370,7 @@ def _send_telegram(df):
         good_df = df[df['Is_Good'] == True]
         bad_df = df[df['Is_Good'] == False]
 
-        msg = f"🌍 **[{TODAY}] 섹터 브리핑**\n\n"
+        msg = f"🌍 **[{today_str()}] 섹터 브리핑**\n\n"
         msg += f"🟢 Good: {len(good_df)}개 | 🔴 Bad: {len(bad_df)}개\n\n"
 
         if not good_df.empty:
@@ -368,7 +385,7 @@ def _send_telegram(df):
                 msg += f"• {r['Sector']} ({r['Ticker']}) — {r['Status']}\n"
 
         telegram_msg.send_message(msg)
-        telegram_msg.send_file(SUMMARY_FILE, caption="📊 섹터 현황표")
+        telegram_msg.send_file(summary_file(), caption="📊 섹터 현황표")
     except Exception:
         pass
 
@@ -386,7 +403,7 @@ def load_sector_status(summary_path=None):
         status = status_map.get('XLK', {}).get('Status', '-')
     """
     if summary_path is None:
-        summary_path = SUMMARY_FILE
+        summary_path = summary_file()
 
     # 오늘자 파일이 없으면 최근 파일 탐색
     if not os.path.exists(summary_path):

@@ -69,9 +69,50 @@ def run_agents(
         v = value_a.analyze(sym, r)
         label = sector_label_map.get(sym, "-")
         reco = pm.decide(r, n, f, v, sector_label=label)
+        reconcile_levels(reco, r)
         out.per_ticker[sym] = {"news": n, "flow": f, "value": v}
         out.recommendations.append(reco)
     return out
+
+
+def reconcile_levels(reco: dict, row: dict) -> dict:
+    """
+    LLM이 낸 손절/목표가를 검증하고, 비정상이면 규칙엔진 값으로 되돌린다.
+
+    LLM 출력은 스키마상 number면 통과하므로 0·음수·종가 반대편 값이 그대로 들어올 수
+    있다. 그대로 두면 (a) Notion에 손절 0 이 게시되고 (b) 라벨러가 '진입가가 이미
+    목표 위'로 판단해 전 건을 skip 처리 → 캘리브레이션 표본이 0이 된다.
+    조용히 통과시키지 않고 여기서 한 번 걸러낸다.
+    """
+    if not isinstance(reco, dict) or reco.get("_parse_error"):
+        return reco
+    close = _num(row.get("close"))
+    if close is None or close <= 0:
+        return reco
+
+    stop = _num(reco.get("stop"))
+    if stop is None or not (0 < stop < close):          # 손절은 종가 아래
+        reco["stop"] = _num(row.get("stop"))
+
+    targets = [t for t in (_num(x) for x in (reco.get("targets") or []))
+               if t is not None and t > close]          # 목표는 종가 위
+    if not targets:
+        rt = _num(row.get("target"))
+        targets = [rt] if rt is not None and rt > close else []
+    reco["targets"] = targets
+
+    # 진입 구간도 같은 이유로 검증 — 종가의 ±30% 밖은 오기로 본다
+    zone = [z for z in (_num(x) for x in (reco.get("entry_zone") or []))
+            if z is not None and 0.7 * close <= z <= 1.3 * close]
+    reco["entry_zone"] = zone or [round(close, 4)]
+    return reco
+
+
+def _num(v) -> Optional[float]:
+    try:
+        return None if v is None or v == "" else float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 # ──────────────────────────────────────────────────────────────────────────

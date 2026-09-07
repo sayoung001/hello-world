@@ -112,27 +112,42 @@ def run_daily(
 
 
 def _record_signals(result: BatchResult) -> int:
-    """추천 후보를 신호 저장소에 적립 → labeler가 나중에 결과를 붙인다."""
+    """
+    추천 후보를 신호 저장소에 적립 → labeler가 나중에 결과를 붙인다.
+
+    기록 날짜는 실행일(result.date)이 아니라 '판단 근거가 된 마지막 봉의 날짜'다.
+    라벨러는 df.index > date 구간을 전진 관찰하므로, 당일 봉이 아직 안 나온 상태에서
+    실행일로 기록하면 전진 구간이 비어 영구 nodata가 된다.
+
+    추천-후보 매칭은 티커 문자열이 아니라 '순서'로 한다. run_agents는 candidates를
+    입력 순서대로 순회하며 append하므로 i번째 추천이 i번째 후보다. LLM이 ticker를
+    다르게 적어도(공백·대소문자·오기) 계획 필드가 조용히 유실되지 않는다.
+    """
     from stock_auto.tracking import store
     if result.screen.candidates.empty:
         return 0
-    by_ticker = {r.get("ticker"): r for r in result.agents.recommendations}
-    records = [
-        store.from_screen_row(row, result.date, by_ticker.get(row.get("symbol")))
-        for row in result.screen.candidates.to_dict("records")
-    ]
+    rows = result.screen.candidates.to_dict("records")
+    recos = list(result.agents.recommendations)
+    by_ticker = {r.get("ticker"): r for r in recos}
+    records = []
+    for i, row in enumerate(rows):
+        reco = recos[i] if i < len(recos) else by_ticker.get(row.get("symbol"))
+        date = str(row.get("bar_date") or result.screen.as_of or result.date)
+        records.append(store.from_screen_row(row, date, reco))
     return store.append(records)
 
 
 def _publish_notion(notion, db_id, parent_page, result: BatchResult,
                     sector_label_map: dict) -> None:
     from stock_auto.integrations.notion_publisher import daily_summary_blocks
+    # 게시 일자는 '판단 근거 봉'의 날짜 — 실행일과 다르면 제목에 함께 표기한다
+    as_of = result.screen.as_of or result.date
     # 추천 행
     if db_id:
         for reco in result.agents.recommendations:
             sym = reco.get("ticker", "-")
             notion.add_recommendation(
-                db_id, reco, result.market.value, result.date,
+                db_id, reco, result.market.value, as_of,
                 sector_label=sector_label_map.get(sym, "-"))
     # 일자 요약
     if parent_page:
@@ -148,5 +163,7 @@ def _publish_notion(notion, db_id, parent_page, result: BatchResult,
             result.screen.macro.label, result.screen.macro.level,
             score_lines, sector_lines=result.sector_lines or None,
             exit_lines=exit_lines or None)
-        notion.create_summary_page(
-            parent_page, f"[{result.market.value}] {result.date} 분석", blocks)
+        title = (f"[{result.market.value}] {result.date} 분석"
+                 if as_of == result.date else
+                 f"[{result.market.value}] {result.date} 분석 (기준봉 {as_of})")
+        notion.create_summary_page(parent_page, title, blocks)

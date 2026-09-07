@@ -78,6 +78,30 @@ def download_ohlcv(
     raise RuntimeError(f"{symbol} 다운로드 실패: {last_err}")
 
 
+def expected_last_bar(market: Market = Market.US,
+                      end: Optional[str] = None) -> pd.Timestamp:
+    """
+    지금 시점에 존재해야 할 '가장 최근 일봉'의 날짜(거래소 현지 기준, 주말 보정).
+
+    공휴일 달력은 반영하지 않는다. 공휴일에는 이 값이 실제 마지막 봉보다 하루 앞서
+    캐시를 한 번 더 받게 되지만(불필요한 다운로드 1회), 낡은 데이터를 그대로 쓰는
+    쪽보다 훨씬 안전하다.
+    """
+    from stock_auto.config.clock import market_now
+    if end:
+        ts = pd.Timestamp(end)
+    else:
+        now = market_now(market)
+        ts = pd.Timestamp(now.date())
+        # 장 마감 전이면 오늘 봉은 아직 없다 (US 16:00 / KR 15:30 현지)
+        close_h, close_m = (16, 0) if market == Market.US else (15, 30)
+        if (now.hour, now.minute) < (close_h, close_m):
+            ts -= pd.Timedelta(days=1)
+    while ts.weekday() >= 5:            # 토(5)·일(6) → 직전 금요일
+        ts -= pd.Timedelta(days=1)
+    return ts.normalize()
+
+
 def load_or_download(
     symbol: str,
     start: str,
@@ -85,11 +109,35 @@ def load_or_download(
     market: Market = Market.US,
     use_cache: bool = True,
 ) -> pd.DataFrame:
-    """CSV 캐시 우선 로드, 없으면 다운로드 후 저장."""
+    """
+    CSV 캐시 우선 로드. 단, 캐시가 낡았으면 갱신한다.
+
+    ★ 캐시를 무조건 신뢰하면 매일 도는 배치가 첫날 데이터에 영원히 고정된다.
+      (신호가 매일 동일 → 기록은 중복으로 걸러져 0건 적립 → 시스템이 멈춘 줄 모른다)
+      따라서 '있어야 할 마지막 봉'과 캐시의 마지막 봉을 비교해 판단한다.
+    """
     path = _cache_path(symbol, market)
+    cached: Optional[pd.DataFrame] = None
     if use_cache and path.exists():
-        return pd.read_csv(path, index_col=0, parse_dates=True)
+        try:
+            cached = pd.read_csv(path, index_col=0, parse_dates=True)
+        except Exception:  # noqa: BLE001 — 손상 캐시는 버리고 새로 받는다
+            cached = None
+        if cached is not None and not cached.empty:
+            fresh = pd.Timestamp(cached.index[-1]).normalize() >= \
+                expected_last_bar(market, end)
+            # 시작일은 정확히 일치할 수 없다(요청 시작일이 휴장일이면 첫 봉은 그 뒤).
+            # 매일 start가 하루씩 밀리므로 여유(10일)를 두지 않으면 캐시가 무의미해진다.
+            covers = pd.Timestamp(cached.index[0]).normalize() <= \
+                pd.Timestamp(start).normalize() + pd.Timedelta(days=10)
+            if fresh and covers:
+                return cached
+
     df = download_ohlcv(symbol, start, end, market)
+    if cached is not None and not cached.empty:
+        # 과거 구간은 캐시를, 겹치는 날짜는 새로 받은 값을 우선한다
+        df = pd.concat([cached, df])
+        df = df[~df.index.duplicated(keep="last")].sort_index()
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path)
     return df

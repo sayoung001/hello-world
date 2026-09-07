@@ -15,7 +15,6 @@ TP/SL이 기록에 없으면 ATR 배수로 대체(전략 기본값과 동일한 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Optional
 
 import pandas as pd
@@ -59,7 +58,7 @@ def label_record(rec: dict[str, Any], df: pd.DataFrame,
     if entry <= 0:
         return Outcome(exit_type="nodata")
 
-    tp, sl = _barriers(rec, entry)
+    tp, sl = _barriers(rec, entry, df[df.index <= sig_date])
 
     # 갭 통과 방어: 진입가가 이미 배리어를 넘어섰다면 조건부 진입이 성립하지 않는다.
     # (갭다운으로 손절선 아래에서 시작 / 갭업으로 목표가 위에서 시작)
@@ -92,14 +91,28 @@ def label_record(rec: dict[str, Any], df: pd.DataFrame,
     return _mk("timeout", last_ts, last_close, entry, mae, mfe, len(path), -1)
 
 
-def _barriers(rec: dict, entry: float) -> tuple[Optional[float], Optional[float]]:
+def _barriers(rec: dict, entry: float, hist: Optional[pd.DataFrame] = None
+              ) -> tuple[Optional[float], Optional[float]]:
     tp, sl = _f(rec.get("target")), _f(rec.get("stop"))
     if tp is None or sl is None:
-        atr = _f(rec.get("atr"))
+        # 기록에 ATR이 없으면(폭주 알림 등) 신호일까지의 일봉에서 직접 산출한다.
+        # 배리어가 없으면 전 건이 timeout(-1)이 되어 알림 정밀도를 측정할 수 없다.
+        atr = _f(rec.get("atr")) or _atr_from_history(hist)
         if atr and atr > 0:
             tp = tp if tp is not None else entry + FALLBACK_TP_ATR * atr
             sl = sl if sl is not None else entry - FALLBACK_SL_ATR * atr
     return tp, sl
+
+
+def _atr_from_history(hist: Optional[pd.DataFrame], period: int = 14
+                      ) -> Optional[float]:
+    """신호일까지의 일봉으로 ATR(단순평균 True Range) 산출. look-ahead 없음."""
+    if hist is None or len(hist) < period + 1:
+        return None
+    h, l, pc = hist["High"], hist["Low"], hist["Close"].shift(1)
+    tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    v = tr.tail(period).mean()
+    return None if pd.isna(v) else float(v)
 
 
 def _mk(kind: str, ts, price: float, entry: float,
@@ -147,18 +160,23 @@ def label_pending(base: str = "data/tracking/signals.csv",
         from datetime import timedelta
         from stock_auto.data.downloader import load_or_download
         ohlcv_map = {}
-        syms = sorted({r["symbol"] for r in todo})
+        # 종목별 시장 — 첫 기록의 시장을 전 종목에 쓰면 US/KR 혼재 시 다운로드가 어긋난다
+        sym_market = {r["symbol"]: r.get("market") or "US" for r in todo}
+        syms = sorted(sym_market)
         earliest = min(pd.Timestamp(r["date"]) for r in todo)
-        start = (earliest - timedelta(days=10)).strftime("%Y-%m-%d")
+        # ATR(14) 폴백 산출을 위해 신호일 이전 여유분을 확보한다
+        start = (earliest - timedelta(days=60)).strftime("%Y-%m-%d")
         for s in syms:
-            mk = Market(todo[0].get("market", "US"))
+            mk = Market(sym_market[s])
             try:
                 ohlcv_map[s] = load_or_download(s, start, None, mk, use_cache=False)
             except Exception as e:  # noqa: BLE001
                 print(f"[labeler] {s} 일봉 실패: {type(e).__name__}: {e}")
 
     stat = {"labeled": 0, "pending": 0, "nodata": 0, "skip": 0}
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # 라벨 시각도 거래소(ET) 기준 — 서버 TZ가 바뀌어도 감사 추적이 흔들리지 않게
+    from stock_auto.config.clock import now_et
+    now = now_et().strftime("%Y-%m-%d %H:%M %Z")
     for r in todo:
         out = label_record(r, ohlcv_map.get(r["symbol"]))
         if out.exit_type == "nodata":

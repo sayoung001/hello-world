@@ -52,6 +52,16 @@ def _recalibrate_and_batch():
     sec = get_secrets()
     print(f"[daemon] {now_et():%Y-%m-%d %H:%M %Z} 일일 배치 + 프로파일 재구축")
 
+    # ⓪ 결과 라벨링 — 전일까지 쌓인 미라벨 신호에 TP/SL/타임아웃 결과를 붙인다.
+    #    이 단계가 없으면 신호만 쌓이고 점수→승률 캘리브레이션이 영원히 갱신되지 않는다.
+    try:
+        from stock_auto.tracking import labeler, store
+        stat = labeler.label_pending(store.DEFAULT_PATH)
+        print(f"[daemon] 결과 라벨링: 신규 {stat.get('labeled', 0)}건 · "
+              f"대기 {stat.get('pending', 0)}건 · 미체결 {stat.get('skip', 0)}건")
+    except Exception as e:  # noqa: BLE001 — 라벨링 실패가 배치를 막지 않게
+        print(f"[daemon] 결과 라벨링 실패: {type(e).__name__}: {e}")
+
     for market in _active_markets():
         syms = list(load_universe(market).keys())
         # ① 실측 우선 재구축, 부족분 frac 폴백
