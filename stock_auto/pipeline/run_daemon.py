@@ -4,7 +4,7 @@
 APScheduler(zoneinfo)로 거래소 현지시각 기준 트리거 → DST 자동:
   - 일일 배치 + 프로파일 재구축:  US 마감(16:00 ET)+1h
       ① 관측 저장소(전일 실시간 누적)로 프로파일 자가보정 재구축(--from-observations)
-      ② run_daily(US/KR) → 추천 → Notion 게시
+      ② run_daily(US/KR) → 추천 → Notion 게시(아카이브) + Telegram 다이제스트(푸시)
   - KR 개장(09:00 KST):  KR 모니터 스레드 시작(장중 누적 관측 적립 + 폭주 Telegram)
   - US 개장(09:30 ET):   US 모니터 스레드 시작(동일)
 
@@ -108,7 +108,8 @@ def _recalibrate_and_batch():
                                     if sec_labels else None),
                   sector_lines=(summary_lines(sec_scores, sec_labels, market)
                                 if sec_scores else None),
-                  notion=notion, notion_db_id=sec.notion_reco_db_id or None,
+                  notion=notion, send_telegram=True,
+                  notion_db_id=sec.notion_reco_db_id or None,
                   notion_parent_page=sec.notion_parent_page_id or None,
                   run_llm=sec.has_anthropic)
 

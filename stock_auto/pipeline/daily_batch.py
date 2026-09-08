@@ -5,7 +5,10 @@
   1. 데이터 로드(일봉)           ← downloader (FDR/yfinance)
   2. 규칙 기반 전체 스캔(무토큰)  ← screener (+ 매크로 레짐, 섹터 게이트)
   3. 추천 상위 N LLM 분석        ← agents.pipeline (뉴스/수급/밸류/종합)
-  4. Notion 게시(배치)           ← notion_publisher
+  4. Notion 게시(아카이브)       ← notion_publisher
+  5. Telegram 다이제스트(푸시)   ← notify.digest
+     추천·섹터·매크로·매도신호를 한 건으로 요약해 보낸다. Notion은 '가서 보는'
+     매체라 미국장 배치(KST 06~07시)를 먼저 알려주지 않으면 그날 장을 놓친다.
   (실시간 폭주는 별도 모니터 → Telegram)
 
 데이터 로드는 ohlcv_map을 직접 주입하거나(테스트), symbols+기간으로 자동 다운로드.
@@ -57,6 +60,8 @@ def run_daily(
     earnings_blocked: Optional[dict[str, bool]] = None,
     earnings_days: Optional[dict[str, Any]] = None,
     llm_client: Any = None,
+    telegram: Any = None,
+    send_telegram: bool = True,
     notion: Any = None,
     notion_db_id: Optional[str] = None,
     notion_parent_page: Optional[str] = None,
@@ -109,11 +114,38 @@ def run_daily(
     except Exception as e:  # noqa: BLE001 — 기록 실패가 배치를 막지 않게
         print(f"[batch] 신호 기록 실패: {type(e).__name__}: {e}")
 
-    # 4) Notion 게시
+    # 4) Notion 게시 (아카이브 — 기록·검색용)
     if notion is not None and getattr(notion, "enabled", False):
         _publish_notion(notion, notion_db_id, notion_parent_page,
                         result, sector_label_map or {})
+
+    # 5) Telegram 다이제스트 (푸시 — 오늘 뭘 볼지)
+    #    Notion만 쓰면 (a) 미설정 시 결과가 콘솔에만 남고 (b) '가서 봐야' 한다.
+    #    미국장 배치는 KST 06~07시에 끝나므로 먼저 알려주지 않으면 그날 장을 놓친다.
+    if send_telegram:
+        try:
+            _send_digest(result, telegram)
+        except Exception as e:  # noqa: BLE001 — 알림 실패가 배치를 망치지 않게
+            print(f"[batch] 텔레그램 다이제스트 실패: {type(e).__name__}: {e}")
     return result
+
+
+def _send_digest(result: BatchResult, telegram: Any = None) -> None:
+    from stock_auto.notify.digest import batch_digest
+    tg = telegram
+    if tg is None:
+        from stock_auto.config.env import get_secrets
+        from stock_auto.notify.telegram import Telegram
+        sec = get_secrets()
+        tg = Telegram(sec.telegram_bot_token, sec.telegram_chat_id)
+    text = batch_digest(result, result.sector_lines or None)
+    if getattr(tg, "enabled", False):
+        # parse_mode 없이 평문 — LLM 문장의 `_`·`*`가 Markdown 파싱을 깨뜨린다
+        tg.send_message(text, parse_mode="")
+        print(f"[batch] 텔레그램 다이제스트 전송 ({len(text)}자)")
+    else:
+        print("[batch] 텔레그램 미설정 — 다이제스트 콘솔 출력\n")
+        print(text)
 
 
 def _record_signals(result: BatchResult) -> int:

@@ -4,13 +4,15 @@
 사용:
   python -m stock_auto.pipeline.run_daily_batch --market US
   python -m stock_auto.pipeline.run_daily_batch --market KR --no-llm
-  python -m stock_auto.pipeline.run_daily_batch --market US --live-universe --top-n 15
+  python -m stock_auto.pipeline.run_daily_batch --market US --sample-universe
 
-흐름: .env 로드 → 유니버스 → run_daily(규칙스캔→추천 LLM→Notion 게시) → 요약 출력.
+흐름: .env 로드 → 유니버스(지수 구성종목) → 섹터 게이트 → 실적 게이트
+      → run_daily(규칙스캔 → 추천 LLM → Notion 게시 + Telegram 다이제스트) → 요약 출력.
 
 키 유무에 따라 자동 게이트:
   - ANTHROPIC_API_KEY 없음 → LLM 생략(규칙 스캔만)
-  - NOTION_TOKEN 없음 → 게시 생략(콘솔 출력)
+  - NOTION_TOKEN 없음      → Notion 게시 생략
+  - TELEGRAM_* 없음        → 다이제스트를 콘솔로 출력
 """
 
 from __future__ import annotations
@@ -35,6 +37,8 @@ def main() -> int:
                     help="섹터 게이트 비활성 (섹터 ETF 다운로드 생략)")
     ap.add_argument("--no-earnings", action="store_true",
                     help="실적 발표일 게이트 비활성")
+    ap.add_argument("--no-telegram", action="store_true",
+                    help="텔레그램 다이제스트 전송 생략")
     args = ap.parse_args()
 
     market = Market(args.market)
@@ -99,6 +103,7 @@ def main() -> int:
         earnings_blocked=earn_blocked or None,
         earnings_days=earn_days or None,
         llm_client=None,                 # base가 .env의 키로 실제 생성
+        send_telegram=not args.no_telegram,
         notion=notion,
         notion_db_id=sec.notion_reco_db_id or None,
         notion_parent_page=sec.notion_parent_page_id or None,
