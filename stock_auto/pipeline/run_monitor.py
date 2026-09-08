@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Optional
 
 from stock_auto.config.env import get_secrets
 from stock_auto.realtime.volume_monitor import (
@@ -28,10 +29,11 @@ from stock_auto.config.universe import resolve_universe
 
 
 def _load_profiles(market: Market, symbols: list[str],
-                   path: str = "data/profiles") -> dict[str, HistoricalProfile]:
+                   path: Optional[str] = None) -> dict[str, HistoricalProfile]:
     """저장된 시간대 프로파일 로드(JSON). 없으면 빈 프로파일 + 경고."""
+    from stock_auto.config.paths import profiles_dir
     profiles: dict[str, HistoricalProfile] = {}
-    base = Path(path) / market.value
+    base = (Path(path) if path else profiles_dir()) / market.value
     for sym in symbols:
         f = base / f"{sym}.json"
         if f.exists():

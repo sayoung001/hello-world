@@ -143,7 +143,7 @@ def _f(v) -> Optional[float]:
 
 
 # ── 배치 실행 ──────────────────────────────────────────────────────────────
-def label_pending(base: str = "data/tracking/signals.csv",
+def label_pending(base: Optional[str] = None,
                   ohlcv_map: Optional[dict[str, pd.DataFrame]] = None,
                   lookback_days: int = 120) -> dict[str, int]:
     """

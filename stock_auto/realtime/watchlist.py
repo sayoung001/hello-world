@@ -63,7 +63,7 @@ def _recent_candidates(market: Market, signals_path: Optional[str] = None,
     """최근 며칠간의 배치 추천 종목 — Effective 높은 순."""
     try:
         from stock_auto.tracking import store
-        rows = store.load(signals_path or store.DEFAULT_PATH)
+        rows = store.load(signals_path)
     except Exception:  # noqa: BLE001
         return []
     recs = [r for r in rows

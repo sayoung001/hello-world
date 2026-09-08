@@ -21,7 +21,8 @@ import pandas as pd
 
 from stock_auto.config.settings import Market
 
-CACHE_DIR = Path(os.environ.get("STOCK_DATA_DIR", "data/ohlcv_cache"))
+# 경로는 호출 시점에 해석한다(paths 모듈). 상수로 굳히면 .env가 반영되지 않는다.
+from stock_auto.config.paths import ohlcv_cache_dir
 
 STD_COLS = ["Open", "High", "Low", "Close", "Volume"]
 
@@ -44,11 +45,11 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _cache_path(symbol: str, market: Market) -> Path:
-    return CACHE_DIR / market.value / f"{symbol}.csv"
+    return ohlcv_cache_dir() / market.value / f"{symbol}.csv"
 
 
 def _meta_path(symbol: str, market: Market) -> Path:
-    return CACHE_DIR / market.value / f"{symbol}.meta.json"
+    return ohlcv_cache_dir() / market.value / f"{symbol}.meta.json"
 
 
 def download_ohlcv(
@@ -218,7 +219,7 @@ def cache_sources(market: Market = Market.US) -> dict[str, int]:
     import json
     from collections import Counter
     c: Counter = Counter()
-    base = CACHE_DIR / market.value
+    base = ohlcv_cache_dir() / market.value
     if not base.exists():
         return {}
     for p in base.glob("*.meta.json"):

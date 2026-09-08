@@ -22,7 +22,8 @@ from stock_auto.tracking import store, labeler, report as report_mod
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="신호 결과 라벨링 및 리포트")
-    ap.add_argument("--path", default=store.DEFAULT_PATH, help="신호 CSV 경로")
+    ap.add_argument("--path", default=None,
+                    help="신호 CSV 경로(기본: $STOCK_DATA_DIR/tracking/signals.csv)")
     ap.add_argument("--out", help="리포트 저장 경로(.md)")
     ap.add_argument("--export-csv", help="캘리브레이션 학습용 CSV 경로")
     ap.add_argument("--notion", action="store_true", help="Notion에 리포트 게시")

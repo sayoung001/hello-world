@@ -12,14 +12,29 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+_WARNED = {"dotenv": False}
+
+
 def load_env(dotenv_path: str | None = None) -> None:
-    """.env 로드(있으면). python-dotenv 미설치 시 OS 환경변수만 사용."""
+    """
+    .env 로드. python-dotenv 미설치 시 OS 환경변수만 사용한다.
+
+    ★ 조용히 넘어가면 안 되는 경우가 있다: **.env 파일은 있는데 python-dotenv가
+      설치되지 않은 상태.** 이때 모든 키가 빈 값이 되어 텔레그램·LLM·KIS가 전부
+      '미설정'으로 동작하는데, 배치는 정상 종료한다. 설치를 빠뜨린 첫 배포에서
+      가장 흔하고 가장 헷갈리는 실패다 → 한 번은 반드시 경고한다.
+    """
+    path = Path(dotenv_path or (Path.cwd() / ".env"))
     try:
         from dotenv import load_dotenv
-        path = dotenv_path or str(Path.cwd() / ".env")
-        load_dotenv(path)
     except ImportError:
-        pass
+        if path.exists() and not _WARNED["dotenv"]:
+            _WARNED["dotenv"] = True
+            print(f"⚠️  {path} 파일은 있는데 python-dotenv가 설치되지 않았습니다.\n"
+                  "    → .env가 무시되어 모든 키가 '미설정'으로 동작합니다.\n"
+                  "    → 해결: pip install python-dotenv")
+        return
+    load_dotenv(str(path))
 
 
 @dataclass(frozen=True)

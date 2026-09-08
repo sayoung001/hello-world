@@ -23,13 +23,14 @@ from stock_auto.realtime.volume_monitor import HistoricalProfile
 _HEADER = ["date", "symbol", "window", "cum_volume", "cum_turnover"]
 
 
-def _path(market: Market, base: str) -> Path:
-    return Path(base) / f"{market.value}.csv"
+def _path(market: Market, base: Optional[str] = None) -> Path:
+    from stock_auto.config.paths import observations_dir
+    return (Path(base) if base else observations_dir()) / f"{market.value}.csv"
 
 
 def record(market: Market, date: str, symbol: str, window: int,
            cum_volume: float, cum_turnover: float = 0.0,
-           base: str = "data/observations") -> None:
+           base: Optional[str] = None) -> None:
     """관측 1건 적립(append). 헤더 없으면 생성."""
     p = _path(market, base)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -42,7 +43,7 @@ def record(market: Market, date: str, symbol: str, window: int,
                     f"{cum_turnover:.0f}"])
 
 
-def load(market: Market, base: str = "data/observations"
+def load(market: Market, base: Optional[str] = None
          ) -> dict[str, dict[int, list[tuple[str, float]]]]:
     """저장소 → {symbol: {window: [(date, cum_volume), ...]}}."""
     p = _path(market, base)
@@ -62,7 +63,7 @@ def load(market: Market, base: str = "data/observations"
 
 def build_profiles_from_observations(
         market: Market, symbols: Optional[list[str]] = None,
-        min_days: int = 10, base: str = "data/observations"
+        min_days: int = 10, base: Optional[str] = None
 ) -> dict[str, HistoricalProfile]:
     """
     실측 관측 → 윈도우별 (mean, std) 프로파일.

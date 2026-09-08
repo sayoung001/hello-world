@@ -87,8 +87,9 @@ def calibrate_fraction(intraday_sessions: list[list[tuple[int, float]]]
 
 # ── 저장/로드 (run_monitor 로더와 호환: {bucket: [mean,std]}) ──
 def save_profile(profile: HistoricalProfile, market: Market,
-                 base: str = "data/profiles") -> Path:
-    d = Path(base) / market.value
+                 base: Optional[str] = None) -> Path:
+    from stock_auto.config.paths import profiles_dir
+    d = (Path(base) if base else profiles_dir()) / market.value
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"{profile.symbol}.json"
     path.write_text(json.dumps({str(k): [round(m, 2), round(s, 2)]

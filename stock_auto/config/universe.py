@@ -27,7 +27,7 @@ from typing import Optional
 
 from stock_auto.config.settings import Market
 
-UNIVERSE_DIR = Path(os.environ.get("STOCK_DATA_DIR", "data")) / "universe"
+from stock_auto.config.paths import universe_dir
 
 # ── 샘플 유니버스(즉시 동작용 대형주) + 섹터 ETF ──
 US_SAMPLE: dict[str, str] = {
@@ -190,7 +190,7 @@ def _pick(df, names: tuple[str, ...]) -> Optional[str]:
 def _snapshot_path(market: Market, date: Optional[str] = None) -> Path:
     name = (f"universe_{market.value}_{date}.csv" if date
             else f"universe_{market.value}.csv")
-    return UNIVERSE_DIR / name
+    return universe_dir() / name
 
 
 MIN_SNAPSHOT_SIZE = 50
@@ -209,7 +209,7 @@ def save_snapshot(uni: dict[str, str], market: Market) -> Optional[Path]:
         print(f"[universe] 스냅샷 저장 생략 — {len(uni)}종목은 비정상 "
               f"(최소 {MIN_SNAPSHOT_SIZE})")
         return None
-    UNIVERSE_DIR.mkdir(parents=True, exist_ok=True)
+    universe_dir().mkdir(parents=True, exist_ok=True)
     today = market_today(market)
     for p in (_snapshot_path(market, today), _snapshot_path(market)):
         with p.open("w", newline="", encoding="utf-8") as f:

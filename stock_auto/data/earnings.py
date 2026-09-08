@@ -23,14 +23,17 @@
 from __future__ import annotations
 
 import csv
-import os
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
-CACHE_DIR = Path(os.environ.get("STOCK_DATA_DIR", "data")) / "earnings"
-CACHE_FILE = CACHE_DIR / "earnings_calendar.csv"
+from stock_auto.config.paths import earnings_dir
+
+
+def cache_file() -> Path:
+    return earnings_dir() / "earnings_calendar.csv"
+
 
 # 진입 차단 구간 (거래일 아님 — 달력일 기준. 보수적으로 잡는다)
 BLOCK_DAYS_BEFORE = 3     # 발표 D-3 ~ D 까지 차단
@@ -117,7 +120,7 @@ def _to_date(v) -> Optional[date]:
 
 
 def refresh(symbols: Iterable[str], force: bool = False,
-            path: Path = CACHE_FILE) -> dict[str, EarningsInfo]:
+            path: Optional[Path] = None) -> dict[str, EarningsInfo]:
     """
     유니버스 전 종목의 실적 일정을 갱신해 CSV로 저장.
 
@@ -160,7 +163,8 @@ def _age_days(fetched_at: str, today: date) -> int:
 
 
 # ── 캐시 입출력 ───────────────────────────────────────────────────────────
-def save(data: dict[str, EarningsInfo], path: Path = CACHE_FILE) -> None:
+def save(data: dict[str, EarningsInfo], path: Optional[Path] = None) -> None:
+    path = path or cache_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -171,7 +175,8 @@ def save(data: dict[str, EarningsInfo], path: Path = CACHE_FILE) -> None:
                         i.fetched_at])
 
 
-def load(path: Path = CACHE_FILE) -> dict[str, EarningsInfo]:
+def load(path: Optional[Path] = None) -> dict[str, EarningsInfo]:
+    path = path or cache_file()
     if not path.exists():
         return {}
     out: dict[str, EarningsInfo] = {}
@@ -185,7 +190,7 @@ def load(path: Path = CACHE_FILE) -> dict[str, EarningsInfo]:
 
 # ── 스크리너가 쓰는 형태 ───────────────────────────────────────────────────
 def blocked_map(symbols: Iterable[str], today: Optional[date] = None,
-                path: Path = CACHE_FILE) -> tuple[dict[str, bool], dict[str, Optional[int]]]:
+                path: Optional[Path] = None) -> tuple[dict[str, bool], dict[str, Optional[int]]]:
     """
     {symbol: 차단여부}, {symbol: 발표까지 남은 일수} 반환.
     캐시가 없으면 전부 (False, None) — 정보 없음은 차단 사유가 아니다.

@@ -42,6 +42,12 @@ def check_secrets(sec) -> bool:
         print(f"  {mark} {name}: {_mask(val)}")
     print(f"  → KIS={sec.has_kis} Anthropic={sec.has_anthropic} "
           f"Notion={sec.has_notion} Telegram={sec.has_telegram}")
+    # 데이터가 실제로 어디에 쌓이는지 — .env의 STOCK_DATA_DIR이 먹었는지 확인용
+    from stock_auto.config import paths
+    print(f"  → {paths.describe()}")
+    if not sec.has_telegram:
+        print("  ⚠️  Telegram 미설정 — 일일 추천 다이제스트와 폭주 알림이 "
+              "콘솔에만 출력됩니다(서버에서는 사실상 안 보임)")
     return True
 
 

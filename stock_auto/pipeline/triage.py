@@ -84,7 +84,8 @@ def _commit(updates: dict[str, tuple[str, str]], path: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="추천 실행 여부 트리아지")
-    ap.add_argument("--path", default=store.DEFAULT_PATH)
+    ap.add_argument("--path", default=None,
+                    help="신호 CSV 경로(기본: $STOCK_DATA_DIR/tracking/signals.csv)")
     ap.add_argument("--list", action="store_true", help="목록만 출력")
     ap.add_argument("--set", action="append", default=[], metavar="ID:VALUE",
                     help="비대화형 입력. 예: --set a1b2c3:yes")

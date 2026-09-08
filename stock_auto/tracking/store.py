@@ -20,7 +20,11 @@ from typing import Any, Iterable, Optional
 
 from stock_auto.config.settings import Market
 
-DEFAULT_PATH = "data/tracking/signals.csv"
+def default_path() -> str:
+    """신호 CSV 경로. 호출 시점에 STOCK_DATA_DIR을 반영한다."""
+    from stock_auto.config.paths import signals_csv
+    return str(signals_csv())
+
 
 
 @dataclass
@@ -102,11 +106,11 @@ def make_id(date: str, symbol: str, source: str,
 
 
 # ── 입출력 ────────────────────────────────────────────────────────────────
-def _path(base: str) -> Path:
-    return Path(base)
+def _path(base: Optional[str]) -> Path:
+    return Path(base or default_path())
 
 
-def append(records: Iterable[SignalRecord], base: str = DEFAULT_PATH) -> int:
+def append(records: Iterable[SignalRecord], base: Optional[str] = None) -> int:
     """신규 기록 추가. 동일 signal_id는 건너뛴다(중복 방지)."""
     p = _path(base)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -124,7 +128,7 @@ def append(records: Iterable[SignalRecord], base: str = DEFAULT_PATH) -> int:
     return len(new)
 
 
-def load(base: str = DEFAULT_PATH) -> list[dict[str, Any]]:
+def load(base: Optional[str] = None) -> list[dict[str, Any]]:
     p = _path(base)
     if not p.exists():
         return []
@@ -132,7 +136,7 @@ def load(base: str = DEFAULT_PATH) -> list[dict[str, Any]]:
         return list(csv.DictReader(f))
 
 
-def save_all(rows: list[dict[str, Any]], base: str = DEFAULT_PATH) -> None:
+def save_all(rows: list[dict[str, Any]], base: Optional[str] = None) -> None:
     """전체 재작성(라벨 갱신용)."""
     p = _path(base)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -143,7 +147,7 @@ def save_all(rows: list[dict[str, Any]], base: str = DEFAULT_PATH) -> None:
             w.writerow({k: r.get(k, "") for k in FIELDNAMES})
 
 
-def pending(base: str = DEFAULT_PATH) -> list[dict[str, Any]]:
+def pending(base: Optional[str] = None) -> list[dict[str, Any]]:
     """아직 라벨이 붙지 않은 기록."""
     return [r for r in load(base) if not r.get("exit_type")]
 
@@ -152,7 +156,7 @@ EXECUTED_VALUES = ("yes", "no", "skip")
 
 
 def set_executed(signal_id: str, executed: str, note: str = "",
-                 base: str = DEFAULT_PATH) -> bool:
+                 base: Optional[str] = None) -> bool:
     """트리아지 입력(실행/미실행/보류) 반영. 입력 시각과 사유도 함께 남긴다."""
     if executed not in EXECUTED_VALUES:
         raise ValueError(f"executed는 {EXECUTED_VALUES} 중 하나여야 합니다: {executed!r}")
@@ -172,7 +176,7 @@ def set_executed(signal_id: str, executed: str, note: str = "",
 
 
 def set_executed_many(updates: dict[str, tuple[str, str]],
-                      base: str = DEFAULT_PATH) -> int:
+                      base: Optional[str] = None) -> int:
     """{signal_id: (executed, note)} 를 한 번에 반영 — CSV를 1회만 다시 쓴다."""
     from stock_auto.config.clock import now_et
     for ex, _ in updates.values():
@@ -194,7 +198,7 @@ def set_executed_many(updates: dict[str, tuple[str, str]],
     return n
 
 
-def untriaged(base: str = DEFAULT_PATH, source: Optional[str] = "batch",
+def untriaged(base: Optional[str] = None, source: Optional[str] = "batch",
               include_gated: bool = False) -> list[dict[str, Any]]:
     """
     아직 실행 여부가 입력되지 않은 기록.

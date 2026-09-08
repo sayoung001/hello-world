@@ -45,7 +45,7 @@ class AdaptiveThresholds:
     # ── 적합 ──
     def fit(self, market: Market,
             profiles: dict[str, HistoricalProfile],
-            base_path: str = "data/observations") -> dict[int, tuple[float, int]]:
+            base_path: Optional[str] = None) -> dict[int, tuple[float, int]]:
         """관측 저장소 + 프로파일 → 윈도우별 RVOL 컷."""
         from stock_auto.realtime import observation_store as obs
         data = obs.load(market, base_path)
@@ -107,7 +107,7 @@ class AdaptiveThresholds:
 
 def build(market: Market, profiles: dict[str, HistoricalProfile],
           quantile: float = DEFAULT_QUANTILE,
-          base_path: str = "data/observations") -> AdaptiveThresholds:
+          base_path: Optional[str] = None) -> AdaptiveThresholds:
     """편의 함수: 적합까지 한 번에."""
     at = AdaptiveThresholds(quantile=quantile)
     at.fit(market, profiles, base_path)
