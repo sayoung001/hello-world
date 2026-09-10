@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Optional
 
 OK, WARN, BAD = "✅", "⚠️ ", "❌"
@@ -65,6 +66,10 @@ def main() -> int:
 
     print(f"=== {market.value} 파이프라인 자가점검 "
           f"({market_today(market)} 거래소 기준) ===\n")
+
+    # ── 0. 서버 자원 ──
+    print("[0] 서버 자원")
+    _check_resources(c)
 
     # ── 1. 지수 수집 ──
     print("[1] 지수 수집")
@@ -215,6 +220,72 @@ def main() -> int:
               f"손절 {top['stop']} · 목표 {top['target']} · {top['strategies']}")
 
     return c.summary()
+
+
+def _check_resources(c: "Check") -> None:
+    """
+    메모리·디스크·CPU 실측. 작은 VM(e2-small 등)에서 돌릴 수 있는지 판단용.
+
+    실측 기준(500종목 유니버스):
+      데몬 상주 약 150MB · 배치 최대 약 200MB · 일봉 캐시 약 20MB · 스캔 20~60초
+    즉 2GB/10GB 사양이면 여유가 크다. 아래 임계는 그 실측에 맞춰 잡았다.
+    """
+    import os
+    import shutil
+
+    # 메모리
+    total = avail = swap = None
+    try:
+        with open("/proc/meminfo") as f:
+            info = {k.rstrip(":"): int(v.split()[0]) / 1024
+                    for k, v, *_ in (l.split() for l in f)}
+        total, avail = info.get("MemTotal"), info.get("MemAvailable")
+        swap = info.get("SwapTotal", 0.0)
+    except Exception:  # noqa: BLE001 — 리눅스가 아니면 건너뛴다
+        c.add(WARN, "메모리", "/proc/meminfo 없음 — 리눅스가 아닌 환경")
+
+    if total is not None and avail is not None:
+        detail = (f"총 {total:,.0f}MB · 여유 {avail:,.0f}MB · 스왑 {swap or 0:,.0f}MB "
+                  f"(배치 최대 사용량 약 200MB)")
+        if avail < 300:
+            c.add(BAD, "메모리", detail + " — 배치 도중 OOM 위험")
+        elif avail < 600:
+            c.add(WARN, "메모리", detail + " — 여유가 빠듯합니다. 스왑 권장")
+        else:
+            c.add(OK, "메모리", detail)
+        if (swap or 0) < 1 and total < 4000:
+            c.add(WARN, "스왑", "스왑 없음 — 2GB급 VM에서는 1~2GB 스왑을 만들어 두면 "
+                  "예기치 못한 급증에도 프로세스가 죽지 않습니다 "
+                  "(bash deploy/add_swap.sh)")
+
+    # 디스크
+    try:
+        from stock_auto.config.paths import base_dir
+        target = base_dir()
+        probe = target if target.exists() else Path(".").resolve()
+        du = shutil.disk_usage(probe)
+        free_gb = du.free / 1024**3
+        used_mb = _dir_size_mb(target)
+        detail = (f"여유 {free_gb:.1f}GB · 현재 데이터 {used_mb:.0f}MB "
+                  f"(500종목 캐시 약 20MB)")
+        if free_gb < 1:
+            c.add(BAD, "디스크", detail + " — 공간 부족")
+        elif free_gb < 3:
+            c.add(WARN, "디스크", detail)
+        else:
+            c.add(OK, "디스크", detail)
+    except Exception as e:  # noqa: BLE001
+        c.add(WARN, "디스크", f"{type(e).__name__}")
+
+    n_cpu = os.cpu_count() or 1
+    c.add(OK if n_cpu >= 2 else WARN, "CPU",
+          f"{n_cpu}코어 (500종목 스캔 20~60초, 하루 1회)")
+
+
+def _dir_size_mb(p: "Path") -> float:
+    if not p.exists():
+        return 0.0
+    return sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) / 1024**2
 
 
 def _start(market) -> str:

@@ -38,6 +38,15 @@ fi
 echo "▶ [5/5] 자가점검"
 python -m stock_auto.tools.preflight || true
 
+# 메모리 2GB 이하면 스왑을 권한다(실측 사용량은 200MB지만 보험)
+MEM_MB=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 9999)
+SWAP_MB=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+if [ "$MEM_MB" -le 2200 ] && [ "$SWAP_MB" -lt 512 ]; then
+  echo ""
+  echo "ℹ️  메모리 ${MEM_MB}MB · 스왑 없음 — 스왑 2GB를 만들어 두길 권합니다:"
+  echo "     bash deploy/add_swap.sh"
+fi
+
 cat <<'MSG'
 
 ────────────────────────────────────────────────
@@ -48,6 +57,7 @@ cat <<'MSG'
                      python -m stock_auto.tools.preflight --live
  3) 파이프라인 점검  python -m stock_auto.tools.check_pipeline
  4) 수동 1회 실행    python -m stock_auto.pipeline.run_daily_batch --market US
- 5) 자동 실행 등록   bash deploy/install_service.sh
+ 5) (2GB VM이면) 스왑  bash deploy/add_swap.sh
+ 6) 자동 실행 등록   bash deploy/install_service.sh
 ────────────────────────────────────────────────
 MSG

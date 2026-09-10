@@ -21,9 +21,19 @@ Type=simple
 User=${USER_NAME}
 WorkingDirectory=${APP_DIR}
 Environment=PYTHONUNBUFFERED=1
+# 파이썬이 해제한 메모리를 OS에 더 적극적으로 돌려준다(작은 VM에서 유효)
+Environment=MALLOC_TRIM_THRESHOLD_=65536
 ExecStart=${APP_DIR}/.venv/bin/python -m stock_auto.pipeline.run_daemon
 Restart=always
 RestartSec=30
+# ── 작은 VM 보호 ──
+# 실측 최대 사용량은 약 200MB다. 한도를 넉넉히 1GB로 두되, 넘으면
+# 이 서비스만 종료·재시작되고 VM 전체가 멈추지는 않게 한다.
+MemoryHigh=700M
+MemoryMax=1G
+# 배치가 CPU를 오래 쓰지 않지만, 다른 작업에 양보하도록 우선순위를 낮춘다
+CPUWeight=50
+Nice=5
 StandardOutput=append:${APP_DIR}/logs/daemon.log
 StandardError=append:${APP_DIR}/logs/daemon.log
 
