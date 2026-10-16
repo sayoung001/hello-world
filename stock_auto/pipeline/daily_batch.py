@@ -186,13 +186,18 @@ def _publish_notion(notion, db_id, parent_page, result: BatchResult,
     from stock_auto.integrations.notion_publisher import daily_summary_blocks
     # 게시 일자는 '판단 근거 봉'의 날짜 — 실행일과 다르면 제목에 함께 표기한다
     as_of = result.screen.as_of or result.date
-    # 추천 행
+    # 추천 행 — screener 행을 순서로 짝지어 함께 넘긴다.
+    # Effective·종목명·섹터상태는 reco에 없거나 틀릴 수 있어 row가 정답이다
+    # (RECO_SCHEMA에 effective_score가 없어 Effective가 전 건 비어 있었다).
     if db_id:
-        for reco in result.agents.recommendations:
-            sym = reco.get("ticker", "-")
+        cands = ([] if result.screen.candidates.empty
+                 else result.screen.candidates.to_dict("records"))
+        for i, reco in enumerate(result.agents.recommendations):
+            row = cands[i] if i < len(cands) else {}
+            sym = row.get("symbol") or reco.get("ticker", "-")
             notion.add_recommendation(
                 db_id, reco, result.market.value, as_of,
-                sector_label=sector_label_map.get(sym, "-"))
+                sector_label=sector_label_map.get(sym, "-"), row=row)
     # 일자 요약
     if parent_page:
         sl = result.screen.scored_all

@@ -52,27 +52,72 @@ def _rt(text: str) -> list:
     return [{"type": "text", "text": {"content": str(text)[:1900]}}]
 
 
+SECTOR_SCORE_LABEL = {5: "강력매수", 4: "상승추세", 3: "회복중",
+                      2: "보합", 1: "하락초기", 0: "하락위험"}
+
+
 def recommendation_row(reco: dict, market: str, date: str,
-                       sector_label: str = "-") -> dict:
-    """추천 dict → Notion 페이지(행) properties."""
+                       sector_label: str = "-",
+                       row: Optional[dict] = None) -> dict:
+    """
+    추천 dict → Notion 페이지(행) properties.
+
+    ★ row(screener 행)를 함께 받아야 하는 이유 — 세 가지 값이 reco에 없다.
+      1) effective_score: RECO_SCHEMA의 properties에 아예 없는 키다. LLM이
+         반환할 수 없으므로 reco.get("effective_score")는 **항상 None**이었고,
+         Notion 'Effective' 컬럼이 전 건 비어 있었다(실측 76/76건 누락).
+         점수는 규칙엔진이 계산하므로 출처는 row다.
+      2) 종목: LLM이 ticker를 틀리게 쓰면 그대로 제목이 된다. 실제로 "KR",
+         "KR (US)" 같은 행이 생겼다. row["symbol"]이 정답이다.
+      3) 섹터상태: sector_label_map에서 못 찾으면 "-"가 된다(실측 19/76건).
+         row에 sector_etf·sector_status_score가 있으므로 그걸로 복원한다.
+    """
+    row = row or {}
     pnl = reco.get("expected_pnl_today", {}) or {}
     targets = reco.get("targets", []) or []
+
+    # 규칙엔진 값 우선, 없으면 reco 폴백
+    eff = _num(row.get("effective_score"))
+    if eff is None:
+        eff = _num(reco.get("effective_score"))
+    symbol = str(row.get("symbol") or reco.get("ticker") or "-")
+    stop = _num(reco.get("stop"))
+    if stop is None:
+        stop = _num(row.get("stop"))
+    target_txt = ", ".join(str(t) for t in targets)
+    if not target_txt and row.get("target") is not None:
+        target_txt = str(row.get("target"))
+
     return {
-        "종목": {"title": _rt(reco.get("ticker", "-"))},
+        "종목": {"title": _rt(symbol)},
         "시장": {"select": {"name": market}},
-        "추천": {"select": {"name": reco.get("recommend", "WATCH")}},
-        "보유기간": {"select": {"name": reco.get("horizon", "중단기")}},
-        "Effective": {"number": _num(reco.get("effective_score"))},
+        "추천": {"select": {"name": reco.get("recommend") or "WATCH"}},
+        "보유기간": {"select": {"name": reco.get("horizon") or "중단기"}},
+        "Effective": {"number": eff},
         "확신도": {"number": _num(reco.get("conviction"))},
         "진입조건": {"rich_text": _rt(reco.get("entry_rule", ""))},
-        "손절": {"number": _num(reco.get("stop"))},
-        "목표": {"rich_text": _rt(", ".join(str(t) for t in targets))},
+        "손절": {"number": stop},
+        "목표": {"rich_text": _rt(target_txt)},
         "예상손익P10": {"number": _num(pnl.get("p10_pct"))},
         "예상손익P50": {"number": _num(pnl.get("p50_pct"))},
         "예상손익P90": {"number": _num(pnl.get("p90_pct"))},
-        "섹터상태": {"rich_text": _rt(sector_label)},
+        "섹터상태": {"rich_text": _rt(_sector_text(sector_label, row))},
         "일자": {"date": {"start": date}},
     }
+
+
+def _sector_text(sector_label: str, row: dict) -> str:
+    """섹터 라벨이 비었으면 screener 행의 ETF·상태점수로 복원."""
+    if sector_label and sector_label not in ("-", "—"):
+        return sector_label
+    etf = row.get("sector_etf")
+    score = row.get("sector_status_score")
+    if etf and etf != "-":
+        if score is not None and score == score:      # NaN 아님
+            s = int(score)
+            return f"{etf} {SECTOR_SCORE_LABEL.get(s, '?')} [{s}]"
+        return f"{etf} (상태 미상)"
+    return "-"
 
 
 def _num(v: Any) -> Optional[float]:
@@ -172,8 +217,9 @@ class NotionPublisher:
         return res.get("id") if res else None
 
     def add_recommendation(self, db_id: str, reco: dict, market: str,
-                           date: str, sector_label: str = "-") -> Optional[str]:
-        props = recommendation_row(reco, market, date, sector_label)
+                           date: str, sector_label: str = "-",
+                           row: Optional[dict] = None) -> Optional[str]:
+        props = recommendation_row(reco, market, date, sector_label, row)
         res = self._post("/pages", {"parent": {"database_id": db_id},
                                     "properties": props})
         return res.get("id") if res else None
