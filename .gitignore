@@ -12,3 +12,4 @@ data/profiles/
 data/ohlcv_cache/
 data/tracking/
 data/observations/
+logs/
