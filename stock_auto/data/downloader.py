@@ -75,7 +75,7 @@ def download_ohlcv(
                 df = fdr.DataReader(symbol, start, end)
             else:
                 import yfinance as yf
-                df = yf.download(symbol, start=start, end=end, progress=False,
+                df = yf.download(_yf_symbol(symbol), start=start, end=end, progress=False,
                                  auto_adjust=True)
                 if df is not None and isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
@@ -259,3 +259,21 @@ def make_synthetic(
     )
     df["Turnover"] = df["Close"] * df["Volume"]
     return df
+
+
+# yfinance 심볼 별칭
+# FDR 상장목록은 클래스주를 구분자 없이 준다(BRK.B -> BRKB). yfinance는 '-' 표기를
+# 쓰므로 그대로 넘기면 404가 난다. 지수도 FDR 코드와 yfinance 티커가 다르다.
+_YF_ALIAS = {
+    "BRKB": "BRK-B",
+    "BFB": "BF-B",
+    "US500": "^GSPC",
+    "IXIC": "^IXIC",
+    "KS11": "^KS11",
+    "KQ11": "^KQ11",
+}
+
+
+def _yf_symbol(symbol: str) -> str:
+    """FDR 기준 심볼을 yfinance 티커로 바꾼다."""
+    return _YF_ALIAS.get(str(symbol).upper(), symbol)

@@ -64,7 +64,8 @@ def fetch_one(symbol: str) -> Optional[date]:
     """yfinance에서 다음 실적 발표 예정일 1건. 실패 시 None."""
     try:
         import yfinance as yf
-        t = yf.Ticker(symbol)
+        from stock_auto.data.downloader import _yf_symbol
+        t = yf.Ticker(_yf_symbol(symbol))
         # 1차: calendar (dict 또는 DataFrame)
         cal = getattr(t, "calendar", None)
         d = _extract_from_calendar(cal)

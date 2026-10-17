@@ -127,7 +127,58 @@ def run_daily(
             _send_digest(result, telegram)
         except Exception as e:  # noqa: BLE001 — 알림 실패가 배치를 망치지 않게
             print(f"[batch] 텔레그램 다이제스트 실패: {type(e).__name__}: {e}")
+        # 5.5) 추천 종목 차트 — 다이제스트 뒤에 추천당 1장 (코인봇 sendPhoto 방식)
+        try:
+            _send_charts(result, ohlcv_map, telegram)
+        except Exception as e:  # noqa: BLE001 — 차트 실패가 배치를 망치지 않게
+            print(f"[batch] 차트 전송 실패: {type(e).__name__}: {e}")
     return result
+
+
+def _send_charts(result: BatchResult, ohlcv_map: dict, telegram: Any = None) -> int:
+    """
+    LLM 추천(recommendations) 각각에 대해 일봉 차트 PNG를 보낸다.
+    매도신호(EXIT)까지 보내면 하루 수십 장이라 추천건만. 상한은 STOCK_CHART_MAX(기본 5).
+    """
+    import os
+    from stock_auto.notify.chart import render_signal_chart, caption_for
+    recos = list(result.agents.recommendations)
+    if not recos:
+        return 0
+    limit = int(os.environ.get("STOCK_CHART_MAX", "5") or 5)
+    tg = telegram
+    if tg is None:
+        from stock_auto.config.env import get_secrets
+        from stock_auto.notify.telegram import Telegram
+        sec = get_secrets()
+        tg = Telegram(sec.telegram_bot_token, sec.telegram_chat_id)
+    rows = ([] if result.screen.candidates.empty
+            else result.screen.candidates.to_dict("records"))
+    by_sym = {str(r.get("symbol")): r for r in rows}
+    sent = 0
+    for i, reco in enumerate(recos[:limit]):
+        # 추천-후보 매칭은 _record_signals와 같은 규칙(순서 우선, 티커 폴백)
+        row = rows[i] if i < len(rows) else by_sym.get(str(reco.get("ticker")), {})
+        sym = str(row.get("symbol") or reco.get("ticker") or "")
+        df = ohlcv_map.get(sym)
+        if df is None or df.empty:
+            print(f"[batch] 차트 생략 {sym}: 일봉 없음")
+            continue
+        plan = {"stop": reco.get("stop"), "targets": reco.get("targets"),
+                "close": row.get("close"), "recommend": reco.get("recommend"),
+                "horizon": reco.get("horizon"), "conviction": reco.get("conviction"),
+                "days_to_earnings": row.get("days_to_earnings")}
+        png = render_signal_chart(sym, df, plan)
+        if getattr(tg, "enabled", False):
+            if tg.send_photo(png, caption_for(reco, row), filename=f"{sym}.png"):
+                sent += 1
+        else:
+            from pathlib import Path
+            out = Path("logs/charts"); out.mkdir(parents=True, exist_ok=True)
+            (out / f"{sym}_{result.date}.png").write_bytes(png)
+            print(f"[batch] 텔레그램 미설정 — 차트 저장 logs/charts/{sym}_{result.date}.png")
+    print(f"[batch] 추천 차트 {sent}/{min(len(recos), limit)}장 전송")
+    return sent
 
 
 def _send_digest(result: BatchResult, telegram: Any = None) -> None:
@@ -178,7 +229,25 @@ def _record_signals(result: BatchResult) -> int:
         for row in gated.to_dict("records"):
             date = str(row.get("bar_date") or result.screen.as_of or result.date)
             records.append(store.from_screen_row(row, date, None))
+    _auto_execute(records)
     return store.append(records)
+
+
+def _auto_execute(records: list) -> None:
+    """
+    STOCK_TRACK_AUTO_EXECUTE=yes|no 이면 게이트 통과 추천(AVOID 제외)의 실행 여부를 자동 표시.
+    '전부 산다고 가정하고 한 달 지켜보기' 같은 관찰 모드용 — 매일 triage 입력을 생략한다.
+    """
+    import os
+    mode = os.environ.get("STOCK_TRACK_AUTO_EXECUTE", "").strip().lower()
+    if mode not in ("yes", "no"):
+        return
+    from stock_auto.config.clock import now_et
+    stamp = now_et().strftime("%Y-%m-%d %H:%M %Z")
+    for r in records:
+        if r.source == "batch" and not r.gated_by and r.recommend and r.recommend != "AVOID":
+            r.executed, r.executed_at = mode, stamp
+            r.triage_note = "자동: 전부 매수 가정" if mode == "yes" else "자동: 미실행 가정"
 
 
 def _publish_notion(notion, db_id, parent_page, result: BatchResult,
