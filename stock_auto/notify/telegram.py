@@ -79,6 +79,27 @@ class Telegram:
             print(f"[telegram] 전송 실패: {type(e).__name__}: {e}")
             return False
 
+    def send_photo(self, png: bytes, caption: str = "", filename: str = "chart.png") -> bool:
+        """차트 PNG 전송 — 코인봇 sendPhoto 패턴 계승. 캡션 상한 1024자."""
+        if not self.enabled:
+            print(f"[telegram] 미설정 — 사진 생략: {filename}")
+            return False
+        try:
+            import requests
+            url = TELEGRAM_API.format(token=self.token, method="sendPhoto")
+            data = {"chat_id": self.chat_id}
+            if caption:
+                data["caption"] = caption[:1024]
+            r = requests.post(url, data=data,
+                              files={"photo": (filename, png, "image/png")}, timeout=30)
+            if r.status_code != 200 or not r.json().get("ok"):
+                print(f"[telegram] sendPhoto 실패: {r.status_code} {r.text[:200]}")
+                return False
+            return True
+        except Exception as e:  # noqa: BLE001
+            print(f"[telegram] 사진 전송 실패: {type(e).__name__}: {e}")
+            return False
+
     def send_document(self, path: str, caption: str = "") -> bool:
         if not self.enabled:
             print(f"[telegram] 미설정 — 파일 생략: {path}")

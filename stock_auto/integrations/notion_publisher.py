@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
-NOTION_VERSION = "2022-06-28"
+NOTION_VERSION = "2025-09-03"
 NOTION_BASE = "https://api.notion.com/v1"
 
 
@@ -184,6 +184,7 @@ class NotionPublisher:
         if not self.enabled:
             print(f"[notion] 미설정 — {path} 생략")
             return None
+        r = None
         try:
             import requests
             r = requests.post(f"{NOTION_BASE}{path}", headers=self._headers(),
@@ -191,13 +192,20 @@ class NotionPublisher:
             r.raise_for_status()
             return r.json()
         except Exception as e:  # noqa: BLE001
-            print(f"[notion] {path} 실패: {type(e).__name__}: {e}")
+            body = ""
+            if r is not None:
+                try:
+                    body = f" | resp: {r.text[:500]}"
+                except Exception:  # noqa: BLE001
+                    body = ""
+            print(f"[notion] {path} 실패: {type(e).__name__}: {e}{body}")
             return None
 
     def _patch(self, path: str, payload: dict) -> Optional[dict]:
         if not self.enabled:
             print(f"[notion] 미설정 — {path} 생략")
             return None
+        r = None
         try:
             import requests
             r = requests.patch(f"{NOTION_BASE}{path}", headers=self._headers(),
@@ -205,22 +213,31 @@ class NotionPublisher:
             r.raise_for_status()
             return r.json()
         except Exception as e:  # noqa: BLE001
-            print(f"[notion] {path} 실패: {type(e).__name__}: {e}")
+            body = ""
+            if r is not None:
+                try:
+                    body = f" | resp: {r.text[:500]}"
+                except Exception:  # noqa: BLE001
+                    body = ""
+            print(f"[notion] {path} 실패: {type(e).__name__}: {e}{body}")
             return None
 
     def create_recommendations_db(self, parent_page_id: str,
                                   title: str = "오늘의 추천") -> Optional[str]:
         """1회 셋업: 부모 페이지 아래 추천 DB 생성 → DB ID 반환."""
         schema = recommendations_db_schema(title)
-        payload = {"parent": {"type": "page_id", "page_id": parent_page_id}, **schema}
+        payload = {"parent": {"type": "page_id", "page_id": parent_page_id}, "title": schema["title"], "initial_data_source": {"properties": schema["properties"]}}
         res = self._post("/databases", payload)
-        return res.get("id") if res else None
+        return ((res.get("data_sources") or [{}])[0].get("id") or res.get("id")) if res else None
 
     def add_recommendation(self, db_id: str, reco: dict, market: str,
                            date: str, sector_label: str = "-",
                            row: Optional[dict] = None) -> Optional[str]:
+        # row(screener 행)는 Effective·종목명·섹터상태의 정답 출처다 — recommendation_row 참조.
+        # parent는 Notion API 2025-09-03 의 data_source_id 방식(VM에서 마이그레이션).
         props = recommendation_row(reco, market, date, sector_label, row)
-        res = self._post("/pages", {"parent": {"database_id": db_id},
+        res = self._post("/pages", {"parent": {"type": "data_source_id",
+                                               "data_source_id": db_id},
                                     "properties": props})
         return res.get("id") if res else None
 

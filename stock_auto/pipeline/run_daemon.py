@@ -113,6 +113,35 @@ def _recalibrate_and_batch():
                   notion_parent_page=sec.notion_parent_page_id or None,
                   run_llm=sec.has_anthropic)
 
+    # ⑤ 보유일별 수익 곡선 갱신 + 대시보드 재생성 (배치마다)
+    try:
+        from stock_auto.tracking import forward, dashboard
+        fs = forward.update()
+        dp = dashboard.write()
+        print(f"[daemon] 보유일 곡선 갱신 {fs['updated']}건 · 대시보드 → {dp}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[daemon] 보유일 곡선/대시보드 실패: {type(e).__name__}: {e}")
+
+
+def _weekly_report():
+    """주 1회(토요일) 성과 요약을 텔레그램으로 — 라벨링·곡선 갱신 후 요약 + 대시보드 파일."""
+    from stock_auto.tracking import labeler, forward, store, pnl, dashboard
+    from stock_auto.config.clock import now_et
+    print(f"[daemon] {now_et():%Y-%m-%d %H:%M %Z} 주간 성과 리포트")
+    try:
+        labeler.label_pending()
+        forward.update()
+        rows, fwd_rows = store.load(), forward.load()
+        dp = dashboard.write(rows=rows, fwd_rows=fwd_rows)
+        sec = get_secrets()
+        tg = Telegram(sec.telegram_bot_token, sec.telegram_chat_id)
+        if tg.enabled:
+            tg.send_message(pnl.telegram_summary(rows, fwd_rows), parse_mode="")
+            tg.send_document(str(dp), caption="추천 성과 대시보드 (브라우저로 열기)")
+        print("[daemon] 주간 리포트 전송")
+    except Exception as e:  # noqa: BLE001
+        print(f"[daemon] 주간 리포트 실패: {type(e).__name__}: {e}")
+
 
 def _run_monitor_thread(market: Market, session_minutes: int):
     """개장 시 모니터를 스레드로 구동, 장 마감까지 자동 정지."""
@@ -191,6 +220,9 @@ def main() -> int:
     # 일일 배치 + 재구축: ET 17:00(마감+1h), DST 자동
     sch.add_job(_recalibrate_and_batch,
                 CronTrigger(hour=17, minute=0, day_of_week="mon-fri", timezone=ET))
+    # 주간 성과 요약: 토요일 10:00 KST (한 주 결과 라벨링이 끝난 뒤)
+    sch.add_job(_weekly_report,
+                CronTrigger(hour=10, minute=0, day_of_week="sat", timezone=KST))
     # US 개장 09:30 ET → 약 390분 (정규장)
     sch.add_job(lambda: _run_monitor_thread(Market.US, 390),
                 CronTrigger(hour=9, minute=30, day_of_week="mon-fri", timezone=ET))
@@ -200,7 +232,7 @@ def main() -> int:
                     CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=KST))
 
     print(f"[daemon] 시작 — 대상시장 {[m.value for m in markets]} "
-          "| 일일배치(US마감+1h) / 개장 모니터 / 자가보정")
+          "| 일일배치(US마감+1h) / 개장 모니터 / 자가보정 / 주간성과(토 10:00 KST)")
     print("[daemon] Ctrl+C 로 종료")
     try:
         sch.start()

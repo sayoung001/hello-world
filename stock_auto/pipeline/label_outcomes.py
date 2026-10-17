@@ -36,9 +36,33 @@ def main() -> int:
         print(f"[label] 신규 라벨 {stat['labeled']}건 · "
               f"결과 대기 {stat['pending']}건 · 데이터없음 {stat['nodata']}건")
 
+    # 보유일별 수익 곡선(forward_returns.csv) 갱신 — 라벨링과 별개로 매번
+    fwd_rows: list = []
+    if not args.no_label:
+        try:
+            from stock_auto.tracking import forward
+            fs = forward.update(path=None if args.path is None else
+                                str(Path(args.path).with_name("forward_returns.csv")))
+            print(f"[forward] 갱신 {fs['updated']}건 · 20일 완료 {fs['complete']}건 · "
+                  f"진입 대기 {fs['pending']}건")
+        except Exception as e:  # noqa: BLE001
+            print(f"[forward] 실패: {type(e).__name__}: {e}")
+
     rows = store.load(args.path)
+    from stock_auto.tracking import forward, pnl
+    fwd_rows = forward.load(None if args.path is None else
+                            str(Path(args.path).with_name("forward_returns.csv")))
     md = report_mod.build_report(rows)
+    md += "\n" + "\n".join(forward.section_md(fwd_rows)) + "\n" + "\n".join(pnl.section_md(rows))
     print("\n" + md)
+
+    # 대시보드 HTML도 같이 갱신
+    try:
+        from stock_auto.tracking import dashboard
+        dp = dashboard.write(rows=rows, fwd_rows=fwd_rows)
+        print(f"[dashboard] 저장 → {dp}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[dashboard] 실패: {type(e).__name__}: {e}")
 
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
@@ -77,8 +101,12 @@ def main() -> int:
         from stock_auto.notify.telegram import Telegram
         sec = get_secrets()
         tg = Telegram(sec.telegram_bot_token, sec.telegram_chat_id)
-        head = "\n".join(md.split("\n")[:14])
-        tg.send_message(head, parse_mode="")
+        tg.send_message(pnl.telegram_summary(rows, fwd_rows), parse_mode="")
+        try:
+            tg.send_document(str(Path("logs/dashboard.html")),
+                             caption="추천 성과 대시보드 (브라우저로 열기)")
+        except Exception as e:  # noqa: BLE001
+            print(f"[telegram] 대시보드 전송 실패: {e}")
     return 0
 
 
