@@ -230,7 +230,44 @@ def _record_signals(result: BatchResult) -> int:
             date = str(row.get("bar_date") or result.screen.as_of or result.date)
             records.append(store.from_screen_row(row, date, None))
     _auto_execute(records)
-    return store.append(records)
+    n = store.append(records)
+
+    # 진입 트리거 적립 — 추천의 진입 조건을 감시 대상으로 등록한다.
+    # 게이트 차단분은 제외(사람에게 보여준 적 없는 신호를 감시할 이유가 없다).
+    try:
+        _register_triggers(result, rows, recos, records)
+    except Exception as e:  # noqa: BLE001 — 트리거 적립 실패가 배치를 막지 않게
+        print(f"[batch] 트리거 적립 실패: {type(e).__name__}: {e}")
+    return n
+
+
+def _register_triggers(result: BatchResult, rows: list, recos: list,
+                       records: list) -> int:
+    """추천 1건당 진입 트리거 1건. 조건은 LLM 스키마 우선, 없으면 문장 파싱."""
+    from stock_auto.tracking import triggers as T
+    if not rows:
+        return 0
+    by_sym = {r.symbol: r for r in records}
+    items = []
+    for i, row in enumerate(rows):
+        reco = recos[i] if i < len(recos) else None
+        if not reco:
+            continue
+        date = str(row.get("bar_date") or result.screen.as_of or result.date)
+        sym = str(row.get("symbol") or "")
+        rec = by_sym.get(sym)
+        items.append(T.from_recommendation(
+            row, reco, date,
+            signal_id=(rec.signal_id if rec else ""),
+            sector_label=str(row.get("sector_label") or "")))
+    added = T.append(items)
+    if added:
+        kinds: dict[str, int] = {}
+        for t in items:
+            kinds[t.kind] = kinds.get(t.kind, 0) + 1
+        detail = " · ".join(f"{k} {v}" for k, v in sorted(kinds.items()))
+        print(f"[batch] 진입 트리거 {added}건 등록 ({detail})")
+    return added
 
 
 def _auto_execute(records: list) -> None:

@@ -222,13 +222,43 @@ class NotionPublisher:
             print(f"[notion] {path} 실패: {type(e).__name__}: {e}{body}")
             return None
 
+    def create_database(self, parent_page_id: str, schema: dict) -> Optional[str]:
+        """
+        스키마 dict({"title":…, "properties":…})로 DB 생성 → **데이터 소스 ID** 반환.
+
+        Notion API 2025-09-03 부터 DB 아래에 데이터 소스 계층이 생겨,
+        행을 넣을 때 쓰는 ID는 database_id 가 아니라 data_source_id 다.
+        """
+        payload = {"parent": {"type": "page_id", "page_id": parent_page_id},
+                   "title": schema["title"],
+                   "initial_data_source": {"properties": schema["properties"]}}
+        res = self._post("/databases", payload)
+        if not res:
+            return None
+        return (res.get("data_sources") or [{}])[0].get("id") or res.get("id")
+
     def create_recommendations_db(self, parent_page_id: str,
                                   title: str = "오늘의 추천") -> Optional[str]:
-        """1회 셋업: 부모 페이지 아래 추천 DB 생성 → DB ID 반환."""
-        schema = recommendations_db_schema(title)
-        payload = {"parent": {"type": "page_id", "page_id": parent_page_id}, "title": schema["title"], "initial_data_source": {"properties": schema["properties"]}}
-        res = self._post("/databases", payload)
-        return ((res.get("data_sources") or [{}])[0].get("id") or res.get("id")) if res else None
+        """1회 셋업: 부모 페이지 아래 추천 DB 생성 → 데이터 소스 ID 반환."""
+        return self.create_database(parent_page_id,
+                                    recommendations_db_schema(title))
+
+    def create_triggers_db(self, parent_page_id: str,
+                           title: str = "진입 신호 도달") -> Optional[str]:
+        """1회 셋업: 진입 트리거 도달 DB 생성 → 데이터 소스 ID 반환."""
+        from stock_auto.tracking.trigger_notify import triggers_db_schema
+        return self.create_database(parent_page_id, triggers_db_schema(title))
+
+    def add_row(self, db_id: str, properties: dict,
+                children: Optional[list] = None) -> Optional[str]:
+        """임의 DB에 행 1개 추가 → 페이지 ID. properties는 호출측이 만든다."""
+        payload: dict = {"parent": {"type": "data_source_id",
+                                    "data_source_id": db_id},
+                         "properties": properties}
+        if children:
+            payload["children"] = children[:100]
+        res = self._post("/pages", payload)
+        return res.get("id") if res else None
 
     def add_recommendation(self, db_id: str, reco: dict, market: str,
                            date: str, sector_label: str = "-",

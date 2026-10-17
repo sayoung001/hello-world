@@ -39,6 +39,7 @@ def build(market: Market, universe: list[str],
                 picked.append(s)
 
     _add(_held(market))
+    _add(_pending_triggers(market))      # 진입 조건 감시 중인 종목
     _add(_recent_candidates(market, signals_path))
     _add(universe)
 
@@ -46,6 +47,15 @@ def build(market: Market, universe: list[str],
         print(f"[watchlist] 유니버스 {len(universe)}종목 중 {len(picked)}종목만 실시간 감시 "
               f"(KIS 등록 한도 {limit}). 보유·직전 후보 우선.")
     return picked
+
+
+def _pending_triggers(market: Market) -> list[str]:
+    """진입 조건 도달을 기다리는 종목 — 닿는 순간 알려야 하므로 우선순위가 높다."""
+    try:
+        from stock_auto.tracking import triggers
+        return triggers.pending_symbols(market=market.value)
+    except Exception:  # noqa: BLE001 — triggers.csv 가 아직 없을 수 있다
+        return []
 
 
 def _held(market: Market) -> list[str]:

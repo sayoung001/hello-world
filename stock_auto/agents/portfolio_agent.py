@@ -22,7 +22,26 @@ RECO_SCHEMA = {
         "recommend": {"type": "string", "enum": ["BUY", "WATCH", "AVOID"]},
         "horizon": {"type": "string", "enum": ["단타", "중단기", "스윙"]},
         "conviction": {"type": "number"},          # 0~1
-        "entry_rule": {"type": "string"},           # 언제 매수(조건)
+        "entry_rule": {"type": "string"},           # 언제 매수(조건) — 사람이 읽는 문장
+        # ★ 기계가 읽는 진입 트리거. entry_rule만으로는 가격 도달을 감시할 수 없다.
+        #   (effective_score 사건의 교훈: 스키마에 없는 키는 LLM이 반환할 수 없다)
+        "entry_trigger": {
+            "type": "object",
+            "properties": {
+                # pullback  = 기준가 아래로 value% 눌리면 발화
+                # breakout  = 기준가 위로 value% 돌파하면 발화
+                # immediate = 조건 없이 다음 개장에 진입
+                "kind": {"type": "string",
+                         "enum": ["pullback", "breakout", "immediate"]},
+                "value_pct": {"type": "number"},     # 1.5 = 1.5%. immediate면 0
+                # 기준가: signal_close(추천일 종가) / prev_close / open(당일 시가)
+                "basis": {"type": "string",
+                          "enum": ["signal_close", "prev_close", "open"]},
+                "split": {"type": "boolean"},        # 분할 진입 권고 여부
+            },
+            "required": ["kind", "value_pct", "basis", "split"],
+            "additionalProperties": False,
+        },
         "entry_zone": {"type": "array", "items": {"type": "number"}},
         "stop": {"type": "number"},
         "targets": {"type": "array", "items": {"type": "number"}},
@@ -51,8 +70,8 @@ RECO_SCHEMA = {
         "sources": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["ticker", "recommend", "horizon", "conviction", "entry_rule",
-                 "entry_zone", "stop", "targets", "expected_pnl_today",
-                 "exit_plan", "rationale", "sources"],
+                 "entry_trigger", "entry_zone", "stop", "targets",
+                 "expected_pnl_today", "exit_plan", "rationale", "sources"],
     "additionalProperties": False,
 }
 
@@ -61,6 +80,12 @@ _SYSTEM = (
     "규칙 기반 시그널, 섹터 상태, 그리고 뉴스/수급/밸류 에이전트의 코멘트를 종합해 "
     "실행 가능한 추천을 만든다. 규칙:\n"
     "1) 모든 진입가는 고정가가 아니라 '조건'으로 표현(예: 시가 -1% 눌림 & RVOL>1.5).\n"
+    "   그리고 그 조건을 entry_trigger에 **기계가 읽을 수 있게** 똑같이 담아라.\n"
+    "   예) '1.5% 눌림 시 분할 진입' → kind=pullback, value_pct=1.5,\n"
+    "       basis=signal_close, split=true\n"
+    "   예) '종가 돌파 확인 후 진입'  → kind=breakout, value_pct=0.5,\n"
+    "       basis=signal_close, split=false\n"
+    "   눌림/돌파 조건이 없으면 kind=immediate, value_pct=0.\n"
     "2) 당일 예상 손익은 점추정 금지 — ATR/유사셋업 기반 P10/P50/P90 범위로.\n"
     "3) 제공된 근거에 없는 사실 날조 금지. 출처를 sources에 명시.\n"
     "4) 이것은 투자 권유가 아니라 분석 보조다. 과신 표현 자제.\n"
