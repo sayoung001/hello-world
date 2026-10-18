@@ -36,6 +36,6 @@ source .venv/bin/activate
 pip install -q -r requirements.txt
 
 echo "▶ 점검 후 재시작"
-python -m stock_auto.tools.preflight || true
+.venv/bin/python -m stock_auto.tools.preflight || true
 sudo systemctl start stock-auto 2>/dev/null || true
 echo "완료. 백업: ${APP_DIR}.bak_${STAMP}"

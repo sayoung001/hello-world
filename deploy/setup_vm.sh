@@ -36,7 +36,7 @@ else
 fi
 
 echo "▶ [5/5] 자가점검"
-python -m stock_auto.tools.preflight || true
+.venv/bin/python -m stock_auto.tools.preflight || true
 
 # 메모리 2GB 이하면 스왑을 권한다(실측 사용량은 200MB지만 보험)
 MEM_MB=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 9999)
@@ -52,11 +52,14 @@ cat <<'MSG'
 ────────────────────────────────────────────────
 설치 완료. 다음 순서로 진행하세요.
 
+※ 아래 명령은 모두 맨 위에 표시된 "설치 위치" 폴더 안에서 실행합니다.
+   .venv/bin/python 으로 적은 이유: python 만 쓰면 가상환경을 켜지 않은
+   새 SSH 창에서 "python: command not found" 가 납니다.
+
  1) 키 입력          nano .env          (저장: Ctrl+O → Enter, 종료: Ctrl+X)
- 2) 연결 확인        source .venv/bin/activate
-                     python -m stock_auto.tools.preflight --live
- 3) 파이프라인 점검  python -m stock_auto.tools.check_pipeline
- 4) 수동 1회 실행    python -m stock_auto.pipeline.run_daily_batch --market US
+ 2) 연결 확인        .venv/bin/python -m stock_auto.tools.preflight --live
+ 3) 파이프라인 점검  .venv/bin/python -m stock_auto.tools.check_pipeline
+ 4) 수동 1회 실행    .venv/bin/python -m stock_auto.pipeline.run_daily_batch --market US
  5) (2GB VM이면) 스왑  bash deploy/add_swap.sh
  6) 자동 실행 등록   bash deploy/install_service.sh
 ────────────────────────────────────────────────

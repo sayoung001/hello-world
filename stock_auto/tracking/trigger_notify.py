@@ -22,6 +22,18 @@ from typing import Any, Optional
 # ── Notion: '진입 신호 도달' DB ────────────────────────────────────────────
 HORIZON_BUCKET = {"단타": "단기", "중단기": "중기", "스윙": "장기"}
 
+_TRUE = {"yes", "y", "true", "1", "t", "on"}
+
+
+def _is_split(t: dict) -> bool:
+    """분할 진입 여부. 생성부는 "yes"를 넣지만 CSV를 거치면 bool이 "True"가 되고,
+    Trigger를 직접 만들면 bool이 그대로 들어온다. 어느 쪽이든 참으로 읽어야
+    '분할 진입 권고'가 조용히 사라지지 않는다."""
+    v = t.get("split", "")
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in _TRUE
+
 
 def triggers_db_schema(title: str = "진입 신호 도달") -> dict:
     """사용자가 요청한 항목으로 구성한 DB 스키마."""
@@ -100,7 +112,7 @@ def trigger_row(trigger: dict, fired_price: float, fired_at: str,
         "기준가": {"number": _num(trigger.get("basis_price"))},
         "손절": {"number": _num(trigger.get("stop"))},
         "목표": {"number": _num(trigger.get("target"))},
-        "분할진입": {"checkbox": str(trigger.get("split", "")).lower() == "yes"},
+        "분할진입": {"checkbox": _is_split(trigger)},
         "Effective": {"number": _num(trigger.get("effective_score"))},
         "확신도": {"number": _num(trigger.get("conviction"))},
         "섹터상태": {"rich_text": _rt(trigger.get("sector_label") or "-")},
@@ -116,7 +128,7 @@ def _condition_text(t: dict) -> str:
              "open": "당일 시가"}.get(str(t.get("basis", "")), "기준가")
     label = {"pullback": "눌림", "breakout": "돌파", "immediate": "즉시"}.get(kind, kind)
     head = f"{basis} 대비 {v}% {label}" if kind != "immediate" else "조건 없음(즉시)"
-    if str(t.get("split", "")).lower() == "yes":
+    if _is_split(t):
         head += " · 분할 진입"
     raw = str(t.get("rule_text", "")).strip()
     return f"{head}" + (f"  ({raw})" if raw else "")
@@ -180,7 +192,7 @@ def short_alert(trigger: dict, fired_price: float, notion_url: str = "") -> str:
         f"{cond} · {fired_price:,.2f}",
         f"{cat} · {bucket} · 손절 {trigger.get('stop') or '-'}",
     ]
-    if str(trigger.get("split", "")).lower() == "yes":
+    if _is_split(trigger):
         lines.append("※ 분할 진입 권고")
     lines.append("노션에 정리했습니다" + (f" → {notion_url}" if notion_url else ""))
     return "\n".join(lines)
