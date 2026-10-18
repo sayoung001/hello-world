@@ -105,12 +105,12 @@ CRON_HINTS = """\
 # crontab (서버 TZ=Asia/Seoul 가정). DST로 US 트리거는 ±1h 흔들리므로
 # 가능하면 APScheduler(zoneinfo)로 동적 계산 권장.
 # 일일 배치: US 마감+1h ≈ 06:00~07:00 KST (표준시 07:00, DST 06:00)
-0 6 * * 1-5   python -m stock_auto.pipeline.run_daily_batch
+0 6 * * 1-5   .venv/bin/python -m stock_auto.pipeline.run_daily_batch
 # KR 개장 모니터
-0 9 * * 1-5   python -m stock_auto.pipeline.run_kr_monitor
+0 9 * * 1-5   .venv/bin/python -m stock_auto.pipeline.run_kr_monitor
 # US 개장 모니터: 23:30 KST(표준) / 22:30(DST) — 둘 다 등록하고 내부에서 게이트
-30 23 * * 1-5 python -m stock_auto.pipeline.run_us_monitor
-30 22 * * 1-5 python -m stock_auto.pipeline.run_us_monitor
+30 23 * * 1-5 .venv/bin/python -m stock_auto.pipeline.run_us_monitor
+30 22 * * 1-5 .venv/bin/python -m stock_auto.pipeline.run_us_monitor
 """
 
 

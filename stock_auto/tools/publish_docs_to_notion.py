@@ -2,7 +2,7 @@
 설계 문서 → Notion 게시 (A).
 
 사용:
-  python -m stock_auto.tools.publish_docs_to_notion [파일...]
+  .venv/bin/python -m stock_auto.tools.publish_docs_to_notion [파일...]
   인자 없으면 기본 설계 문서를 게시.
 
 필요 .env: NOTION_TOKEN, NOTION_PARENT_PAGE_ID

@@ -2,10 +2,10 @@
 진입 트리거 점검 — pending 트리거를 일봉으로 판정해 발화·만료시킨다.
 
 사용:
-  python -m stock_auto.pipeline.check_triggers              # 판정 + 알림
-  python -m stock_auto.pipeline.check_triggers --list       # 목록만(판정 안 함)
-  python -m stock_auto.pipeline.check_triggers --dry-run    # 판정하되 알림·게시 생략
-  python -m stock_auto.pipeline.check_triggers --setup-db   # Notion DB 1회 생성
+  .venv/bin/python -m stock_auto.pipeline.check_triggers              # 판정 + 알림
+  .venv/bin/python -m stock_auto.pipeline.check_triggers --list       # 목록만(판정 안 함)
+  .venv/bin/python -m stock_auto.pipeline.check_triggers --dry-run    # 판정하되 알림·게시 생략
+  .venv/bin/python -m stock_auto.pipeline.check_triggers --setup-db   # Notion DB 1회 생성
 
 매일 배치 뒤에 돌리면 "오늘 진입 조건에 닿은 종목"이 알림으로 온다.
 장중 실시간 감시는 모니터(run_monitor)에 붙어 있어 닿는 순간 알린다.

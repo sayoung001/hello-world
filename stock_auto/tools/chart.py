@@ -2,10 +2,10 @@
 수동 차트 확인 — 추천 종목(또는 아무 티커)의 일봉 차트를 그려 저장/전송한다.
 
 사용:
-  python -m stock_auto.tools.chart META               # logs/charts/META_<날짜>.png 저장
-  python -m stock_auto.tools.chart META --send        # 텔레그램으로 전송
-  python -m stock_auto.tools.chart META NVDA --send   # 여러 종목
-  python -m stock_auto.tools.chart --today --send     # 오늘 기록된 추천 전부
+  .venv/bin/python -m stock_auto.tools.chart META               # logs/charts/META_<날짜>.png 저장
+  .venv/bin/python -m stock_auto.tools.chart META --send        # 텔레그램으로 전송
+  .venv/bin/python -m stock_auto.tools.chart META NVDA --send   # 여러 종목
+  .venv/bin/python -m stock_auto.tools.chart --today --send     # 오늘 기록된 추천 전부
 
 계획선(손절/목표)은 signals.csv에 기록된 최신 값을 자동으로 찾아 얹는다.
 """

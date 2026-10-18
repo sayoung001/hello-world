@@ -105,7 +105,7 @@ def build_report(rows: list[dict], title: str = "신호 성과 리포트") -> st
               f"성과 집계에서 제외됩니다"]
     if s["n"] == 0:
         L += ["", "> 아직 라벨링된 신호가 없습니다. "
-              "`python -m stock_auto.pipeline.label_outcomes` 실행 후 다시 확인하세요.", ""]
+              "`.venv/bin/python -m stock_auto.pipeline.label_outcomes` 실행 후 다시 확인하세요.", ""]
         return "\n".join(L)
 
     L += [f"- 승률 **{s['win_rate']:.1f}%** · 평균수익 **{s['avg_ret']:+.2f}%** · "
@@ -181,7 +181,7 @@ def build_report(rows: list[dict], title: str = "신호 성과 리포트") -> st
                       and not r.get("executed"))
     if n_untriaged:
         L += [f"- **실행 여부 미입력 {n_untriaged}건** — "
-              "`python -m stock_auto.pipeline.triage` (소급 입력 불가, 매일 처리 권장)"]
+              "`.venv/bin/python -m stock_auto.pipeline.triage` (소급 입력 불가, 매일 처리 권장)"]
     if len(labeled) < 200:
         L += [f"- 표본 {len(labeled)}건 — 캘리브레이션 학습에는 **200건 이상** 권장. "
               f"수집 계속.", ]
@@ -253,7 +253,7 @@ def _triage_section(labeled: list[dict], all_rows: list[dict]) -> list[str]:
                     and not r.get("executed"))
     if not exec_rows:
         L += [f"> 실행 여부가 입력된 기록이 없습니다 (미입력 {untriaged}건). ",
-              "> `python -m stock_auto.pipeline.triage` 로 입력하세요. "
+              "> `.venv/bin/python -m stock_auto.pipeline.triage` 로 입력하세요. "
               "**소급 입력이 불가하므로 매일 처리해야 합니다.**", ""]
         return L
     L += ["| 실행 | 건수 | 승률 | 평균수익 | PF |", "|---|---:|---:|---:|---:|"]

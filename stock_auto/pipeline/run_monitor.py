@@ -2,8 +2,8 @@
 개장 거래량 폭주 실시간 모니터 실행 (Stage 7).
 
 사용:
-  python -m stock_auto.pipeline.run_monitor --market KR
-  python -m stock_auto.pipeline.run_monitor --market US --symbols AAPL NVDA TSLA
+  .venv/bin/python -m stock_auto.pipeline.run_monitor --market KR
+  .venv/bin/python -m stock_auto.pipeline.run_monitor --market US --symbols AAPL NVDA TSLA
 
 흐름: .env(KIS키) → KISFeed(WebSocket) → SurgeMonitor(폭주감지) → Telegram 알림.
 

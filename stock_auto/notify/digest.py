@@ -127,5 +127,5 @@ def batch_digest(result: Any, sector_lines: Optional[list[str]] = None,
     L += ["", f"ℹ️ 채점 {0 if screen.scored_all is None else len(screen.scored_all)}종목 "
           f"· 실패 {n_fail}건"]
     L += ["", "※ 분석 보조이며 투자 권유가 아닙니다. 실행 여부는 본인 판단입니다.",
-          "   실행 입력: python -m stock_auto.pipeline.triage"]
+          "   실행 입력: .venv/bin/python -m stock_auto.pipeline.triage"]
     return "\n".join(L)

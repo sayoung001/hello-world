@@ -207,33 +207,6 @@ LEGACY_STRATEGIES = ['Trend_Up', 'Momentum', 'Oversold', 'Vol_Explode', 'Vol_Pum
 # ★ 핵심: 실효 점수 계산 (Effective Score)
 # ============================================================
 
-def _calculate_penalty(row):
-    """
-    Penalty 계산 — "안 가는 6점"을 구조적으로 제거
-    
-    [페널티 조건]
-    1. 윗꼬리 비율 > 0.6 → -0.5 (매도 압력 큼)
-    2. 고가→종가 하락 > 1.5% → -0.5 (장중 밀림)
-    3. 단발성 거래량 (VAI spike only) → -1.0 (가장 큰 페널티)
-    4. Liquidity Score < 0.5 → -0.5 (유동성 부족)
-    """
-    penalty = 0.0
-
-    if row.get('upper_wick_ratio', 0) > 0.6:
-        penalty += 0.5
-
-    if row.get('high_close_drop', 0) > 1.5:
-        penalty += 0.5
-
-    if row.get('vai_spike_only', False):
-        penalty += 1.0
-
-    if row.get('liquidity_score', 1.0) < 0.5:
-        penalty += 0.5
-
-    return min(penalty, 3.0)  # 최대 3점 차감
-
-
 def apply_all_strategies(df, regime=None):
     """
     모든 전략을 적용하고 실효 점수(Effective Score) 계산
@@ -316,7 +289,13 @@ def apply_all_strategies(df, regime=None):
     # ═══════════════════════════════════════════
     liquidity = df['liquidity_score'].fillna(0.5)
 
-    # Penalty 벡터화 계산
+    # ── Penalty — "안 가는 6점"을 구조적으로 제거 ──
+    # 페널티 규칙은 **여기가 유일한 구현**이다(행 단위 중복 구현을 제거했다).
+    #   1. 윗꼬리 비율 > 0.6      → 0.5  매도 압력 큼
+    #   2. 고가→종가 하락 > 1.5%  → 0.5  장중 밀림
+    #   3. 단발성 거래량(spike only) → 1.0  가장 큰 감점
+    #   4. 유동성 점수 < 0.5      → 0.5  유동성 부족
+    # 상한 3.0. 규칙을 바꾸려면 이 블록만 고치면 된다.
     penalty = pd.Series(0.0, index=df.index)
     penalty += (df['upper_wick_ratio'] > 0.6).astype(float) * 0.5
     penalty += (df['high_close_drop'] > 1.5).astype(float) * 0.5

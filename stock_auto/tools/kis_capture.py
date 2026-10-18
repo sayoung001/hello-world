@@ -2,8 +2,8 @@
 KIS 원시 패킷 캡처 (필드 정렬 검증).
 
 사용:
-  python -m stock_auto.tools.kis_capture --market KR --symbols 005930 --n 5
-  python -m stock_auto.tools.kis_capture --market US --symbols AAPL --n 5 --us-exchange NAS
+  .venv/bin/python -m stock_auto.tools.kis_capture --market KR --symbols 005930 --n 5
+  .venv/bin/python -m stock_auto.tools.kis_capture --market US --symbols AAPL --n 5 --us-exchange NAS
 
 장중에 실행해 처음 N개 실시간 체결 패킷을 그대로 출력한다.
 출력된 '0|H0STCNT0|001|<body>' 의 body(^ 구분)를 보내주시면 필드 인덱스를 정확히

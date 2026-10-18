@@ -168,5 +168,5 @@ def telegram_summary(rows: list[dict], fwd_rows: Optional[list[dict]] = None) ->
     n_untriaged = sum(1 for r in rows if r.get("source") == "batch"
                       and not r.get("gated_by") and not r.get("executed"))
     if n_untriaged:
-        L.append(f"⚠ 실행 여부 미입력 {n_untriaged}건 → python -m stock_auto.pipeline.triage")
+        L.append(f"⚠ 실행 여부 미입력 {n_untriaged}건 → .venv/bin/python -m stock_auto.pipeline.triage")
     return "\n".join(L)

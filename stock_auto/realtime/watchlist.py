@@ -59,12 +59,17 @@ def _pending_triggers(market: Market) -> list[str]:
 
 
 def _held(market: Market) -> list[str]:
-    """보유 종목 — positions.csv가 있으면 읽는다(없으면 빈 리스트)."""
+    """
+    보유 종목 — positions.csv가 있으면 읽는다(없으면 빈 리스트).
+
+    예외를 좁게 잡는다. 전에는 모듈 자체가 없어 ImportError 가 매번 나고
+    광범위한 except 에 삼켜졌는데, 그러면 CSV 파싱 실패 같은 진짜 오류도 같이 숨는다.
+    """
+    from stock_auto.tracking import positions
     try:
-        from stock_auto.tracking import positions
-        return [p["symbol"] for p in positions.open_positions()
-                if p.get("market", "US") == market.value]
-    except Exception:  # noqa: BLE001 — 보유 파일이 아직 없을 수 있다
+        return positions.symbols(market=market.value)
+    except (OSError, UnicodeDecodeError, KeyError) as e:
+        print(f"[watchlist] positions.csv 읽기 실패: {type(e).__name__}: {e}")
         return []
 
 

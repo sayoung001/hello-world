@@ -5,9 +5,9 @@
 네트워크가 막힌 환경에서는 수집 단계가 전부 실패로 나온다.
 
 사용:
-  python -m stock_auto.tools.check_pipeline              # 전 단계 점검
-  python -m stock_auto.tools.check_pipeline --quick      # 지수·유니버스만
-  python -m stock_auto.tools.check_pipeline --symbols 30 # 일봉 수집 표본 수 조절
+  .venv/bin/python -m stock_auto.tools.check_pipeline              # 전 단계 점검
+  .venv/bin/python -m stock_auto.tools.check_pipeline --quick      # 지수·유니버스만
+  .venv/bin/python -m stock_auto.tools.check_pipeline --symbols 30 # 일봉 수집 표본 수 조절
 
 점검 항목:
   1. 지수 수집     — S&P500(US500) / 나스닥종합(IXIC) / QQQ 일봉이 받아지는가

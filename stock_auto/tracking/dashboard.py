@@ -5,9 +5,9 @@
   구성: KPI 타일 · 에쿼티 곡선 · 보유일별 수익 곡선 · 추천 목록(결과·D+N 수익률)
 
 사용:
-  python -m stock_auto.tracking.dashboard                 # logs/dashboard.html 생성
-  python -m stock_auto.tracking.dashboard --send          # 텔레그램 파일로도 전송
-  python -m stock_auto.tracking.dashboard --out /path.html
+  .venv/bin/python -m stock_auto.tracking.dashboard                 # logs/dashboard.html 생성
+  .venv/bin/python -m stock_auto.tracking.dashboard --send          # 텔레그램 파일로도 전송
+  .venv/bin/python -m stock_auto.tracking.dashboard --out /path.html
 """
 
 from __future__ import annotations
@@ -203,7 +203,7 @@ def build_html(rows: list[dict], fwd_rows: list[dict]) -> str:
 <h2>월별 손익</h2><div class="card"><table><thead><tr><th>월</th><th>손익</th></tr></thead>
 <tbody>{mrows or '<tr><td colspan=2 class=mut>청산 완료 거래 없음</td></tr>'}</tbody></table></div>
 <h2>추천 목록 (최근 60건 · D+N = 그냥 들고 있었을 때 종가 수익률)</h2><div class="card">{table}</div>
-<p class="sub">※ 분석 보조이며 투자 권유가 아닙니다. 실행 여부 입력: <code>python -m stock_auto.pipeline.triage</code></p>
+<p class="sub">※ 분석 보조이며 투자 권유가 아닙니다. 실행 여부 입력: <code>.venv/bin/python -m stock_auto.pipeline.triage</code></p>
 </body></html>"""
 
 

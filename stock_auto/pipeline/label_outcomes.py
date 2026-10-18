@@ -2,10 +2,10 @@
 결과 라벨링 + 성과/캘리브레이션 리포트 출력.
 
 사용:
-  python -m stock_auto.pipeline.label_outcomes                 # 라벨링 + 콘솔 출력
-  python -m stock_auto.pipeline.label_outcomes --out report.md # 파일로 저장
-  python -m stock_auto.pipeline.label_outcomes --notion        # Notion 게시
-  python -m stock_auto.pipeline.label_outcomes --export-csv cal.csv  # 캘리브레이션 데이터셋
+  .venv/bin/python -m stock_auto.pipeline.label_outcomes                 # 라벨링 + 콘솔 출력
+  .venv/bin/python -m stock_auto.pipeline.label_outcomes --out report.md # 파일로 저장
+  .venv/bin/python -m stock_auto.pipeline.label_outcomes --notion        # Notion 게시
+  .venv/bin/python -m stock_auto.pipeline.label_outcomes --export-csv cal.csv  # 캘리브레이션 데이터셋
 
 매일 배치 후(또는 주 1회) 실행하면 누적 신호에 결과가 붙고
 점수→승률 변환표가 갱신된다. 이 표가 확률층(캘리브레이션)의 입력이다.

@@ -9,11 +9,11 @@
   오늘 입력하지 않은 날은 영영 미상으로 남는다.
 
 사용:
-  python -m stock_auto.pipeline.triage                 # 미분류 건을 하나씩 대화형 입력
-  python -m stock_auto.pipeline.triage --list          # 미분류 목록만 출력(입력 안 함)
-  python -m stock_auto.pipeline.triage --set a1b2c3:yes --set d4e5f6:no
-  python -m stock_auto.pipeline.triage --all-no        # 남은 전부를 '미실행'으로 일괄 처리
-  python -m stock_auto.pipeline.triage --telegram      # 텔레그램으로 미분류 목록 발송
+  .venv/bin/python -m stock_auto.pipeline.triage                 # 미분류 건을 하나씩 대화형 입력
+  .venv/bin/python -m stock_auto.pipeline.triage --list          # 미분류 목록만 출력(입력 안 함)
+  .venv/bin/python -m stock_auto.pipeline.triage --set a1b2c3:yes --set d4e5f6:no
+  .venv/bin/python -m stock_auto.pipeline.triage --all-no        # 남은 전부를 '미실행'으로 일괄 처리
+  .venv/bin/python -m stock_auto.pipeline.triage --telegram      # 텔레그램으로 미분류 목록 발송
 
 입력값:
   yes  = 실제로 샀다
@@ -156,7 +156,7 @@ def _send_telegram(rows: list[dict]) -> int:
                      f"— `{r.get('signal_id')}`")
     if len(rows) > 20:
         lines.append(f"… 외 {len(rows) - 20}건")
-    lines += ["", "입력: `python -m stock_auto.pipeline.triage --set <id>:yes`"]
+    lines += ["", "입력: `.venv/bin/python -m stock_auto.pipeline.triage --set <id>:yes`"]
     msg = "\n".join(lines)
     if tg.enabled:
         tg.send_message(msg)

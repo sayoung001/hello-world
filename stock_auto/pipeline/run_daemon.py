@@ -10,7 +10,7 @@ APScheduler(zoneinfo)로 거래소 현지시각 기준 트리거 → DST 자동:
 
 → 매일 돌수록 관측이 쌓여 프로파일이 실측으로 수렴(정적 frac → 실측 보정).
 
-사용:  python -m stock_auto.pipeline.run_daemon
+사용:  .venv/bin/python -m stock_auto.pipeline.run_daemon
 정지:  Ctrl+C
 주의: 단일 프로세스 데몬. 운영 안정성이 중요하면 배치/모니터를 별 프로세스(cron/systemd)로
       분리하고 본 모듈은 참고 구현으로 사용.

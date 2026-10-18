@@ -2,8 +2,8 @@
 배포 전 점검 (D) — VM 첫 실행 전 키·라이브러리·연결 스모크 테스트.
 
 사용:
-  python -m stock_auto.tools.preflight            # 키·라이브러리만(네트워크 X)
-  python -m stock_auto.tools.preflight --live      # 외부 연결까지 점검
+  .venv/bin/python -m stock_auto.tools.preflight            # 키·라이브러리만(네트워크 X)
+  .venv/bin/python -m stock_auto.tools.preflight --live      # 외부 연결까지 점검
 
 점검:
   1) .env 시크릿 존재(마스킹 출력)
@@ -133,8 +133,8 @@ def main() -> int:
     print("\n" + "=" * 50)
     if libs_ok and live_ok:
         print(f"{OK} 점검 통과 — 실행 가능")
-        print("  다음: python -m stock_auto.pipeline.build_profiles --market KR")
-        print("        python -m stock_auto.pipeline.run_daily_batch --market US --no-llm")
+        print("  다음: .venv/bin/python -m stock_auto.pipeline.build_profiles --market KR")
+        print("        .venv/bin/python -m stock_auto.pipeline.run_daily_batch --market US --no-llm")
         return 0
     print(f"{WARN} 일부 항목 미충족 — 위 ❌ 확인 후 재점검")
     return 1

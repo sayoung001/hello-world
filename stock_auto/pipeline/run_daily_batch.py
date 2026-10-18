@@ -2,9 +2,9 @@
 일일 배치 실행 진입점 (B).
 
 사용:
-  python -m stock_auto.pipeline.run_daily_batch --market US
-  python -m stock_auto.pipeline.run_daily_batch --market KR --no-llm
-  python -m stock_auto.pipeline.run_daily_batch --market US --sample-universe
+  .venv/bin/python -m stock_auto.pipeline.run_daily_batch --market US
+  .venv/bin/python -m stock_auto.pipeline.run_daily_batch --market KR --no-llm
+  .venv/bin/python -m stock_auto.pipeline.run_daily_batch --market US --sample-universe
 
 흐름: .env 로드 → 유니버스(지수 구성종목) → 섹터 게이트 → 실적 게이트
       → run_daily(규칙스캔 → 추천 LLM → Notion 게시 + Telegram 다이제스트) → 요약 출력.

@@ -2,8 +2,8 @@
 시간대 프로파일 구축 실행 (C).
 
 사용:
-  python -m stock_auto.pipeline.build_profiles --market KR
-  python -m stock_auto.pipeline.build_profiles --market US --symbols AAPL NVDA --days 90
+  .venv/bin/python -m stock_auto.pipeline.build_profiles --market KR
+  .venv/bin/python -m stock_auto.pipeline.build_profiles --market US --symbols AAPL NVDA --days 90
 
 일봉 거래량(다운로드) × 장중 분포곡선 → data/profiles/{market}/{sym}.json 저장.
 이후 run_monitor가 이 파일을 읽어 RVOL/Z 게이트를 활성화한다.
