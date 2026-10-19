@@ -121,6 +121,22 @@ def run_daily(
     except Exception as e:  # noqa: BLE001 — 기록 실패가 배치를 막지 않게
         print(f"[batch] 신호 기록 실패: {type(e).__name__}: {e}")
 
+    # 3.6) 토큰 사용량·비용 기록 — 추정이 아니라 실측으로 남긴다
+    if result.agents.usage:
+        try:
+            from stock_auto.agents.base import DEFAULT_MODEL
+            from stock_auto.tracking import usage_log
+            p = usage_log.record(
+                market=market.value, date=screen.as_of or today,
+                model=DEFAULT_MODEL, usage=result.agents.usage,
+                n_reco=len(result.agents.recommendations),
+                n_fail=len(result.agents.failures))
+            cost = usage_log.estimate_cost(DEFAULT_MODEL, result.agents.usage)
+            print(f"[batch] 사용량 기록 → {p}" +
+                  (f" (${cost:.4f})" if cost is not None else " (단가 미등록)"))
+        except Exception as e:  # noqa: BLE001
+            print(f"[batch] 사용량 기록 실패: {type(e).__name__}: {e}")
+
     # 4) Notion 게시 (아카이브 — 기록·검색용)
     if notion is not None and getattr(notion, "enabled", False):
         _publish_notion(notion, notion_db_id, notion_parent_page,

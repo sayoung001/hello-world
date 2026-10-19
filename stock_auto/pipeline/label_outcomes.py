@@ -69,6 +69,11 @@ def main() -> int:
         md += "\n\n" + llm_eval.build_llm_report(rows)
     except Exception as e:  # noqa: BLE001 — 평가 실패가 리포트를 막지 않게
         md += f"\n\n[llm_eval] 실패: {type(e).__name__}: {e}"
+    try:
+        from stock_auto.tracking import usage_log
+        md += "\n" + "\n".join(usage_log.section_md())
+    except Exception as e:  # noqa: BLE001
+        md += f"\n[usage] 실패: {type(e).__name__}: {e}"
     print("\n" + md)
 
     # 대시보드 HTML도 같이 갱신
