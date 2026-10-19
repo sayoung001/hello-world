@@ -23,8 +23,18 @@ try:
 except ImportError:  # 지연 — 실제 호출 시점에만 필요
     anthropic = None
 
-# 모델 (사용자가 모델을 명시하지 않음 → 최신 Opus 기본. 비용 절감 원하면 env로 하향)
-DEFAULT_MODEL = os.environ.get("STOCK_AGENT_MODEL", "claude-opus-4-8")
+# 모델 — 현행 Opus. claude-opus-4-8($5/$25)보다 싸고($4/$20) 최신이다.
+# 비용 절감을 더 원하면 .env 의 STOCK_AGENT_MODEL 로 하향(sonnet-5-5 는 $2/$10).
+#
+# opus-4-8 → opus-5-5 전환 시 주의한 두 가지 (model-migration 가이드):
+#  1. opus-4-8 은 thinking 을 생략하면 '사고 없음'이지만 opus-5-5 는 생략해도
+#     **적응형 사고가 켜진다.** 분석 3종(thinking=False)이 조용히 사고를 시작해
+#     출력 토큰과 지연이 늘어난다 → effort="low" 로 짧게 생각하게 했다.
+#     (opus-5-5 는 사고를 끌 수 없다. thinking.disabled 는 400이다.)
+#  2. **사고 토큰이 max_tokens 에 포함된다.** 사고 없이 쓰던 700~900 한도를
+#     그대로 두면 답변이 잘려 JSON이 깨진다 → 한도를 올렸다.
+# 기본 effort 도 high→medium 으로 내려가므로 종합 판단은 high 를 명시한다.
+DEFAULT_MODEL = os.environ.get("STOCK_AGENT_MODEL", "claude-opus-5-5")
 
 # 재시도 — 일시 오류만. 종목 단위 격리(agents/pipeline.py)와 2단 방어다.
 AGENT_RETRIES = int(os.environ.get("STOCK_AGENT_RETRIES", "2"))
@@ -35,10 +45,14 @@ class StockAgentBase:
     """모든 주식 분석 에이전트의 베이스."""
 
     def __init__(self, agent_id: str, system_prompt: str,
-                 model: str = DEFAULT_MODEL, client: Any = None):
+                 model: str = DEFAULT_MODEL, client: Any = None,
+                 effort: Optional[str] = None):
         self.agent_id = agent_id
         self.system_prompt = system_prompt
         self.model = model
+        # effort = 사고 깊이·비용·지연의 유일한 제어 수단(Opus 5.5 이후).
+        # 사고를 끌 수 없으므로 '짧게 생각하게' 하는 것이 대안이다.
+        self.effort = effort
         self._client = client  # 주입 가능(테스트)
 
     @property
@@ -74,9 +88,22 @@ class StockAgentBase:
         if thinking:
             # 종합 판단처럼 복잡한 추론엔 적응형 사고 사용
             kwargs["thinking"] = {"type": "adaptive"}
+        if self.effort:
+            # output_config 를 덮어쓰면 format(스키마 강제)이 사라진다 — 병합해야 한다
+            kwargs["output_config"]["effort"] = self.effort
         resp = self._create(**kwargs)
+        # 사고가 켜지면 content 가 thinking 블록으로 시작한다. 위치가 아니라
+        # type 으로 골라야 한다(이미 그렇게 되어 있다).
         text = next((b.text for b in resp.content if b.type == "text"), "")
         out = _safe_json(text)
+        if getattr(resp, "stop_reason", None) == "max_tokens":
+            # 사고 토큰도 max_tokens 에 포함된다. 사고 없이 쓰던 한도를 그대로
+            # 두면 답변이 잘려 JSON이 깨지고, 원인이 안 보인 채 '파싱 실패'로만
+            # 보인다. 그래서 잘렸다는 사실을 따로 알린다.
+            print(f"[agent:{self.agent_id}] ⚠️ max_tokens({max_tokens})에서 잘렸습니다 "
+                  f"— 사고 토큰이 한도를 먹고 있습니다. 한도를 올려야 합니다.")
+            if isinstance(out, dict):
+                out.setdefault("_truncated", True)
         if isinstance(out, dict) and not out.get("_parse_error"):
             out["_usage"] = usage_of(resp)
         return out

@@ -93,8 +93,17 @@ _SYSTEM = (
 )
 
 
+# 종합 판단의 출력 한도. 사고 토큰이 여기에 포함되고, effort="high" 면 사고가
+# 길어진다. 예전 2500 은 opus-4-8 기본 effort(high) 기준이었고 opus-5-5 는
+# 기본이 medium 이라 high 를 명시하는 만큼 여유가 더 필요하다.
+PM_MAX_TOKENS = 8000
+
+
 class PortfolioAgent(StockAgentBase):
     def __init__(self, **kw):
+        # 기본 effort 가 opus-4-8 의 high 에서 medium 으로 내려갔다. 종합 판단은
+        # 이 시스템에서 가장 어려운 추론이므로 high 를 명시해 예전 수준을 유지한다.
+        kw.setdefault("effort", "high")
         super().__init__(agent_id="portfolio", system_prompt=_SYSTEM, **kw)
 
     def decide(self, row: dict, news: dict, flow: dict, value: dict,
@@ -120,7 +129,8 @@ class PortfolioAgent(StockAgentBase):
             f"[밸류] {value.get('summary')}\n\n"
             "위를 종합해 추천 JSON을 작성하라. expected_pnl_today는 ATR과 R:R을 활용해 "
             "당일 변동 분포의 P10/P50/P90(%)로 제시하고 basis에 산출 근거를 적어라.")
-        result = self.call_json(prompt, RECO_SCHEMA, max_tokens=2500, thinking=True)
+        result = self.call_json(prompt, RECO_SCHEMA, max_tokens=PM_MAX_TOKENS,
+                                thinking=True)
         # 출처 보강: 뉴스 에이전트 sources 합류
         if isinstance(result, dict) and not result.get("_parse_error"):
             srcs = set(result.get("sources", [])) | set(news.get("sources", []))

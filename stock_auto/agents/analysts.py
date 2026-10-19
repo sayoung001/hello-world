@@ -12,6 +12,12 @@ from typing import Any, Optional
 from stock_auto.agents.base import StockAgentBase
 from stock_auto.agents.news_collector import NewsItem
 
+# 분석 3종의 출력 한도. 예전엔 700~900 이었는데, opus-5-5 부터는 사고를 끌 수
+# 없고 **사고 토큰이 max_tokens 에 포함**되므로 그 한도로는 요약이 잘려 JSON이
+# 깨진다. effort="low" 로 사고를 짧게 유지하면서 한도에 여유를 둔다.
+# 한도를 올려도 실제 생성한 토큰만 과금되므로 비용은 늘지 않는다.
+ANALYST_MAX_TOKENS = 2000
+
 # ── 공통 출력 스키마 조각 ──
 _SENTIMENT_SCHEMA = {
     "type": "object",
@@ -30,7 +36,7 @@ class NewsAgent(StockAgentBase):
     """뉴스 요약 + 센티먼트. saveticker 헤드라인 원문 주입."""
     def __init__(self, **kw):
         super().__init__(
-            agent_id="news",
+            agent_id="news", effort="low",
             system_prompt=(
                 "너는 주식 뉴스 분석가다. 제공된 헤드라인'만'을 근거로 분석한다. "
                 "헤드라인에 없는 사실을 지어내지 마라. 출처(URL/매체)를 sources에 명시하라. "
@@ -46,14 +52,14 @@ class NewsAgent(StockAgentBase):
             f"[종목] {ticker}\n[헤드라인]\n{lines}\n\n"
             "위 헤드라인만으로 핵심 이슈를 3줄 이내로 요약하고, "
             "센티먼트를 -1(매우부정)~+1(매우긍정)로 점수화하라.")
-        return self.call_json(prompt, _SENTIMENT_SCHEMA, max_tokens=900)
+        return self.call_json(prompt, _SENTIMENT_SCHEMA, max_tokens=ANALYST_MAX_TOKENS)
 
 
 class FlowAgent(StockAgentBase):
     """수급/거래 해석 — 거래대금·RVOL·VAI·체결 등 수치 주입."""
     def __init__(self, **kw):
         super().__init__(
-            agent_id="flow",
+            agent_id="flow", effort="low",
             system_prompt=(
                 "너는 수급 분석가다. 제공된 수치만으로 자금 흐름(매집/분산/단발)을 해석한다. "
                 "수치에 근거 없는 단정은 금지. 한국어로 간결히."),
@@ -67,14 +73,14 @@ class FlowAgent(StockAgentBase):
             f"- 유동성 {metrics.get('liquidity_score')}, 거래대금 {metrics.get('trading_value')}\n"
             f"- 종목레짐 {metrics.get('stock_regime')}, 매크로 {metrics.get('macro_regime')}\n\n"
             "자금이 실제로 들어오는지(매집/분산/단발 펌핑) 한줄 판단 + 근거.")
-        return self.call_json(prompt, _SENTIMENT_SCHEMA, max_tokens=700)
+        return self.call_json(prompt, _SENTIMENT_SCHEMA, max_tokens=ANALYST_MAX_TOKENS)
 
 
 class ValueAgent(StockAgentBase):
     """가격/밸류·기술적 위치 평가."""
     def __init__(self, **kw):
         super().__init__(
-            agent_id="value",
+            agent_id="value", effort="low",
             system_prompt=(
                 "너는 밸류/기술 분석가다. 제공된 가격·지표 수치만으로 과열/저평가와 "
                 "기술적 위치(지지/저항)를 평가한다. 한국어로 간결히."),
@@ -88,4 +94,4 @@ class ValueAgent(StockAgentBase):
             f"R:R {metrics.get('rr_ratio')}\n"
             f"- 섹터상태 {metrics.get('sector_status_score')}\n\n"
             "현재 가격대가 과열/적정/저평가 중 무엇인지 + 기술적 위치 한줄.")
-        return self.call_json(prompt, _SENTIMENT_SCHEMA, max_tokens=700)
+        return self.call_json(prompt, _SENTIMENT_SCHEMA, max_tokens=ANALYST_MAX_TOKENS)
