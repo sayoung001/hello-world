@@ -91,6 +91,81 @@ recovered() {
   rm -f "$STATE"
 }
 
+# 데몬 재시작 — 성공하면 0, 실패하면 fail() 안에서 알리고 종료한다.
+restart_daemon() {
+    say "코드 변경 → 데몬 재시작"
+    # systemctl restart 의 종료 코드는 **두 가지 전혀 다른 이유**로 0이 아니다:
+    #   (a) sudo 거부        → 코드는 최신, 프로세스는 옛 코드로 계속 돈다
+    #   (b) 서비스 기동 실패 → 데몬이 아예 죽어 있다(훨씬 심각)
+    # 예전 코드는 둘을 구분하지 않고 (a) 로 단정해, (b) 일 때 엉뚱한 sudo
+    # 설정을 안내하면서 '데몬이 지금 안 돈다'는 중요한 사실은 말하지 않았다.
+    #
+    # 그리고 종료 코드 자체를 믿지 않는다. 평문 sudo 로는 되던 재시작이
+    # sudo -n 으로 바꾼 뒤 실패로 보고되는 일이 있었다. 우리가 알고 싶은 건
+    # "지금 새 코드로 돌고 있나" 하나이므로 is-active 로 판정한다.
+    # -n 을 먼저 쓰고(암호 프롬프트로 멈추는 것을 막는다) 실패하면 평문으로
+    # 한 번 더 — tty 가 없어 암호를 물을 수는 없고, 권한이 있으면 통과한다.
+    # set -e 주의: `VAR="$(실패하는 명령)"` 는 할당 자체가 0이 아닌 값을
+    # 반환하므로 ERR 트랩이 먼저 걸린다. 치환마다 `|| true` 로 막아야
+    # 아래 분기(restart_sudo / restart_unit)까지 도달한다.
+    RESTART_RC=0
+    RESTART_OUT="$(sudo -n systemctl restart stock-auto 2>&1)" || RESTART_RC=$?
+    if [ "$RESTART_RC" -ne 0 ]; then
+      RESTART_OUT2="$(sudo systemctl restart stock-auto 2>&1 || true)"
+      RESTART_OUT="${RESTART_OUT}
+${RESTART_OUT2}"
+    fi
+
+    # 종료 코드를 믿지 않고 **실제로 돌고 있는지**로 판정한다.
+    # systemctl 의 종료 코드는 환경에 따라 애매하게 0이 아닐 수 있고, 반대로
+    # 우리가 알고 싶은 건 "지금 새 코드로 돌고 있나" 하나다.
+    # 한 번만 보면 안 된다. 데몬은 pandas·numpy 를 올리고 유니버스를 조회하므로
+    # 기동에 수 초가 걸린다. 그 사이에 찍으면 activating 이거나 아직 failed 로
+    # 보여서, 멀쩡한 재시작을 '기동 실패'로 오경보한다. active 가 되면 즉시
+    # 빠져나오고, 최대 RESTART_WAIT_SEC 까지 기다린다.
+    # UNIT_STATE 로 둔다 — STATE 는 알림 상태파일 경로를 담은 전역이다.
+    # 같은 이름을 쓰면 fail() 이 logs/autopull_alert.state 대신 "active" 라는
+    # 파일에 쓰게 되어 재알림 억제가 조용히 깨진다.
+    RESTART_WAIT_SEC="${STOCK_RESTART_WAIT_SEC:-30}"
+    UNIT_STATE=""
+    for _ in $(seq 1 "$RESTART_WAIT_SEC"); do
+      UNIT_STATE="$(systemctl is-active stock-auto 2>/dev/null || true)"
+      [ "$UNIT_STATE" = "active" ] && break
+      [ "$UNIT_STATE" = "failed" ] && break   # 확정 실패면 더 기다릴 이유 없음
+      sleep 1
+    done
+    if [ "$UNIT_STATE" = "active" ]; then
+      say "✅ 데몬 재시작 확인 (상태 active)"
+    else
+      printf '%s\n' "$RESTART_OUT" >>"$LOG"
+      if printf '%s' "$RESTART_OUT" | grep -qiE \
+           'password|terminal is required|not allowed|sudo:|may not run'; then
+        fail restart_sudo "코드는 받았지만 재시작에 sudo 권한이 없습니다 — 서버가 계속 옛 코드로 돕니다.
+현재 데몬 상태: ${UNIT_STATE:-unknown}
+
+비밀번호 없는 sudo 를 등록하세요:
+  echo \"\$(whoami) ALL=(ALL) NOPASSWD: /bin/systemctl restart stock-auto\" | sudo tee /etc/sudoers.d/stock-auto
+  sudo chmod 440 /etc/sudoers.d/stock-auto"
+      else
+        # 로그를 알림에 담는다 — 이게 없으면 폰만 보고는 원인을 알 수 없다.
+        JL="$( (sudo -n journalctl -u stock-auto -n 12 --no-pager 2>/dev/null \
+               || journalctl -u stock-auto -n 12 --no-pager 2>/dev/null \
+               || true) | tail -12)"
+        printf '%s\n' "$JL" >>"$LOG"
+        fail restart_unit "🔥 데몬이 기동에 실패했습니다 — 지금 돌고 있지 않습니다(상태: ${UNIT_STATE:-unknown}).
+새로 받은 코드에 문제가 있을 수 있습니다.
+
+systemctl 출력:
+${RESTART_OUT}
+
+최근 로그:
+${JL:-(로그를 읽을 수 없음 — 서버에서: sudo journalctl -u stock-auto -n 40)}
+
+되돌리려면: cd ${APP_DIR} && git log --oneline -5 && git reset --hard <직전커밋> && sudo systemctl restart stock-auto"
+      fi
+    fi
+}
+
 trap 'fail unexpected "예상치 못한 오류로 중단(autopull.sh ${LINENO}행). 로그를 확인하세요."' ERR
 
 # ── 알림 배선 시험 ──
@@ -135,8 +210,23 @@ LOCAL="$(git rev-parse HEAD)"
 REMOTE="$(git rev-parse "origin/${BRANCH}")"
 
 if [ "$LOCAL" = "$REMOTE" ]; then
-  recovered                      # 고쳐졌으면 여기서 복구 알림이 간다
-  exit 0                         # 변경 없음 — 조용히 종료
+  # ── 재시작 실패로 멈춘 상태면 여기서 다시 시도한다 ──
+  # 예전에는 그냥 recovered() 를 불렀다. 그게 두 가지를 망가뜨렸다:
+  #  (1) 실패 상태 파일을 지워서 **6시간 재알림 억제가 전혀 작동하지 않았다.**
+  #      실패 → 5분 뒤 '변경 없음'이 상태 삭제 → 다음 커밋에 또 새 알림.
+  #      실측 로그: 13:47 실패 → 13:53 "복구됨" → 13:58 또 실패(알림).
+  #  (2) 아무것도 고쳐지지 않았는데 "✅ 복구됨"이라고 거짓 보고했다.
+  # 재시작 실패는 '할 일이 없어서' 해결되는 종류가 아니다 — 코드는 최신인데
+  # 프로세스가 옛 코드인 상태가 그대로 남는다. 그래서 새 커밋을 기다리지 않고
+  # 여기서 재시도한다. sudo 를 고치면 다음 5분 틱에 저절로 복구된다.
+  if [ -f "$STATE" ] && grep -q '^restart' "$STATE" 2>/dev/null; then
+    say "재시작 실패 상태가 남아 있음 — 재시도"
+    restart_daemon                 # 실패하면 내부에서 알리고 종료한다
+    recovered
+    exit 0
+  fi
+  recovered                        # 다른 사유(로컬변경 등)가 고쳐졌으면 복구 알림
+  exit 0                           # 변경 없음 — 조용히 종료
 fi
 
 say "새 커밋 발견 ${LOCAL:0:7} → ${REMOTE:0:7}"
@@ -157,75 +247,7 @@ fi
 # 문서만 바뀐 경우에는 데몬을 건드리지 않는다
 if git diff --name-only "${LOCAL}..${REMOTE}" | grep -qv -e '\.md$' -e '^docs/'; then
   if systemctl is-active --quiet stock-auto 2>/dev/null; then
-    say "코드 변경 → 데몬 재시작"
-    # systemctl restart 의 종료 코드는 **두 가지 전혀 다른 이유**로 0이 아니다:
-    #   (a) sudo 거부        → 코드는 최신, 프로세스는 옛 코드로 계속 돈다
-    #   (b) 서비스 기동 실패 → 데몬이 아예 죽어 있다(훨씬 심각)
-    # 예전 코드는 둘을 구분하지 않고 (a) 로 단정해, (b) 일 때 엉뚱한 sudo
-    # 설정을 안내하면서 '데몬이 지금 안 돈다'는 중요한 사실은 말하지 않았다.
-    #
-    # 그리고 종료 코드 자체를 믿지 않는다. 평문 sudo 로는 되던 재시작이
-    # sudo -n 으로 바꾼 뒤 실패로 보고되는 일이 있었다. 우리가 알고 싶은 건
-    # "지금 새 코드로 돌고 있나" 하나이므로 is-active 로 판정한다.
-    # -n 을 먼저 쓰고(암호 프롬프트로 멈추는 것을 막는다) 실패하면 평문으로
-    # 한 번 더 — tty 가 없어 암호를 물을 수는 없고, 권한이 있으면 통과한다.
-    # set -e 주의: `VAR="$(실패하는 명령)"` 는 할당 자체가 0이 아닌 값을
-    # 반환하므로 ERR 트랩이 먼저 걸린다. 치환마다 `|| true` 로 막아야
-    # 아래 분기(restart_sudo / restart_unit)까지 도달한다.
-    RESTART_RC=0
-    RESTART_OUT="$(sudo -n systemctl restart stock-auto 2>&1)" || RESTART_RC=$?
-    if [ "$RESTART_RC" -ne 0 ]; then
-      RESTART_OUT2="$(sudo systemctl restart stock-auto 2>&1 || true)"
-      RESTART_OUT="${RESTART_OUT}
-${RESTART_OUT2}"
-    fi
-
-    # 종료 코드를 믿지 않고 **실제로 돌고 있는지**로 판정한다.
-    # systemctl 의 종료 코드는 환경에 따라 애매하게 0이 아닐 수 있고, 반대로
-    # 우리가 알고 싶은 건 "지금 새 코드로 돌고 있나" 하나다.
-    # 한 번만 보면 안 된다. 데몬은 pandas·numpy 를 올리고 유니버스를 조회하므로
-    # 기동에 수 초가 걸린다. 그 사이에 찍으면 activating 이거나 아직 failed 로
-    # 보여서, 멀쩡한 재시작을 '기동 실패'로 오경보한다. active 가 되면 즉시
-    # 빠져나오고, 최대 RESTART_WAIT_SEC 까지 기다린다.
-    RESTART_WAIT_SEC="${STOCK_RESTART_WAIT_SEC:-30}"
-    STATE=""
-    for _ in $(seq 1 "$RESTART_WAIT_SEC"); do
-      STATE="$(systemctl is-active stock-auto 2>/dev/null || true)"
-      [ "$STATE" = "active" ] && break
-      # failed 로 확정되면 더 기다릴 이유가 없다
-      [ "$STATE" = "failed" ] && break
-      sleep 1
-    done
-    if [ "$STATE" = "active" ]; then
-      say "✅ 데몬 재시작 확인 (상태 active)"
-    else
-      printf '%s\n' "$RESTART_OUT" >>"$LOG"
-      if printf '%s' "$RESTART_OUT" | grep -qiE \
-           'password|terminal is required|not allowed|sudo:|may not run'; then
-        fail restart_sudo "코드는 받았지만 재시작에 sudo 권한이 없습니다 — 서버가 계속 옛 코드로 돕니다.
-현재 데몬 상태: ${STATE:-unknown}
-
-비밀번호 없는 sudo 를 등록하세요:
-  echo \"\$(whoami) ALL=(ALL) NOPASSWD: /bin/systemctl restart stock-auto\" | sudo tee /etc/sudoers.d/stock-auto
-  sudo chmod 440 /etc/sudoers.d/stock-auto"
-      else
-        # 로그를 알림에 담는다 — 이게 없으면 폰만 보고는 원인을 알 수 없다.
-        JL="$( (sudo -n journalctl -u stock-auto -n 12 --no-pager 2>/dev/null \
-               || journalctl -u stock-auto -n 12 --no-pager 2>/dev/null \
-               || true) | tail -12)"
-        printf '%s\n' "$JL" >>"$LOG"
-        fail restart_unit "🔥 데몬이 기동에 실패했습니다 — 지금 돌고 있지 않습니다(상태: ${STATE:-unknown}).
-새로 받은 코드에 문제가 있을 수 있습니다.
-
-systemctl 출력:
-${RESTART_OUT}
-
-최근 로그:
-${JL:-(로그를 읽을 수 없음 — 서버에서: sudo journalctl -u stock-auto -n 40)}
-
-되돌리려면: cd ${APP_DIR} && git log --oneline -5 && git reset --hard <직전커밋> && sudo systemctl restart stock-auto"
-      fi
-    fi
+    restart_daemon
   else
     say "데몬이 돌고 있지 않음 — 재시작 생략"
   fi
@@ -235,3 +257,4 @@ fi
 
 say "✅ 반영 완료 (${REMOTE:0:7})"
 recovered
+
