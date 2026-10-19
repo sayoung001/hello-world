@@ -183,8 +183,19 @@ ${RESTART_OUT2}"
     # 종료 코드를 믿지 않고 **실제로 돌고 있는지**로 판정한다.
     # systemctl 의 종료 코드는 환경에 따라 애매하게 0이 아닐 수 있고, 반대로
     # 우리가 알고 싶은 건 "지금 새 코드로 돌고 있나" 하나다.
-    sleep 2
-    STATE="$(systemctl is-active stock-auto 2>/dev/null || true)"
+    # 한 번만 보면 안 된다. 데몬은 pandas·numpy 를 올리고 유니버스를 조회하므로
+    # 기동에 수 초가 걸린다. 그 사이에 찍으면 activating 이거나 아직 failed 로
+    # 보여서, 멀쩡한 재시작을 '기동 실패'로 오경보한다. active 가 되면 즉시
+    # 빠져나오고, 최대 RESTART_WAIT_SEC 까지 기다린다.
+    RESTART_WAIT_SEC="${STOCK_RESTART_WAIT_SEC:-30}"
+    STATE=""
+    for _ in $(seq 1 "$RESTART_WAIT_SEC"); do
+      STATE="$(systemctl is-active stock-auto 2>/dev/null || true)"
+      [ "$STATE" = "active" ] && break
+      # failed 로 확정되면 더 기다릴 이유가 없다
+      [ "$STATE" = "failed" ] && break
+      sleep 1
+    done
     if [ "$STATE" = "active" ]; then
       say "✅ 데몬 재시작 확인 (상태 active)"
     else
