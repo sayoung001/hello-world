@@ -24,6 +24,9 @@ MAX_RECO_IN_DIGEST = 8      # 상위 몇 건까지 상세히 보낼지
 MAX_SECTOR_LINES = 12
 
 
+AUTOPULL_STALE_MIN = 30     # heartbeat 가 이보다 오래되면 타이머가 죽은 것으로 본다
+
+
 def _num(v, fmt: str = "{:,.2f}") -> str:
     try:
         if v is None or v == "":
@@ -32,6 +35,35 @@ def _num(v, fmt: str = "{:,.2f}") -> str:
         return "-" if f != f else fmt.format(f)
     except (TypeError, ValueError):
         return str(v)
+
+
+def _autopull_warning() -> Optional[str]:
+    """깃허브 자동 반영 타이머가 죽었는지 — 다이제스트에 한 줄로 끼워 넣는다.
+
+    autopull.sh 는 실패하면 스스로 텔레그램으로 알린다. 하지만 **타이머가
+    꺼지면 스크립트가 아예 돌지 않아 스스로 알릴 수 없다.** 그래서 매 실행마다
+    남기는 heartbeat 의 신선도를 매일 보는 이 다이제스트에서 검사한다.
+
+    heartbeat 가 아예 없으면 autopull 을 안 쓰는 환경이므로 아무 말도 하지 않는다
+    (쓰지 않는 사람에게 매일 경고를 띄우지 않는다).
+    """
+    from pathlib import Path
+    import time
+
+    try:
+        beat = Path(__file__).resolve().parents[2] / "logs" / "autopull.heartbeat"
+        if not beat.exists():
+            return None
+        age_min = (time.time() - beat.stat().st_mtime) / 60.0
+        if age_min < AUTOPULL_STALE_MIN:
+            return None
+        hours = age_min / 60.0
+        when = (f"{age_min:.0f}분" if hours < 1 else f"{hours:.1f}시간")
+        return (f"⚠️ 깃허브 자동 반영이 {when} 동안 돌지 않았습니다 — "
+                f"수정이 서버에 반영되지 않는 상태일 수 있습니다.\n"
+                f"   확인: systemctl list-timers stock-autopull.timer")
+    except (OSError, IndexError):
+        return None
 
 
 def batch_digest(result: Any, sector_lines: Optional[list[str]] = None,
@@ -126,6 +158,9 @@ def batch_digest(result: Any, sector_lines: Optional[list[str]] = None,
     n_fail = len(getattr(screen, "failures", {}) or {})
     L += ["", f"ℹ️ 채점 {0 if screen.scored_all is None else len(screen.scored_all)}종목 "
           f"· 실패 {n_fail}건"]
+    warn = _autopull_warning()
+    if warn:
+        L += ["", warn]
     L += ["", "※ 분석 보조이며 투자 권유가 아닙니다. 실행 여부는 본인 판단입니다.",
           "   실행 입력: .venv/bin/python -m stock_auto.pipeline.triage"]
     return "\n".join(L)
