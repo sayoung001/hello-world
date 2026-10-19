@@ -63,6 +63,14 @@ def run_agents(
         if market == Market.US else {t: [] for t in tickers}
     )
 
+    # 실측 기저율은 한 번만 읽는다(종목마다 CSV 를 다시 읽을 이유가 없다)
+    prior_rows: list = []
+    try:
+        from stock_auto.tracking import store
+        prior_rows = store.load()
+    except Exception as e:  # noqa: BLE001 — 기저율 없이도 추천은 나와야 한다
+        print(f"[agents] 기저율 조회 실패({type(e).__name__}) — 기저율 없이 진행")
+
     out = AgentPipelineResult()
     for r in rows:
         sym = r["symbol"]
@@ -75,7 +83,8 @@ def run_agents(
             f = flow_a.analyze(sym, r)
             v = value_a.analyze(sym, r)
             label = sector_label_map.get(sym, "-")
-            reco = pm.decide(r, n, f, v, sector_label=label)
+            reco = pm.decide(r, n, f, v, sector_label=label,
+                             prior_text=_prior_text(r, prior_rows))
         except Exception as e:  # noqa: BLE001 — 1종목 실패를 격리
             msg = f"{type(e).__name__}: {e}"
             print(f"[agents] {sym} 분석 실패 — 건너뜁니다 ({msg})")
@@ -103,6 +112,15 @@ def run_agents(
     if out.usage:
         print(f"[agents] 토큰 사용 {out.usage}")
     return out
+
+
+def _prior_text(row: dict, prior_rows: list) -> str:
+    """이 종목 점수 구간의 실측 승률 문장. 실패해도 추천은 나와야 한다."""
+    try:
+        from stock_auto.tracking.prior import prior_line
+        return prior_line(_num(row.get("effective_score")), prior_rows)
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _collect_usage(*results) -> dict:

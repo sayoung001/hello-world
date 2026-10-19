@@ -37,6 +37,30 @@ def _num(v, fmt: str = "{:,.2f}") -> str:
         return str(v)
 
 
+def _action_hint(conviction) -> str:
+    """확신도 → 행동. tracking.prior 에 정의를 모아 둔다."""
+    try:
+        from stock_auto.tracking.prior import action_hint
+        return action_hint(conviction)
+    except Exception:  # noqa: BLE001 — 부가 정보가 다이제스트를 막지 않게
+        return ""
+
+
+def _conviction_note(recos: list) -> Optional[str]:
+    """같은 날 확신도가 뭉쳐 있으면 변별력이 없다 — 그 사실을 알린다."""
+    try:
+        from stock_auto.tracking.prior import cluster_warning
+        vals = []
+        for r in recos or []:
+            try:
+                vals.append(float(r.get("conviction")))
+            except (TypeError, ValueError):
+                continue
+        return cluster_warning(vals)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _autopull_warning() -> Optional[str]:
     """깃허브 자동 반영 타이머가 죽었는지 — 다이제스트에 한 줄로 끼워 넣는다.
 
@@ -113,8 +137,12 @@ def batch_digest(result: Any, sector_lines: Optional[list[str]] = None,
             earn = (f" · 실적 D-{int(de)}" if de is not None and de == de else "")
             L += [
                 "",
+                # 확신도 뒤에 '그래서 뭘 다르게 하나'를 붙인다. 숫자만 보여주면
+                # 읽는 사람이 0.52 와 0.68 로 무엇을 달리할지 알 수 없다.
                 f"{i + 1}. {sym}  [{r.get('recommend', '-')}/{r.get('horizon', '-')}] "
-                f"확신 {_num(r.get('conviction'), '{:.2f}')}",
+                f"확신 {_num(r.get('conviction'), '{:.2f}')}"
+                + (f" ({_action_hint(r.get('conviction'))})"
+                   if _action_hint(r.get('conviction')) else ""),
                 f"   Eff {_num(row.get('effective_score'))} · "
                 f"종가 {_num(row.get('close'))} · {row.get('strategies', '-')}{earn}",
                 f"   진입: {str(r.get('entry_rule', '-'))[:120]}",
@@ -158,6 +186,9 @@ def batch_digest(result: Any, sector_lines: Optional[list[str]] = None,
     n_fail = len(getattr(screen, "failures", {}) or {})
     L += ["", f"ℹ️ 채점 {0 if screen.scored_all is None else len(screen.scored_all)}종목 "
           f"· 실패 {n_fail}건"]
+    cnote = _conviction_note(recos)
+    if cnote:
+        L += ["", cnote]
     warn = _autopull_warning()
     if warn:
         L += ["", warn]

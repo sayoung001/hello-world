@@ -52,6 +52,9 @@ class Secrets:
     notion_token: str
     notion_parent_page_id: str
     notion_reco_db_id: str
+    # 진입 신호 도달 DB. .env.example 에는 있었지만 여기 없어서,
+    # check_triggers 만 os.environ 으로 직접 읽고 데몬은 쓸 수 없었다.
+    notion_trigger_db_id: str
     # Telegram
     telegram_bot_token: str
     telegram_chat_id: str
@@ -88,6 +91,7 @@ def get_secrets(load: bool = True) -> Secrets:
         notion_token=g("NOTION_TOKEN", ""),
         notion_parent_page_id=g("NOTION_PARENT_PAGE_ID", ""),
         notion_reco_db_id=g("NOTION_RECO_DB_ID", ""),
+        notion_trigger_db_id=g("NOTION_TRIGGER_DB_ID", ""),
         telegram_bot_token=g("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=g("TELEGRAM_CHAT_ID", ""),
     )

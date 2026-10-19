@@ -88,15 +88,44 @@ FIELDNAMES = [f.name for f in fields(Trigger)]
 # 숫자와 키워드 사이에 '위 ', '아래로 ', '이상 ', '정도 ' 같은 말이 끼므로
 # 한글 3글자까지 건너뛴다. 더 넓히면 다른 문장의 숫자를 잘못 잡는다.
 _GAP = r"\s*%?\s*(?:[가-힣]{1,3}\s*){0,2}"
+
+# 숫자 — 쉼표도 소수점으로 받는다.
+# 한글 입력에서 '-0,5' 처럼 쓰는 일이 흔한데, 쉼표를 모르면 정규식이 쉼표
+# **뒤의 5** 를 숫자로 집어 0.5% 가 5% 가 된다(10배). 그러면 트리거가 사실상
+# 영원히 발화하지 않는다 — 조용히 아무 일도 안 일어나는 종류의 실패다.
+# 소수부를 1~2자리로 제한하고 뒤에 숫자가 더 오면 받지 않는다.
+# 그래야 '1,500'(천 단위 구분) 을 1.50 으로 잘못 읽지 않는다.
+_NUM = r"(\d+(?:[.,]\d{1,2}(?!\d))?)"
+
+# 퍼센트로 말이 되는 상한. 이보다 크면 파싱 오류로 보고 경고한다.
+MAX_SANE_PCT = 20.0
+
 _PULLBACK = re.compile(
-    r"(?:-\s*)?(\d+(?:\.\d+)?)" + _GAP + r"(?:눌림|눌리|조정|하락|되돌림|빠지)")
+    r"(?:-\s*)?" + _NUM + _GAP + r"(?:눌림|눌리|조정|하락|되돌림|빠지)")
 _BREAKOUT = re.compile(
-    r"(?:\+\s*)?(\d+(?:\.\d+)?)" + _GAP + r"(?:돌파|상승|상회|뚫)")
+    r"(?:\+\s*)?" + _NUM + _GAP + r"(?:돌파|상승|상회|뚫)")
 _BREAKOUT_BARE = re.compile(r"돌파|상회|뚫고|신고가")
 _SPLIT = re.compile(r"분할|나눠|절반|1/2|반씩")
 _BASIS = (("prev_close", re.compile(r"전일\s*종가|전일종가|어제\s*종가")),
           ("open", re.compile(r"시가|개장")),
           ("signal_close", re.compile(r"종가|현재가")))
+
+
+def _pct(raw: str, source: str = "") -> float:
+    """'0,5' → 0.5. 말이 안 되는 값은 경고하고 0으로 돌려 immediate 로 떨어뜨린다.
+
+    조용히 통과시키면 안 되는 이유: 값이 틀린 트리거는 발화하지 않고 만료될
+    뿐이어서, 아무 일도 일어나지 않는 것과 구분이 안 된다.
+    """
+    try:
+        v = float(raw.replace(",", "."))
+    except (TypeError, ValueError):
+        return 0.0
+    if not (0 < v <= MAX_SANE_PCT):
+        print(f"[trigger] ⚠️ 진입 조건의 % 값이 비정상({v}) — 조건을 무시합니다. "
+              f"원문: {source[:80]!r}")
+        return 0.0
+    return v
 
 
 def parse_rule(text: str) -> dict[str, Any]:
@@ -121,16 +150,23 @@ def parse_rule(text: str) -> dict[str, Any]:
             out["basis"] = name
             break
 
+    # % 값이 비정상이면 kind 를 바꾸지 않고 immediate 로 남긴다.
+    # pullback 에 value_pct=0 을 두면 기준가에 닿는 순간 발화해버려 의도와
+    # 정반대가 된다(눌림을 기다리라는 조건이 '지금 사라'가 된다).
     m = _PULLBACK.search(t)
     if m:
-        out["kind"] = "pullback"
-        out["value_pct"] = float(m.group(1))
+        v = _pct(m.group(1), t)
+        if v > 0:
+            out["kind"] = "pullback"
+            out["value_pct"] = v
         return out
 
     m = _BREAKOUT.search(t)
     if m:
-        out["kind"] = "breakout"
-        out["value_pct"] = float(m.group(1))
+        v = _pct(m.group(1), t)
+        if v > 0:
+            out["kind"] = "breakout"
+            out["value_pct"] = v
         return out
 
     if _BREAKOUT_BARE.search(t):

@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         from stock_auto.integrations.notion_publisher import NotionPublisher
         notion = NotionPublisher(token=sec.notion_token) if sec.has_notion else None
-        db_id = os.environ.get("NOTION_TRIGGER_DB_ID", "").strip() or None
+        db_id = sec.notion_trigger_db_id or None   # get_secrets 가 .env 를 읽는다
         if notion and not db_id:
             print("[trigger] NOTION_TRIGGER_DB_ID 미설정 — 부모 페이지에 개별 페이지로 게시")
             print("          DB로 쌓으려면: --setup-db 로 1회 생성")

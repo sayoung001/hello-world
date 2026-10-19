@@ -62,6 +62,29 @@ def _recalibrate_and_batch():
     except Exception as e:  # noqa: BLE001 — 라벨링 실패가 배치를 막지 않게
         print(f"[daemon] 결과 라벨링 실패: {type(e).__name__}: {e}")
 
+    # ⓪-2 진입 트리거 일봉 평가 — 장중 실시간 감시가 놓친 것을 받아낸다.
+    #     RealtimeTriggerWatch(run_monitor)만으로는 구멍이 있다:
+    #       · KIS 실시간 등록 상한(약 40종목)을 넘는 종목
+    #       · 웹소켓 연결이 끊긴 구간
+    #       · 모니터가 안 돌았거나 장외에 조건가를 스친 경우
+    #     그러면 '-0,5% 눌림 시 분할 진입' 같은 조건이 실제로 닿았는데도
+    #     알림이 안 가고 만료된다 — 아무 일도 안 일어난 것과 구분이 안 된다.
+    #     일봉으로 한 번 더 훑어 보수적으로(도달가에 체결) 판정한다.
+    try:
+        from stock_auto.config.env import get_secrets as _gs
+        from stock_auto.tracking.trigger_eval import evaluate_daily, TriggerFirer
+        from stock_auto.integrations.notion_publisher import NotionPublisher
+        _sec = _gs()
+        firer = TriggerFirer(
+            notion=NotionPublisher(token=_sec.notion_token) if _sec.has_notion else None,
+            db_id=_sec.notion_trigger_db_id or None,
+            parent_page=_sec.notion_parent_page_id or None)
+        tstat = evaluate_daily(firer=firer)
+        print(f"[daemon] 트리거 일봉 평가: 발화 {tstat.get('fired', 0)}건 · "
+              f"대기 {tstat.get('pending', 0)}건 · 만료 {tstat.get('expired', 0)}건")
+    except Exception as e:  # noqa: BLE001 — 트리거 평가 실패가 배치를 막지 않게
+        print(f"[daemon] 트리거 일봉 평가 실패: {type(e).__name__}: {e}")
+
     for market in _active_markets():
         uni_map = resolve_universe(market)
         syms = list(uni_map.keys())

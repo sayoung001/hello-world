@@ -89,6 +89,18 @@ _SYSTEM = (
     "2) 당일 예상 손익은 점추정 금지 — ATR/유사셋업 기반 P10/P50/P90 범위로.\n"
     "3) 제공된 근거에 없는 사실 날조 금지. 출처를 sources에 명시.\n"
     "4) 이것은 투자 권유가 아니라 분석 보조다. 과신 표현 자제.\n"
+    # ── conviction 의 뜻을 정의한다 ──
+    # 예전에는 0~1 범위만 주고 무슨 뜻인지 말하지 않았다. 그러니 중간값에
+    # 몰리고(관측: 0.52·0.55·0.68) 실현손익과의 관계도 생기지 않는다.
+    # 확률은 '빈도'로 정의해야 보정이 가능하다.
+    "5) conviction 은 **목표가에 손절보다 먼저 닿을 확률**이다. 빈도로 생각하라:\n"
+    "   0.75 = 열 번 중 일곱~여덟 번   0.60 = 열 번 중 여섯 번\n"
+    "   0.50 = 반반(모르겠다)          0.35 = 열 번 중 세~네 번\n"
+    "   같은 날 추천끼리 값이 거의 같으면 변별력이 없다 — 종목별로 다르게 매겨라.\n"
+    "6) [실측 기저율]이 주어지면 **그 숫자에서 출발해** 증거만큼 조정하라.\n"
+    "   기저율이 없다고 하면 0.5 근처에서 출발하고, 근거 없이 올리지 마라.\n"
+    "   0.9 이상이나 0.1 이하는 거의 쓰지 마라 — 이 전략의 실측 승률은\n"
+    "   그런 극단을 뒷받침하지 않는다.\n"
     "한국어로 작성한다."
 )
 
@@ -107,10 +119,12 @@ class PortfolioAgent(StockAgentBase):
         super().__init__(agent_id="portfolio", system_prompt=_SYSTEM, **kw)
 
     def decide(self, row: dict, news: dict, flow: dict, value: dict,
-               sector_label: str = "-") -> dict:
+               sector_label: str = "-", prior_text: str = "") -> dict:
         """
         row: screener.scored_all 한 행(dict)
         news/flow/value: 각 분석 에이전트 결과 dict
+        prior_text: 이 종목 점수 구간의 **실측 승률** 문장(tracking.prior.prior_line).
+                    conviction 을 추측이 아니라 기저율 조정으로 만들기 위한 입력.
         """
         atr = row.get("atr")
         prompt = (
@@ -126,8 +140,9 @@ class PortfolioAgent(StockAgentBase):
             f"[섹터] {row.get('sector_etf')} 상태 '{sector_label}'(score {row.get('sector_status_score')})\n"
             f"[뉴스] {news.get('summary')} (sent {news.get('sentiment')})\n"
             f"[수급] {flow.get('summary')}\n"
-            f"[밸류] {value.get('summary')}\n\n"
-            "위를 종합해 추천 JSON을 작성하라. expected_pnl_today는 ATR과 R:R을 활용해 "
+            f"[밸류] {value.get('summary')}\n"
+            + (f"[실측 기저율] {prior_text}\n" if prior_text else "")
+            + "\n위를 종합해 추천 JSON을 작성하라. expected_pnl_today는 ATR과 R:R을 활용해 "
             "당일 변동 분포의 P10/P50/P90(%)로 제시하고 basis에 산출 근거를 적어라.")
         result = self.call_json(prompt, RECO_SCHEMA, max_tokens=PM_MAX_TOKENS,
                                 thinking=True)
