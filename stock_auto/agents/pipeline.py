@@ -27,6 +27,8 @@ from stock_auto.agents.news_collector import collect_for_tickers, NewsItem
 class AgentPipelineResult:
     recommendations: list[dict] = field(default_factory=list)
     per_ticker: dict[str, dict] = field(default_factory=dict)  # 디버그(뉴스/수급/밸류)
+    failures: dict[str, str] = field(default_factory=dict)     # {종목: 실패 사유}
+    usage: dict[str, int] = field(default_factory=dict)        # 토큰 사용량 합계
 
 
 def run_agents(
@@ -64,14 +66,61 @@ def run_agents(
     out = AgentPipelineResult()
     for r in rows:
         sym = r["symbol"]
-        n = news_a.analyze(sym, news_map.get(sym, []))
-        f = flow_a.analyze(sym, r)
-        v = value_a.analyze(sym, r)
-        label = sector_label_map.get(sym, "-")
-        reco = pm.decide(r, n, f, v, sector_label=label)
+        # ── 종목 단위 격리 ──
+        # 예전에는 호출부(daily_batch)도 여기도 예외를 막지 않아서, 60회 호출 중
+        # 한 번만 실패해도 그날 추천·Notion·Telegram·신호기록이 전부 날아갔다.
+        # 1종목 실패가 나머지를 죽이지 않게 한다.
+        try:
+            n = news_a.analyze(sym, news_map.get(sym, []))
+            f = flow_a.analyze(sym, r)
+            v = value_a.analyze(sym, r)
+            label = sector_label_map.get(sym, "-")
+            reco = pm.decide(r, n, f, v, sector_label=label)
+        except Exception as e:  # noqa: BLE001 — 1종목 실패를 격리
+            msg = f"{type(e).__name__}: {e}"
+            print(f"[agents] {sym} 분석 실패 — 건너뜁니다 ({msg})")
+            out.failures[sym] = msg
+            continue
         reconcile_levels(reco, r)
+        out.usage = _merge_usage(out.usage, _collect_usage(n, f, v, reco))
+
+        # ── 파싱 실패분은 하류로 보내지 않는다 ──
+        # 예전에는 무조건 append 해서, 파싱 실패 dict 가 Notion 에 '종목 -' 같은
+        # 쓰레기 행으로 올라가고 다이제스트에도 빈 추천으로 찍혔다.
+        if not isinstance(reco, dict) or reco.get("_parse_error"):
+            raw = (reco or {}).get("_raw", "") if isinstance(reco, dict) else ""
+            print(f"[agents] {sym} 추천 JSON 파싱 실패 — 제외 "
+                  f"(앞부분: {str(raw)[:80]!r})")
+            out.failures[sym] = "parse_error"
+            continue
+
         out.per_ticker[sym] = {"news": n, "flow": f, "value": v}
         out.recommendations.append(reco)
+
+    if out.failures:
+        print(f"[agents] 성공 {len(out.recommendations)}건 · "
+              f"실패 {len(out.failures)}건 {list(out.failures)}")
+    if out.usage:
+        print(f"[agents] 토큰 사용 {out.usage}")
+    return out
+
+
+def _collect_usage(*results) -> dict:
+    """에이전트 결과에 붙은 _usage 를 모은다(call_json 이 넣는다)."""
+    tot: dict[str, int] = {}
+    for d in results:
+        if isinstance(d, dict):
+            tot = _merge_usage(tot, d.pop("_usage", {}) or {})
+    return tot
+
+
+def _merge_usage(a: dict, b: dict) -> dict:
+    out = dict(a)
+    for k, v in (b or {}).items():
+        try:
+            out[k] = out.get(k, 0) + int(v)
+        except (TypeError, ValueError):
+            continue
     return out
 
 

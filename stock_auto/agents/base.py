@@ -26,6 +26,10 @@ except ImportError:  # 지연 — 실제 호출 시점에만 필요
 # 모델 (사용자가 모델을 명시하지 않음 → 최신 Opus 기본. 비용 절감 원하면 env로 하향)
 DEFAULT_MODEL = os.environ.get("STOCK_AGENT_MODEL", "claude-opus-4-8")
 
+# 재시도 — 일시 오류만. 종목 단위 격리(agents/pipeline.py)와 2단 방어다.
+AGENT_RETRIES = int(os.environ.get("STOCK_AGENT_RETRIES", "2"))
+AGENT_BACKOFF_SEC = float(os.environ.get("STOCK_AGENT_BACKOFF_SEC", "3"))
+
 
 class StockAgentBase:
     """모든 주식 분석 에이전트의 베이스."""
@@ -49,7 +53,7 @@ class StockAgentBase:
 
     # ── 텍스트 호출 ──
     def call_text(self, prompt: str, max_tokens: int = 1200) -> str:
-        resp = self.client.messages.create(
+        resp = self._create(
             model=self.model,
             max_tokens=max_tokens,
             system=self.system_prompt,
@@ -70,9 +74,61 @@ class StockAgentBase:
         if thinking:
             # 종합 판단처럼 복잡한 추론엔 적응형 사고 사용
             kwargs["thinking"] = {"type": "adaptive"}
-        resp = self.client.messages.create(**kwargs)
+        resp = self._create(**kwargs)
         text = next((b.text for b in resp.content if b.type == "text"), "")
-        return _safe_json(text)
+        out = _safe_json(text)
+        if isinstance(out, dict) and not out.get("_parse_error"):
+            out["_usage"] = usage_of(resp)
+        return out
+
+    # ── 재시도 ──
+    def _create(self, **kwargs):
+        """일시 오류(429·5xx·네트워크)만 재시도한다.
+
+        SDK 기본 재시도는 2회지만 전부 소진되면 예외가 올라오고, 호출부가
+        종목 단위로 막지 않으면 배치 전체가 죽는다. 여기서 한 겹 더 받되
+        **400 같은 요청 오류는 재시도하지 않는다** — 프롬프트나 스키마가
+        틀린 것이라 다시 보내도 같은 결과이고, 15종목 × 4회 × 재시도만큼
+        시간과 돈을 버린다.
+        """
+        import time
+        last: Optional[BaseException] = None
+        for attempt in range(AGENT_RETRIES + 1):
+            try:
+                return self.client.messages.create(**kwargs)
+            except Exception as e:  # noqa: BLE001 — 아래에서 분류해 재던진다
+                last = e
+                if not _is_transient(e) or attempt == AGENT_RETRIES:
+                    raise
+                delay = AGENT_BACKOFF_SEC * (2 ** attempt)
+                print(f"[agent:{self.agent_id}] {type(e).__name__} — "
+                      f"{delay}초 후 재시도 ({attempt + 1}/{AGENT_RETRIES})")
+                time.sleep(delay)
+        raise last  # 도달하지 않음(루프에서 raise)
+
+
+def _is_transient(e: BaseException) -> bool:
+    """재시도해서 의미가 있는 오류인가."""
+    name = type(e).__name__
+    if name in ("RateLimitError", "APIConnectionError", "APITimeoutError",
+                "InternalServerError", "APIConnectionTimeoutError"):
+        return True
+    code = getattr(e, "status_code", None)
+    if isinstance(code, int):
+        return code == 429 or code >= 500
+    return False
+
+
+def usage_of(resp: Any) -> dict:
+    """응답의 토큰 사용량. 지금까지 한 번도 읽지 않아 실제 지출과
+    프롬프트 변경의 토큰 영향을 알 수 없었다."""
+    u = getattr(resp, "usage", None)
+    if u is None:
+        return {}
+    return {k: v for k in ("input_tokens", "output_tokens",
+                           "cache_read_input_tokens",
+                           "cache_creation_input_tokens")
+            if (v := getattr(u, k, None)) is not None}
 
 
 def _safe_json(text: str) -> dict:

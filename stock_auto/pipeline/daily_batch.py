@@ -101,11 +101,18 @@ def run_daily(
                          sector_lines=list(sector_lines or []))
 
     # 3) 추천 상위 N LLM 분석
+    # run_agents 는 종목 단위로 실패를 격리하지만, 뉴스 수집이나 클라이언트 생성
+    # 처럼 루프 바깥에서 터지는 것도 있다. 그 경우에도 규칙 시그널 기록·섹터
+    # 요약·매도 신호는 살려야 한다 — 기록 누락은 소급 복구가 안 된다.
     if run_llm and not screen.candidates.empty:
-        result.agents = run_agents(
-            screen.candidates, market, client=llm_client,
-            sector_label_map=sector_label_map, top_n=top_n)
-        print(f"[batch] 추천 {len(result.agents.recommendations)}건 생성")
+        try:
+            result.agents = run_agents(
+                screen.candidates, market, client=llm_client,
+                sector_label_map=sector_label_map, top_n=top_n)
+            print(f"[batch] 추천 {len(result.agents.recommendations)}건 생성")
+        except Exception as e:  # noqa: BLE001 — LLM 실패가 배치를 막지 않게
+            print(f"[batch] ⚠️ LLM 분석 전체 실패 — 규칙 시그널만 기록합니다 "
+                  f"({type(e).__name__}: {e})")
 
     # 3.5) 결과 라벨링 루프: 추천 전 건을 기록 (실행 여부 무관 — 선택 편향 방지)
     try:
