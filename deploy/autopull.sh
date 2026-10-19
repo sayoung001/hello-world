@@ -116,6 +116,22 @@ restart_daemon() {
 ${RESTART_OUT2}"
     fi
 
+    # ── sudo 가 안 되면: 권한 없이 재시작한다 ──
+    # 유닛이 User=<나> 로 돌기 때문에 그 프로세스는 내 소유다. 같은 사용자의
+    # 프로세스는 sudo 없이 종료할 수 있고, 유닛에 Restart=always / RestartSec=30
+    # 이 걸려 있어 systemd 가 **새 코드로** 다시 띄운다.
+    # SIGTERM 은 systemctl stop 이 보내는 것과 같은 신호라 난폭한 종료가 아니다.
+    # 덕분에 NOPASSWD sudoers 설정이 꼭 필요하지는 않다(다만 RestartSec 만큼
+    # 느리다 — 그래서 아래 대기 시간을 늘려 잡는다).
+    RESTART_VIA_KILL=0
+    if ! systemctl is-active --quiet stock-auto 2>/dev/null \
+       || printf '%s' "$RESTART_OUT" | grep -qiE 'password|terminal is required|sudo:'; then
+      if pkill -TERM -u "$(id -u)" -f 'stock_auto\.pipeline\.run_daemon' 2>/dev/null; then
+        RESTART_VIA_KILL=1
+        say "sudo 없이 재시작 — 데몬 프로세스에 TERM 전송, systemd 가 되살립니다"
+      fi
+    fi
+
     # 종료 코드를 믿지 않고 **실제로 돌고 있는지**로 판정한다.
     # systemctl 의 종료 코드는 환경에 따라 애매하게 0이 아닐 수 있고, 반대로
     # 우리가 알고 싶은 건 "지금 새 코드로 돌고 있나" 하나다.
@@ -126,7 +142,9 @@ ${RESTART_OUT2}"
     # UNIT_STATE 로 둔다 — STATE 는 알림 상태파일 경로를 담은 전역이다.
     # 같은 이름을 쓰면 fail() 이 logs/autopull_alert.state 대신 "active" 라는
     # 파일에 쓰게 되어 재알림 억제가 조용히 깨진다.
+    # kill 경로는 systemd 의 RestartSec(30초)을 기다려야 하므로 넉넉히 잡는다.
     RESTART_WAIT_SEC="${STOCK_RESTART_WAIT_SEC:-30}"
+    [ "$RESTART_VIA_KILL" = "1" ] && RESTART_WAIT_SEC=75
     UNIT_STATE=""
     for _ in $(seq 1 "$RESTART_WAIT_SEC"); do
       UNIT_STATE="$(systemctl is-active stock-auto 2>/dev/null || true)"
@@ -140,10 +158,14 @@ ${RESTART_OUT2}"
       printf '%s\n' "$RESTART_OUT" >>"$LOG"
       if printf '%s' "$RESTART_OUT" | grep -qiE \
            'password|terminal is required|not allowed|sudo:|may not run'; then
-        fail restart_sudo "코드는 받았지만 재시작에 sudo 권한이 없습니다 — 서버가 계속 옛 코드로 돕니다.
+        fail restart_sudo "코드는 받았지만 재시작에 실패했습니다 — 서버가 계속 옛 코드로 돕니다.
 현재 데몬 상태: ${UNIT_STATE:-unknown}
 
-비밀번호 없는 sudo 를 등록하세요:
+sudo 없는 재시작(프로세스 TERM)도 시도했는데 되살아나지 않았습니다.
+서버에서 한 번 확인해 주세요:
+  systemctl status stock-auto --no-pager | head -20
+
+빠르게 해결하려면(한 번만):
   echo \"\$(whoami) ALL=(ALL) NOPASSWD: /bin/systemctl restart stock-auto\" | sudo tee /etc/sudoers.d/stock-auto
   sudo chmod 440 /etc/sudoers.d/stock-auto"
       else
