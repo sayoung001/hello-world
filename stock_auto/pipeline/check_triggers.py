@@ -101,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         firer = TriggerFirer(notion=notion, db_id=db_id,
                              parent_page=sec.notion_parent_page_id or None)
 
-    stat = evaluate_daily(base=args.path, firer=firer)
+    stat = evaluate_daily(base=args.path, firer=firer, dry_run=args.dry_run)
     print(f"\n발화 {stat['fired']} · 만료 {stat['expired']} · "
           f"대기 {stat['pending']} · 데이터없음 {stat['nodata']}")
     if stat["fired"]:

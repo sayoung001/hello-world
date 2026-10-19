@@ -97,13 +97,20 @@ class TriggerFirer:
 def evaluate_daily(ohlcv_map: Optional[dict[str, pd.DataFrame]] = None,
                    base: Optional[str] = None,
                    firer: Optional[TriggerFirer] = None,
-                   today: Optional[str] = None) -> dict[str, int]:
+                   today: Optional[str] = None,
+                   dry_run: bool = False) -> dict[str, int]:
     """
     pending 트리거를 일봉으로 판정한다.
 
     - 추천일 **다음** 거래일부터 본다(추천일 당일 저가로 발화하면 look-ahead).
     - horizon 유효기간을 넘긴 건은 expired.
     - 반환: {'fired': n, 'expired': n, 'pending': n, 'nodata': n}
+
+    dry_run=True 면 **상태를 저장하지 않는다.**
+      예전에는 dry-run 에서도 fire() 가 row 를 제자리에서 바꾸고 끝에서
+      save_all() 이 호출돼, "판정만 한다"면서 트리거를 fired 로 영구히
+      소모했다. 그러면 정작 실제 알림은 영영 오지 않는다.
+      이제 사본을 넘기고 저장을 건너뛰어, 메시지 모양만 확인할 수 있다.
     """
     from stock_auto.config.clock import now_et
     from stock_auto.config.settings import Market
@@ -160,18 +167,25 @@ def evaluate_daily(ohlcv_map: Optional[dict[str, pd.DataFrame]] = None,
             # breakout도 목표가. 갭으로 더 유리하게 열렸어도 목표가로 본다.
             price = tgt if tgt is not None else float(window.loc[hit_idx, "Close"])
             when = pd.Timestamp(hit_idx).strftime("%Y-%m-%d")
-            firer.fire(r, float(price), when, df.loc[:hit_idx])
+            # dry_run 이면 사본을 넘긴다 — fire() 는 row 를 제자리에서 바꾼다.
+            firer.fire(dict(r) if dry_run else r, float(price), when,
+                       df.loc[:hit_idx])
             stat["fired"] += 1
         elif len(fwd) > limit:
             # 만료는 발화가 아니므로 fired_* 는 비워 둔다.
             # 처리 시각만 notify_at 에 남긴다(나중에 CSV를 읽을 때 헷갈리지 않게).
-            r["status"] = "expired"
-            r["notify_at"] = pd.Timestamp(fwd.index[limit - 1]).strftime("%Y-%m-%d")
+            if not dry_run:
+                r["status"] = "expired"
+                r["notify_at"] = pd.Timestamp(
+                    fwd.index[limit - 1]).strftime("%Y-%m-%d")
             stat["expired"] += 1
         else:
             stat["pending"] += 1
 
-    T.save_all(rows, base)
+    if dry_run:
+        print("[trigger] dry-run — 상태를 저장하지 않았습니다(트리거는 그대로 pending).")
+    else:
+        T.save_all(rows, base)
     return stat
 
 
