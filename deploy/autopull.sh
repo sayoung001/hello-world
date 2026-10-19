@@ -158,18 +158,39 @@ fi
 if git diff --name-only "${LOCAL}..${REMOTE}" | grep -qv -e '\.md$' -e '^docs/'; then
   if systemctl is-active --quiet stock-auto 2>/dev/null; then
     say "코드 변경 → 데몬 재시작"
-    # -n(비대화형): 타이머에는 tty 가 없어 비밀번호를 물으면 그대로 멈춘다.
+    # systemctl restart 의 종료 코드는 **두 가지 전혀 다른 이유**로 0이 아니다:
+    #   (a) sudo 거부        → 코드는 최신, 프로세스는 옛 코드로 계속 돈다
+    #   (b) 서비스 기동 실패 → 데몬이 아예 죽어 있다(훨씬 심각)
+    # 예전 코드는 둘을 구분하지 않고 (a) 로 단정해, (b) 일 때 엉뚱한 sudo
+    # 설정을 안내하면서 '데몬이 지금 안 돈다'는 중요한 사실은 말하지 않았다.
     #
-    # systemctl restart 는 **두 가지 전혀 다른 이유**로 0이 아닌 값을 돌려준다:
-    #   (a) sudo 가 거부됨        → 코드는 최신, 프로세스는 옛 코드로 계속 돈다
-    #   (b) 서비스가 기동에 실패  → 데몬이 아예 죽어 있다(훨씬 심각)
-    # 예전 메시지는 둘을 구분하지 않고 (a) 로 단정해서, (b) 일 때 엉뚱한
-    # sudo 설정을 안내했다. 이제 stderr 와 is-active 로 갈라서 알린다.
-    if ! RESTART_OUT="$(sudo -n systemctl restart stock-auto 2>&1)"; then
+    # 그리고 종료 코드 자체를 믿지 않는다. 평문 sudo 로는 되던 재시작이
+    # sudo -n 으로 바꾼 뒤 실패로 보고되는 일이 있었다. 우리가 알고 싶은 건
+    # "지금 새 코드로 돌고 있나" 하나이므로 is-active 로 판정한다.
+    # -n 을 먼저 쓰고(암호 프롬프트로 멈추는 것을 막는다) 실패하면 평문으로
+    # 한 번 더 — tty 가 없어 암호를 물을 수는 없고, 권한이 있으면 통과한다.
+    # set -e 주의: `VAR="$(실패하는 명령)"` 는 할당 자체가 0이 아닌 값을
+    # 반환하므로 ERR 트랩이 먼저 걸린다. 치환마다 `|| true` 로 막아야
+    # 아래 분기(restart_sudo / restart_unit)까지 도달한다.
+    RESTART_RC=0
+    RESTART_OUT="$(sudo -n systemctl restart stock-auto 2>&1)" || RESTART_RC=$?
+    if [ "$RESTART_RC" -ne 0 ]; then
+      RESTART_OUT2="$(sudo systemctl restart stock-auto 2>&1 || true)"
+      RESTART_OUT="${RESTART_OUT}
+${RESTART_OUT2}"
+    fi
+
+    # 종료 코드를 믿지 않고 **실제로 돌고 있는지**로 판정한다.
+    # systemctl 의 종료 코드는 환경에 따라 애매하게 0이 아닐 수 있고, 반대로
+    # 우리가 알고 싶은 건 "지금 새 코드로 돌고 있나" 하나다.
+    sleep 2
+    STATE="$(systemctl is-active stock-auto 2>/dev/null || true)"
+    if [ "$STATE" = "active" ]; then
+      say "✅ 데몬 재시작 확인 (상태 active)"
+    else
       printf '%s\n' "$RESTART_OUT" >>"$LOG"
-      STATE="$(systemctl is-active stock-auto 2>/dev/null || true)"
       if printf '%s' "$RESTART_OUT" | grep -qiE \
-           'password|terminal is required|not allowed|^sudo:|may not run'; then
+           'password|terminal is required|not allowed|sudo:|may not run'; then
         fail restart_sudo "코드는 받았지만 재시작에 sudo 권한이 없습니다 — 서버가 계속 옛 코드로 돕니다.
 현재 데몬 상태: ${STATE:-unknown}
 
