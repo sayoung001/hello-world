@@ -33,7 +33,11 @@ RECO_SCHEMA = {
                 # immediate = 조건 없이 다음 개장에 진입
                 "kind": {"type": "string",
                          "enum": ["pullback", "breakout", "immediate"]},
-                "value_pct": {"type": "number"},     # 1.5 = 1.5%. immediate면 0
+                # 1.5 = 1.5%. immediate면 0.
+                # **반드시 양수**. 방향은 kind 가 정한다 — 진입 문장이
+                # '-0.5% 눌림'이어도 여기는 0.5 로 적어야 한다. 음수를 넣으면
+                # 도달가가 기준가 위로 계산되어 조건이 정반대로 뒤집힌다.
+                "value_pct": {"type": "number", "minimum": 0, "maximum": 20},
                 # 기준가: signal_close(추천일 종가) / prev_close / open(당일 시가)
                 "basis": {"type": "string",
                           "enum": ["signal_close", "prev_close", "open"]},
@@ -83,6 +87,9 @@ _SYSTEM = (
     "   그리고 그 조건을 entry_trigger에 **기계가 읽을 수 있게** 똑같이 담아라.\n"
     "   예) '1.5% 눌림 시 분할 진입' → kind=pullback, value_pct=1.5,\n"
     "       basis=signal_close, split=true\n"
+    "   ★ value_pct 는 **항상 양수**로 적어라. 방향은 kind 가 정한다.\n"
+    "     '-0.5% 눌림' 이라고 썼더라도 value_pct=0.5 다. 음수를 넣으면\n"
+    "     도달가가 기준가 위로 계산되어 조건이 정반대로 뒤집힌다.\n"
     "   예) '종가 돌파 확인 후 진입'  → kind=breakout, value_pct=0.5,\n"
     "       basis=signal_close, split=false\n"
     "   눌림/돌파 조건이 없으면 kind=immediate, value_pct=0.\n"

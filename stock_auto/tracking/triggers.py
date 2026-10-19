@@ -89,13 +89,16 @@ FIELDNAMES = [f.name for f in fields(Trigger)]
 # 한글 3글자까지 건너뛴다. 더 넓히면 다른 문장의 숫자를 잘못 잡는다.
 _GAP = r"\s*%?\s*(?:[가-힣]{1,3}\s*){0,2}"
 
-# 숫자 — 쉼표도 소수점으로 받는다.
-# 한글 입력에서 '-0,5' 처럼 쓰는 일이 흔한데, 쉼표를 모르면 정규식이 쉼표
-# **뒤의 5** 를 숫자로 집어 0.5% 가 5% 가 된다(10배). 그러면 트리거가 사실상
-# 영원히 발화하지 않는다 — 조용히 아무 일도 안 일어나는 종류의 실패다.
-# 소수부를 1~2자리로 제한하고 뒤에 숫자가 더 오면 받지 않는다.
-# 그래야 '1,500'(천 단위 구분) 을 1.50 으로 잘못 읽지 않는다.
-_NUM = r"(\d+(?:[.,]\d{1,2}(?!\d))?)"
+# 숫자 — 마침표는 자릿수 제한 없이, 쉼표는 1~2자리만.
+#
+#   마침표  `\.\d+`         실제 입력은 이쪽이다('-0.5 눌림'). 자릿수를 제한하면
+#                           '0.125%' 나 '1.250%' 가 깨진다 — 한 번 제한했다가
+#                           멀쩡한 경로를 망가뜨렸으므로 무제한으로 되돌렸다.
+#   쉼표    `,\d{1,2}(?!\d)` 방어용. 쉼표를 아예 모르면 정규식이 쉼표 뒤 숫자를
+#                           집어버린다('0,5' → 5). 다만 '1,500'(천 단위)을
+#                           1.50 으로 오독하지 않도록 뒤에 숫자가 더 오면 안 받는다.
+#                           그런 입력은 아래 MAX_SANE_PCT 에서 걸린다.
+_NUM = r"(\d+(?:\.\d+|,\d{1,2}(?!\d))?)"
 
 # 퍼센트로 말이 되는 상한. 이보다 크면 파싱 오류로 보고 경고한다.
 MAX_SANE_PCT = 20.0
@@ -183,8 +186,26 @@ def resolve_condition(reco: Optional[dict], rule_text: str = ""
     et = (reco or {}).get("entry_trigger")
     if isinstance(et, dict) and et.get("kind") in ("pullback", "breakout", "immediate"):
         try:
-            return ({"kind": str(et["kind"]),
-                     "value_pct": float(et.get("value_pct") or 0.0),
+            kind = str(et["kind"])
+            raw = float(et.get("value_pct") or 0.0)
+            # ── 부호는 버린다. 방향은 kind 가 정한다 ──
+            # 진입 문장이 '-0.5% 눌림'이면 LLM이 그 부호를 스키마에도 그대로
+            # 옮겨 value_pct=-0.5 를 넣는 일이 생긴다. 그러면 도달가가
+            # 기준가 **위**로 계산되어, 주가가 오르는 순간 '0.5% 눌림 도달'
+            # 알림이 간다 — 조건이 정반대로 뒤집힌다.
+            # 산문 경로에는 _pct() 로 같은 검사를 걸어 두었는데 1순위인
+            # 이 경로가 무방비였다.
+            v = abs(raw)
+            if kind == "immediate":
+                v = 0.0
+            elif not (0 < v <= MAX_SANE_PCT):
+                # 0·None·비정상 값은 조건으로 쓸 수 없다. value_pct=0 인 눌림은
+                # 기준가에 닿는 순간 발화해 '기다려라'가 '지금 사라'가 된다.
+                # 스키마를 버리고 산문 파싱으로 떨어뜨린다.
+                print(f"[trigger] ⚠️ entry_trigger.value_pct 가 비정상({raw}) — "
+                      f"스키마를 버리고 진입 문장을 파싱합니다.")
+                raise ValueError("value_pct out of range")
+            return ({"kind": kind, "value_pct": v,
                      "basis": str(et.get("basis") or "signal_close"),
                      "split": bool(et.get("split"))}, "schema")
         except (TypeError, ValueError):
