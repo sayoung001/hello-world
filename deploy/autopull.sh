@@ -159,11 +159,40 @@ if git diff --name-only "${LOCAL}..${REMOTE}" | grep -qv -e '\.md$' -e '^docs/';
   if systemctl is-active --quiet stock-auto 2>/dev/null; then
     say "코드 변경 → 데몬 재시작"
     # -n(비대화형): 타이머에는 tty 가 없어 비밀번호를 물으면 그대로 멈춘다.
-    if ! sudo -n systemctl restart stock-auto 2>>"$LOG"; then
-      fail restart "코드는 받았지만 데몬 재시작이 막혔습니다 — 서버가 계속 옛 코드로 돕니다.
+    #
+    # systemctl restart 는 **두 가지 전혀 다른 이유**로 0이 아닌 값을 돌려준다:
+    #   (a) sudo 가 거부됨        → 코드는 최신, 프로세스는 옛 코드로 계속 돈다
+    #   (b) 서비스가 기동에 실패  → 데몬이 아예 죽어 있다(훨씬 심각)
+    # 예전 메시지는 둘을 구분하지 않고 (a) 로 단정해서, (b) 일 때 엉뚱한
+    # sudo 설정을 안내했다. 이제 stderr 와 is-active 로 갈라서 알린다.
+    if ! RESTART_OUT="$(sudo -n systemctl restart stock-auto 2>&1)"; then
+      printf '%s\n' "$RESTART_OUT" >>"$LOG"
+      STATE="$(systemctl is-active stock-auto 2>/dev/null || true)"
+      if printf '%s' "$RESTART_OUT" | grep -qiE \
+           'password|terminal is required|not allowed|^sudo:|may not run'; then
+        fail restart_sudo "코드는 받았지만 재시작에 sudo 권한이 없습니다 — 서버가 계속 옛 코드로 돕니다.
+현재 데몬 상태: ${STATE:-unknown}
+
 비밀번호 없는 sudo 를 등록하세요:
   echo \"\$(whoami) ALL=(ALL) NOPASSWD: /bin/systemctl restart stock-auto\" | sudo tee /etc/sudoers.d/stock-auto
   sudo chmod 440 /etc/sudoers.d/stock-auto"
+      else
+        # 로그를 알림에 담는다 — 이게 없으면 폰만 보고는 원인을 알 수 없다.
+        JL="$( (sudo -n journalctl -u stock-auto -n 12 --no-pager 2>/dev/null \
+               || journalctl -u stock-auto -n 12 --no-pager 2>/dev/null \
+               || true) | tail -12)"
+        printf '%s\n' "$JL" >>"$LOG"
+        fail restart_unit "🔥 데몬이 기동에 실패했습니다 — 지금 돌고 있지 않습니다(상태: ${STATE:-unknown}).
+새로 받은 코드에 문제가 있을 수 있습니다.
+
+systemctl 출력:
+${RESTART_OUT}
+
+최근 로그:
+${JL:-(로그를 읽을 수 없음 — 서버에서: sudo journalctl -u stock-auto -n 40)}
+
+되돌리려면: cd ${APP_DIR} && git log --oneline -5 && git reset --hard <직전커밋> && sudo systemctl restart stock-auto"
+      fi
     fi
   else
     say "데몬이 돌고 있지 않음 — 재시작 생략"
