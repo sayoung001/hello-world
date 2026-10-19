@@ -6,6 +6,7 @@
   .venv/bin/python -m stock_auto.pipeline.label_outcomes --out report.md # 파일로 저장
   .venv/bin/python -m stock_auto.pipeline.label_outcomes --notion        # Notion 게시
   .venv/bin/python -m stock_auto.pipeline.label_outcomes --export-csv cal.csv  # 캘리브레이션 데이터셋
+  .venv/bin/python -m stock_auto.pipeline.label_outcomes --llm-only --no-label  # LLM 계층 평가만
 
 매일 배치 후(또는 주 1회) 실행하면 누적 신호에 결과가 붙고
 점수→승률 변환표가 갱신된다. 이 표가 확률층(캘리브레이션)의 입력이다.
@@ -29,6 +30,8 @@ def main() -> int:
     ap.add_argument("--notion", action="store_true", help="Notion에 리포트 게시")
     ap.add_argument("--telegram", action="store_true", help="요약을 텔레그램 전송")
     ap.add_argument("--no-label", action="store_true", help="라벨링 없이 리포트만")
+    ap.add_argument("--llm-only", action="store_true",
+                    help="LLM 계층 평가만 출력(라벨링·대시보드 생략)")
     args = ap.parse_args()
 
     if not args.no_label:
@@ -52,8 +55,20 @@ def main() -> int:
     from stock_auto.tracking import forward, pnl
     fwd_rows = forward.load(None if args.path is None else
                             str(Path(args.path).with_name("forward_returns.csv")))
+    if args.llm_only:
+        from stock_auto.tracking import llm_eval
+        print("\n" + llm_eval.build_llm_report(rows))
+        return 0
+
     md = report_mod.build_report(rows)
     md += "\n" + "\n".join(forward.section_md(fwd_rows)) + "\n" + "\n".join(pnl.section_md(rows))
+    # LLM 계층 평가 — 규칙 시그널 성과와 분리해서 붙인다. 둘을 섞으면
+    # "점수가 좋아서 벌었나, LLM이 잘해서 벌었나"를 구분할 수 없다.
+    try:
+        from stock_auto.tracking import llm_eval
+        md += "\n\n" + llm_eval.build_llm_report(rows)
+    except Exception as e:  # noqa: BLE001 — 평가 실패가 리포트를 막지 않게
+        md += f"\n\n[llm_eval] 실패: {type(e).__name__}: {e}"
     print("\n" + md)
 
     # 대시보드 HTML도 같이 갱신

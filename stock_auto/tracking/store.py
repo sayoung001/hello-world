@@ -71,6 +71,11 @@ class SignalRecord:
     entry_rule: str = ""
     stop: Optional[float] = None
     target: Optional[float] = None
+    # 규칙엔진이 낸 원본 손절·목표. stop/target 은 LLM이 덮어쓴 '최종값'이므로
+    # 이것만 남기면 "LLM이 바꾼 게 더 나았나"를 영영 물어볼 수 없다.
+    # (실측: 평균 보유 1.0일 · 손익 -6.67% 인데 같은 건 D+2 단순보유는 +27%)
+    stop_rule: Optional[float] = None
+    target_rule: Optional[float] = None
     rr_ratio: Optional[float] = None
     p10_pct: Optional[float] = None
     p50_pct: Optional[float] = None
@@ -110,10 +115,38 @@ def _path(base: Optional[str]) -> Path:
     return Path(base or default_path())
 
 
+def migrate_header(base: Optional[str] = None) -> list[str]:
+    """CSV 헤더가 현재 FIELDNAMES와 다르면 전체를 다시 쓴다.
+
+    왜 필요한가:
+      append()는 DictWriter(fieldnames=FIELDNAMES)로 이어붙인다. 컬럼을 추가한
+      뒤에도 파일 헤더는 옛 컬럼 수로 남아 있어서, 새로 쓴 행은 값이 더 많은데
+      헤더가 짧다. 그러면 DictReader가 **새 컬럼을 이름으로 찾지 못해 조용히
+      버린다** — 기록은 되는데 읽히지 않는, 가장 찾기 어려운 종류의 손실이다.
+      값은 이름으로 매핑해 옮기므로 컬럼 순서가 바뀌어도 안전하다.
+
+    반환: 추가된 컬럼 목록(없으면 빈 리스트).
+    """
+    p = _path(base)
+    if not p.exists():
+        return []
+    with p.open(newline="", encoding="utf-8") as f:
+        head = next(csv.reader(f), [])
+    if head == FIELDNAMES:
+        return []
+    rows = load(base)                       # 이름 기준으로 읽는다
+    added = [c for c in FIELDNAMES if c not in head]
+    save_all(rows, base)                    # 새 헤더로 전체 재작성
+    return added
+
+
 def append(records: Iterable[SignalRecord], base: Optional[str] = None) -> int:
     """신규 기록 추가. 동일 signal_id는 건너뛴다(중복 방지)."""
     p = _path(base)
     p.parent.mkdir(parents=True, exist_ok=True)
+    added = migrate_header(base)
+    if added:
+        print(f"[store] CSV 헤더 갱신 — 컬럼 추가 {', '.join(added)}")
     existing = {r["signal_id"] for r in load(base)} if p.exists() else set()
     new = [r for r in records if r.signal_id not in existing]
     if not new:
@@ -256,6 +289,10 @@ def from_screen_row(row: dict, date: str, reco: Optional[dict] = None
              else _f(row.get("stop")),
         target=_f(targets[0]) if targets and _f(targets[0]) is not None
                else _f(row.get("target")),
+        # 규칙엔진 원본은 따로 남긴다 — 위 stop/target 이 LLM 값으로 덮였는지,
+        # 덮은 쪽 성과가 나았는지를 나중에 물어볼 수 있어야 한다.
+        stop_rule=_f(row.get("stop")),
+        target_rule=_f(row.get("target")),
         rr_ratio=_f(row.get("rr_ratio")),
         p10_pct=_f(pnl.get("p10_pct")), p50_pct=_f(pnl.get("p50_pct")),
         p90_pct=_f(pnl.get("p90_pct")),

@@ -226,10 +226,29 @@ def _path(base: Optional[str] = None) -> Path:
     return Path(base) if base else triggers_csv()
 
 
+def migrate_header(base: Optional[str] = None) -> list[str]:
+    """헤더가 FIELDNAMES와 다르면 전체 재작성. store.migrate_header와 같은 이유 —
+    컬럼을 추가하면 append 가 쓴 새 컬럼이 짧은 헤더 때문에 조용히 안 읽힌다."""
+    p = _path(base)
+    if not p.exists():
+        return []
+    with p.open(newline="", encoding="utf-8") as f:
+        head = next(csv.reader(f), [])
+    if head == FIELDNAMES:
+        return []
+    rows = load(base)
+    added = [c for c in FIELDNAMES if c not in head]
+    save_all(rows, base)
+    return added
+
+
 def append(items: Iterable[Trigger], base: Optional[str] = None) -> int:
     """신규 트리거 적립. 동일 trigger_id는 건너뛴다."""
     p = _path(base)
     p.parent.mkdir(parents=True, exist_ok=True)
+    added = migrate_header(base)
+    if added:
+        print(f"[trigger] CSV 헤더 갱신 — 컬럼 추가 {', '.join(added)}")
     existing = {r["trigger_id"] for r in load(base)} if p.exists() else set()
     new = [t for t in items if t.trigger_id not in existing]
     if not new:
