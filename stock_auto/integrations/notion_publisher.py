@@ -222,6 +222,84 @@ class NotionPublisher:
             print(f"[notion] {path} 실패: {type(e).__name__}: {e}{body}")
             return None
 
+    def _get(self, path: str, params: Optional[dict] = None) -> Optional[dict]:
+        if not self.enabled:
+            print(f"[notion] 미설정 — {path} 생략")
+            return None
+        r = None
+        try:
+            import requests
+            r = requests.get(f"{NOTION_BASE}{path}", headers=self._headers(),
+                             params=params or {}, timeout=20)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:  # noqa: BLE001
+            body = ""
+            if r is not None:
+                try:
+                    body = f" | resp: {r.text[:500]}"
+                except Exception:  # noqa: BLE001
+                    body = ""
+            print(f"[notion] {path} 실패: {type(e).__name__}: {e}{body}")
+            return None
+
+    def find_child_databases(self, parent_page_id: str,
+                             title: str) -> list[dict]:
+        """부모 페이지 바로 아래에서 제목이 같은 DB를 전부 찾는다.
+
+        반환: [{"database_id", "data_source_id", "title"}] — 생성 순서(페이지 순서).
+        제목이 같은 DB가 여럿이면 전부 돌려준다. 호출측이 중복을 알려야 한다.
+        """
+        found: list[dict] = []
+        cursor: Optional[str] = None
+        while True:
+            params = {"page_size": 100}
+            if cursor:
+                params["start_cursor"] = cursor
+            res = self._get(f"/blocks/{parent_page_id}/children", params)
+            if not res:
+                break
+            for b in res.get("results", []):
+                if b.get("type") != "child_database":
+                    continue
+                t = (b.get("child_database") or {}).get("title", "")
+                if t.strip() != title.strip():
+                    continue
+                db_id = b.get("id")
+                # 2025-09-03 부터 행을 넣는 ID는 data_source_id 다
+                db = self._get(f"/databases/{db_id}") or {}
+                ds = (db.get("data_sources") or [{}])[0].get("id") or db_id
+                found.append({"database_id": db_id, "data_source_id": ds,
+                              "title": t})
+            if not res.get("has_more"):
+                break
+            cursor = res.get("next_cursor")
+        return found
+
+    def get_or_create_database(self, parent_page_id: str,
+                               schema: dict) -> tuple[Optional[str], str]:
+        """있으면 재사용, 없으면 생성 → (데이터 소스 ID, "found"|"created"|"failed").
+
+        왜 필요한가: --setup-db 를 다시 돌리면 같은 제목의 DB가 하나 더 생겼다.
+        실측으로 '진입 신호 도달' DB가 3개 만들어졸다. 셋 중 하나만 .env 에
+        있을 수 있고, 나머지는 영원히 빈 채로 아카이브를 어지럽힌다.
+        제목이 같은 DB가 이미 여럿이면 가장 먼저 만든 것을 쓰고 나머지를 알린다.
+        """
+        title = "".join(t.get("text", {}).get("content", "")
+                        for t in schema.get("title", []))
+        existing = self.find_child_databases(parent_page_id, title)
+        if existing:
+            if len(existing) > 1:
+                print(f"[notion] ⚠️ 제목이 같은 DB가 {len(existing)}개 있습니다 "
+                      f"— 첫 번째를 씁니다. 나머지는 노션에서 지우세요:")
+                for i, d in enumerate(existing):
+                    mark = "사용" if i == 0 else "중복"
+                    print(f"           [{mark}] data_source_id={d['data_source_id']}  "
+                          f"(database_id={d['database_id']})")
+            return existing[0]["data_source_id"], "found"
+        ds = self.create_database(parent_page_id, schema)
+        return (ds, "created") if ds else (None, "failed")
+
     def create_database(self, parent_page_id: str, schema: dict) -> Optional[str]:
         """
         스키마 dict({"title":…, "properties":…})로 DB 생성 → **데이터 소스 ID** 반환.
@@ -239,15 +317,22 @@ class NotionPublisher:
 
     def create_recommendations_db(self, parent_page_id: str,
                                   title: str = "오늘의 추천") -> Optional[str]:
-        """1회 셋업: 부모 페이지 아래 추천 DB 생성 → 데이터 소스 ID 반환."""
-        return self.create_database(parent_page_id,
-                                    recommendations_db_schema(title))
+        """1회 셋업: 부모 페이지 아래 추천 DB — 있으면 재사용 → 데이터 소스 ID."""
+        ds, _ = self.get_or_create_database(parent_page_id,
+                                            recommendations_db_schema(title))
+        return ds
 
     def create_triggers_db(self, parent_page_id: str,
                            title: str = "진입 신호 도달") -> Optional[str]:
-        """1회 셋업: 진입 트리거 도달 DB 생성 → 데이터 소스 ID 반환."""
+        """1회 셋업: 진입 트리거 도달 DB — 있으면 재사용 → 데이터 소스 ID."""
+        ds, _ = self.ensure_triggers_db(parent_page_id, title)
+        return ds
+
+    def ensure_triggers_db(self, parent_page_id: str,
+                           title: str = "진입 신호 도달") -> tuple[Optional[str], str]:
+        """(데이터 소스 ID, "found"|"created"|"failed") — 호출측이 구분해 안내한다."""
         from stock_auto.tracking.trigger_notify import triggers_db_schema
-        return self.create_database(parent_page_id, triggers_db_schema(title))
+        return self.get_or_create_database(parent_page_id, triggers_db_schema(title))
 
     def add_row(self, db_id: str, properties: dict,
                 children: Optional[list] = None) -> Optional[str]:

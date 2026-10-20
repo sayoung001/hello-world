@@ -51,12 +51,26 @@ def main(argv: list[str] | None = None) -> int:
             print("❌ NOTION_TOKEN / NOTION_PARENT_PAGE_ID 가 .env에 필요합니다.")
             return 1
         pub = NotionPublisher(token=sec.notion_token)
-        ds_id = pub.create_triggers_db(sec.notion_parent_page_id)
+        # 있으면 재사용한다. 예전에는 돌릴 때마다 새 DB가 생겨 같은 제목의
+        # DB가 3개까지 쌓였다 — 어느 ID가 .env 에 있는지 알 수 없게 된다.
+        ds_id, how = pub.ensure_triggers_db(sec.notion_parent_page_id)
         if not ds_id:
             print("❌ DB 생성 실패 — 위 [notion] 로그 확인")
             return 1
-        print(f"✅ 생성됨. .env 에 아래 한 줄을 추가하세요:\n"
-              f"NOTION_TRIGGER_DB_ID={ds_id}")
+        cur = (sec.notion_trigger_db_id or "").strip()
+        if how == "found":
+            print(f"✅ 이미 있는 DB를 찾았습니다(새로 만들지 않음).")
+        else:
+            print(f"✅ 새로 생성했습니다.")
+        if cur == ds_id:
+            print(f"   .env 의 NOTION_TRIGGER_DB_ID 가 이미 이 값입니다 — 할 일 없음.")
+        elif cur:
+            print(f"   ⚠️ .env 의 NOTION_TRIGGER_DB_ID({cur[:8]}…)가 이 DB와 다릅니다.\n"
+                  f"   아래 값으로 바꾸고 데몬을 재시작하세요:\n"
+                  f"   NOTION_TRIGGER_DB_ID={ds_id}")
+        else:
+            print(f"   .env 에 아래 한 줄을 추가하고 데몬을 재시작하세요:\n"
+                  f"   NOTION_TRIGGER_DB_ID={ds_id}")
         return 0
 
     rows = T.load(args.path)
