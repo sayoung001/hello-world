@@ -53,7 +53,9 @@ def main(argv: list[str] | None = None) -> int:
         pub = NotionPublisher(token=sec.notion_token)
         # 있으면 재사용한다. 예전에는 돌릴 때마다 새 DB가 생겨 같은 제목의
         # DB가 3개까지 쌓였다 — 어느 ID가 .env 에 있는지 알 수 없게 된다.
-        ds_id, how = pub.ensure_triggers_db(sec.notion_parent_page_id)
+        # .env 에 이미 적힌 ID 를 넘긴다 — 중복 중에 그게 있으면 그걸 쓴다
+        ds_id, how = pub.ensure_triggers_db(sec.notion_parent_page_id,
+                                            prefer_id=sec.notion_trigger_db_id)
         if not ds_id:
             print("❌ DB 생성 실패 — 위 [notion] 로그 확인")
             return 1

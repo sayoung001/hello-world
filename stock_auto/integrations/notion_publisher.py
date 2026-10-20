@@ -276,27 +276,43 @@ class NotionPublisher:
             cursor = res.get("next_cursor")
         return found
 
-    def get_or_create_database(self, parent_page_id: str,
-                               schema: dict) -> tuple[Optional[str], str]:
+    def get_or_create_database(self, parent_page_id: str, schema: dict,
+                               prefer_id: Optional[str] = None
+                               ) -> tuple[Optional[str], str]:
         """있으면 재사용, 없으면 생성 → (데이터 소스 ID, "found"|"created"|"failed").
 
         왜 필요한가: --setup-db 를 다시 돌리면 같은 제목의 DB가 하나 더 생겼다.
-        실측으로 '진입 신호 도달' DB가 3개 만들어졸다. 셋 중 하나만 .env 에
+        실측으로 '진입 신호 도달' DB가 3개 만들어졌다. 셋 중 하나만 .env 에
         있을 수 있고, 나머지는 영원히 빈 채로 아카이브를 어지럽힌다.
-        제목이 같은 DB가 이미 여럿이면 가장 먼저 만든 것을 쓰고 나머지를 알린다.
+
+        중복이 있을 때 어느 것을 쓰나:
+          1. prefer_id(.env 에 이미 적힌 ID)가 그중 하나면 **그것**. 이미 쓰고
+             있는 DB를 두고 다른 걸 쓰라고 하면 .env 수정 + 데몬 재시작을
+             시키는 셈이라, 정반대 안내가 된다(실측으로 그렇게 안내했었다).
+          2. 아니면 가장 먼저 만든 것.
+        나머지는 [중복] 으로 전부 출력해 사용자가 지울 수 있게 한다.
         """
         title = "".join(t.get("text", {}).get("content", "")
                         for t in schema.get("title", []))
         existing = self.find_child_databases(parent_page_id, title)
         if existing:
-            if len(existing) > 1:
-                print(f"[notion] ⚠️ 제목이 같은 DB가 {len(existing)}개 있습니다 "
-                      f"— 첫 번째를 씁니다. 나머지는 노션에서 지우세요:")
+            pick = 0
+            if prefer_id:
                 for i, d in enumerate(existing):
-                    mark = "사용" if i == 0 else "중복"
+                    if d["data_source_id"] == prefer_id.strip():
+                        pick = i
+                        break
+            if len(existing) > 1:
+                why = (".env 에 이미 설정된 것" if prefer_id and
+                       existing[pick]["data_source_id"] == prefer_id.strip()
+                       else "가장 먼저 만든 것")
+                print(f"[notion] ⚠️ 제목이 같은 DB가 {len(existing)}개 있습니다 "
+                      f"— {why}을 씁니다. 나머지는 노션에서 지우세요:")
+                for i, d in enumerate(existing):
+                    mark = "사용" if i == pick else "중복"
                     print(f"           [{mark}] data_source_id={d['data_source_id']}  "
                           f"(database_id={d['database_id']})")
-            return existing[0]["data_source_id"], "found"
+            return existing[pick]["data_source_id"], "found"
         ds = self.create_database(parent_page_id, schema)
         return (ds, "created") if ds else (None, "failed")
 
@@ -329,10 +345,13 @@ class NotionPublisher:
         return ds
 
     def ensure_triggers_db(self, parent_page_id: str,
-                           title: str = "진입 신호 도달") -> tuple[Optional[str], str]:
-        """(데이터 소스 ID, "found"|"created"|"failed") — 호출측이 구분해 안내한다."""
+                           title: str = "진입 신호 도달",
+                           prefer_id: Optional[str] = None) -> tuple[Optional[str], str]:
+        """(데이터 소스 ID, "found"|"created"|"failed") — 호출측이 구분해 안내한다.
+        prefer_id: .env 에 이미 적힌 ID. 중복 중에 그게 있으면 그걸 쓴다."""
         from stock_auto.tracking.trigger_notify import triggers_db_schema
-        return self.get_or_create_database(parent_page_id, triggers_db_schema(title))
+        return self.get_or_create_database(parent_page_id, triggers_db_schema(title),
+                                           prefer_id=prefer_id)
 
     def add_row(self, db_id: str, properties: dict,
                 children: Optional[list] = None) -> Optional[str]:
