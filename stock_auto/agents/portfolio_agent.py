@@ -37,7 +37,13 @@ RECO_SCHEMA = {
                 # **반드시 양수**. 방향은 kind 가 정한다 — 진입 문장이
                 # '-0.5% 눌림'이어도 여기는 0.5 로 적어야 한다. 음수를 넣으면
                 # 도달가가 기준가 위로 계산되어 조건이 정반대로 뒤집힌다.
-                "value_pct": {"type": "number", "minimum": 0, "maximum": 20},
+                #
+                # ★ 여기에 minimum/maximum 을 넣지 마라. 구조화 출력 API 는 number 의
+                #   수치 제약을 지원하지 않아 **요청 전체가 400** 으로 거부된다.
+                #   실측: 2026-10-20 배치에서 후보 4건이 전부 이 400 으로 탈락해
+                #   추천 0건이 됐다. 범위 검증은 tracking.triggers.resolve_condition
+                #   (abs + MAX_SANE_PCT) 이 맡는다 — 그쪽이 진짜 안전장치다.
+                "value_pct": {"type": "number"},
                 # 기준가: signal_close(추천일 종가) / prev_close / open(당일 시가)
                 "basis": {"type": "string",
                           "enum": ["signal_close", "prev_close", "open"]},

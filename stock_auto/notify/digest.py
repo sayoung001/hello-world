@@ -37,6 +37,23 @@ def _num(v, fmt: str = "{:,.2f}") -> str:
         return str(v)
 
 
+def _error_gist(msg) -> str:
+    """API 오류에서 사람이 읽을 부분만. request_id 와 바깥 포장은 버린다.
+
+    400 본문은 {'type':'error','error':{'type':..., 'message': "…"}, 'request_id':…}
+    모양이라, 앞에서 160자를 자르면 정작 'message' 가 잘려 나간다 — 실측으로
+    "properties maximum, minimum are not supported" 직전에서 끊겼다.
+    """
+    import re
+    s = str(msg)
+    m = re.search(r"""['"]message['"]\s*:\s*(['"])(.*?)\1""", s, re.S)
+    if m:
+        head = s.split("Error code:")[0].strip().rstrip(":")   # 예외 클래스명
+        code = re.search(r"Error code:\s*(\d+)", s)
+        return (f"{head} {code.group(1) if code else ''}: {m.group(2)}".strip())[:300]
+    return s.split("'request_id'")[0].strip()[:300]
+
+
 def _action_hint(conviction) -> str:
     """확신도 → 행동. tracking.prior 에 정의를 모아 둔다."""
     try:
@@ -181,6 +198,26 @@ def batch_digest(result: Any, sector_lines: Optional[list[str]] = None,
             L.append(f"   • {r.symbol} Exit {r.exit_score}/5 · 종가 {_num(r.close)}")
         if len(exits) > 8:
             L.append(f"   … 외 {len(exits) - 8}건")
+
+    # ── LLM 분석 실패 — 조용히 넘기면 안 된다 ──
+    # 2026-10-20: 후보 4건이 전부 스키마 400 으로 탈락했는데 다이제스트는
+    # "추천 0건 / 후보 4건"만 보여줬다. 후보는 있는데 추천이 0이면 그 자체가
+    # 신호인데, 왜 그런지는 daemon.log 에만 남아 있어 폰으로는 알 수 없었다.
+    # 실패 사유를 종류별로 묶어 한 번씩 보여준다(같은 400 이 4번 찍히지 않게).
+    afail = getattr(result.agents, "failures", {}) or {}
+    if afail:
+        n_c = 0 if cands is None else len(cands)
+        total = "전부 " if n_c and len(afail) >= n_c else ""
+        L += ["", f"🚨 LLM 분석 실패 {len(afail)}건 ({total}실패 — 추천이 누락됐을 수 있음)"]
+        by_msg: dict[str, list[str]] = {}
+        for sym, msg in afail.items():
+            by_msg.setdefault(_error_gist(msg), []).append(str(sym))
+        for msg, syms in list(by_msg.items())[:3]:
+            L.append(f"   • {', '.join(syms[:6])}{' …' if len(syms) > 6 else ''}")
+            L.append(f"     {msg}")
+        if "400" in " ".join(by_msg) or "invalid_request" in " ".join(by_msg):
+            L.append("   → 400 은 코드/스키마 문제입니다. 재시도로 풀리지 않으니 "
+                     "daemon.log 를 확인하세요.")
 
     # ── 운영 ──
     n_fail = len(getattr(screen, "failures", {}) or {})

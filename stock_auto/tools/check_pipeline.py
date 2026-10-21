@@ -71,6 +71,22 @@ def main() -> int:
     print("[0] 서버 자원")
     _check_resources(c)
 
+    # ── 0.5 LLM 스키마 — 요청 전에 잡는다 ──
+    # 2026-10-20: RECO_SCHEMA 에 넣은 minimum/maximum 때문에 후보 4건 전부가
+    # 400 으로 탈락해 추천 0건. 배치가 돌기 전에 여기서 걸러야 한다.
+    print("\n[0.5] LLM 구조화 출력 스키마")
+    try:
+        from stock_auto.agents.schema_check import check_all, all_agent_schemas
+        bad = check_all()
+        if bad:
+            c.add(BAD, "에이전트 스키마", f"위반 {len(bad)}건 — 요청이 400 으로 거부됩니다")
+            for b in bad[:6]:
+                print(f"      • {b}")
+        else:
+            c.add(OK, "에이전트 스키마", f"{len(all_agent_schemas())}개 · 지원 범위 안")
+    except Exception as e:  # noqa: BLE001
+        c.add(WARN, "에이전트 스키마", f"검사 실패 {type(e).__name__}: {str(e)[:80]}")
+
     # ── 1. 지수 수집 ──
     print("[1] 지수 수집")
     from stock_auto.data.downloader import load_or_download, expected_last_bar

@@ -109,7 +109,13 @@ def run_daily(
             result.agents = run_agents(
                 screen.candidates, market, client=llm_client,
                 sector_label_map=sector_label_map, top_n=top_n)
-            print(f"[batch] 추천 {len(result.agents.recommendations)}건 생성")
+            n_ok = len(result.agents.recommendations)
+            n_bad = len(result.agents.failures)
+            print(f"[batch] 추천 {n_ok}건 생성" + (f" · LLM 실패 {n_bad}건" if n_bad else ""))
+            if n_bad and n_ok == 0:
+                # 후보는 있는데 전부 실패 — 일시 오류가 아니라 코드 문제일 확률이 높다
+                print("[batch] 🚨 LLM 분석이 전부 실패했습니다. 같은 오류가 반복되면 "
+                      "스키마·모델 설정 문제입니다 (schema_check 실행).")
         except Exception as e:  # noqa: BLE001 — LLM 실패가 배치를 막지 않게
             print(f"[batch] ⚠️ LLM 분석 전체 실패 — 규칙 시그널만 기록합니다 "
                   f"({type(e).__name__}: {e})")
