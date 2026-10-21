@@ -339,6 +339,47 @@ def llm_vs_rule_section(rows: list[dict]) -> list[str]:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# 5) 뉴스가 성과를 더하는가 — 세이브티커 수집의 존재 이유를 숫자로
+# ──────────────────────────────────────────────────────────────────────────
+def news_section(rows: list[dict]) -> list[str]:
+    L = ["", "━━ 5. 뉴스가 성과를 더하는가 (뉴스 유무 · SAVE PICK 유무) ━━"]
+    data = [r for r in rows if str(r.get("news_count", "")).strip() not in ("", "None")]
+    if len(data) < MIN_TOTAL:
+        L.append(f"  표본 부족 — 뉴스 기록이 있는 청산 건 {len(data)}건 "
+                 f"(최소 {MIN_TOTAL}건 필요). 컬럼이 생긴 뒤 배치부터 쌓입니다.")
+        return L
+    groups = (
+        ("뉴스 없음",        [r for r in data if (_f(r.get("news_count")) or 0) == 0]),
+        ("뉴스 있음",        [r for r in data if (_f(r.get("news_count")) or 0) > 0]),
+        ("  └ SAVE PICK 포함", [r for r in data if str(r.get("news_pick", "")) == "1"]),
+    )
+    L.append(f"  대상 {len(data)}건")
+    for name, sel in groups:
+        rets = [_f(r.get("ret_pct")) for r in sel]
+        rets = [x for x in rets if x is not None]
+        if len(rets) < MIN_BIN:
+            L.append(f"  {name:<18} n={len(rets)} (표본 부족)")
+        else:
+            L.append(f"  {name:<18} {_stat_line(rets)}")
+    # 센티먼트 방향이 맞는가 — 긍정 뉴스 추천이 실제로 더 올랐나
+    pairs = [(_f(r.get("news_sentiment")), _f(r.get("ret_pct"))) for r in data]
+    pairs = [(s, y) for s, y in pairs if s is not None and y is not None]
+    if len(pairs) >= MIN_CORR:
+        rho = spearman([s for s, _ in pairs], [y for _, y in pairs])
+        if rho is not None:
+            crit = critical_rho(len(pairs))
+            L.append(f"  센티먼트 ↔ 실현손익 ρ = {rho:+.3f} (우연 범위 ±{crit:.3f})")
+            L.append("  " + ("✅ 센티먼트가 방향을 맞힘" if rho > crit else
+                            "🚨 센티먼트가 역방향" if rho < -crit else
+                            "⚠️ 우연 범위 안 — 아직 구분 불가"))
+    else:
+        L.append(f"  (센티먼트 상관은 {MIN_CORR}건부터 — 현재 {len(pairs)}건)")
+    L.append("  ※ '뉴스 있음'이 '없음'보다 나쁘면 뉴스가 판단을 흐린 것이다 — "
+             "수집을 늘리기 전에 이 표를 보라.")
+    return L
+
+
+# ──────────────────────────────────────────────────────────────────────────
 def build_llm_report(rows: list[dict],
                      title: str = "LLM 계층 평가") -> str:
     data = _outcome_rows(rows)
@@ -356,6 +397,7 @@ def build_llm_report(rows: list[dict],
     L += forecast_section(data)
     L += exit_timing_section(data)
     L += llm_vs_rule_section(data)
+    L += news_section(data)
     L += ["", "=" * 66,
           "※ 이 리포트는 'LLM 계층이 가치를 더하는가'만 봅니다. 규칙 시그널 자체의",
           "   품질은 신호 성과 리포트(run_report)를 보세요.",

@@ -38,7 +38,7 @@ YAHOO_RSS = ("https://feeds.finance.yahoo.com/rss/2.0/headline"
 GOOGLE_RSS = ("https://news.google.com/rss/search"
               "?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en")
 
-DEFAULT_SOURCES = "yahoo,google"
+DEFAULT_SOURCES = "saveticker,yahoo,google"
 MAX_PER_TICKER = 15          # NewsAgent 가 news[:15] 만 쓴다
 REQUEST_GAP_SEC = 0.3        # 종목별 연속 요청 사이 간격(예의상 rate limit)
 
@@ -196,6 +196,33 @@ def _dedup_recent(items: list[NewsItem], limit: int = MAX_PER_TICKER) -> list[Ne
     return uniq[:limit]
 
 
+def _best_title(it) -> str:
+    """한글 번역 제목이 있으면 그걸, 없으면 영문. LLM 은 한국어로 쓴다."""
+    t = (it.title or "").replace("[SAVE PICK]", "").strip()
+    return t or (it.title_en or "").strip()
+
+
+def market_picks_text(days: int = 1, limit: int = 20) -> str:
+    """오늘의 SAVE PICK(편집자 선정 주요뉴스)을 종목 무관하게 한 덩어리로.
+
+    종목별 NewsAgent 가 아니라 **PortfolioAgent 의 시장 맥락**으로 들어간다.
+    모든 종목 호출에 같은 덩어리가 들어가므로 1,024 토큰을 넘기면 프롬프트
+    캐시를 탄다. 데이터가 없으면 빈 문자열 — 호출측이 섹션을 생략한다.
+    """
+    try:
+        from stock_auto.data import saveticker_store as SS
+        items = SS.picks(days=days)[:limit]
+    except Exception:  # noqa: BLE001
+        return ""
+    if not items:
+        return ""
+    lines = []
+    for it in items:
+        tk = f" [{' '.join(it.tickers[:4])}]" if it.tickers else ""
+        lines.append(f"- {_best_title(it)}{tk} ({it.source or 'saveticker'}, {it.kst_date})")
+    return "\n".join(lines)
+
+
 def sources_from_env() -> list[str]:
     raw = os.environ.get("STOCK_NEWS_SOURCES", DEFAULT_SOURCES)
     return [s.strip().lower() for s in raw.split(",") if s.strip()]
@@ -237,15 +264,22 @@ def collect_for_tickers(tickers: list[str],
             got += len(items)
         stats[src] = got
 
-    # saveticker 는 페이지 1회 + 티커 추측 매칭 — 보조
+    # saveticker — VM 이 직접 받지 않는다(클라우드플레어). PC 확장이 수집해 git
+    # 저장소에 올린 것을 로컬에서 읽는다. 종목 태그가 있어 추측 매칭이 없다.
     if "saveticker" in chain:
-        body = fetch(SAVETICKER_NEWS_URL)
-        if body:
-            matched = _match_saveticker(parse_html(body), tickers)
-            for t, its in matched.items():
-                out[t].extend(its)
-            stats["saveticker"] = sum(len(v) for v in matched.values())
-        else:
+        try:
+            from stock_auto.data import saveticker_store as SS
+            got = 0
+            for t, its in SS.items_for(tickers, days=2).items():
+                for it in its[:MAX_PER_TICKER]:
+                    out[t].append(NewsItem(
+                        ticker=t, headline=_best_title(it), url=it.url,
+                        source=("SAVE PICK" if it.is_pick else (it.source or "saveticker")),
+                        published=it.kst_date))
+                    got += 1
+            stats["saveticker"] = got
+        except Exception as e:  # noqa: BLE001 — 데이터 저장소가 없어도 체인은 간다
+            print(f"[news_collector] saveticker 로컬 읽기 실패: {type(e).__name__}: {e}")
             stats["saveticker"] = 0
 
     for t in tickers:

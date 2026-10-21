@@ -49,6 +49,11 @@ class SignalRecord:
     # "" = 통과 / "macro" / "sector" / "earnings" (복수는 쉼표 구분)
     gated_by: str = ""
     days_to_earnings: Optional[int] = None
+    # 뉴스가 '있었는지' — 뉴스가 성과를 더하는지 재려면 뉴스 있는 추천과 없는
+    # 추천을 나눌 수 있어야 한다. 재지 않으면 수집은 그냥 비용이다(llm_eval 5장).
+    news_count: Optional[int] = None       # NewsAgent 에 들어간 헤드라인 수
+    news_pick: Optional[int] = None        # 1 = 그중 SAVE PICK(편집자 선정)이 있었음
+    news_sentiment: Optional[float] = None # NewsAgent 센티먼트 -1~+1
 
     # ── 피처 (캘리브레이션 학습용) ──
     close: Optional[float] = None
@@ -252,16 +257,20 @@ def untriaged(base: Optional[str] = None, source: Optional[str] = "batch",
 
 
 # ── 상위 파이프라인에서 기록 만들기 ────────────────────────────────────────
-def from_screen_row(row: dict, date: str, reco: Optional[dict] = None
-                    ) -> SignalRecord:
-    """screener 행(+선택적 LLM 추천)을 기록으로 변환."""
+def from_screen_row(row: dict, date: str, reco: Optional[dict] = None,
+                    news: Optional[dict] = None) -> SignalRecord:
+    """screener 행(+선택적 LLM 추천, +선택적 NewsAgent 결과)을 기록으로 변환."""
     pnl = (reco or {}).get("expected_pnl_today") or {}
     targets = (reco or {}).get("targets") or []
+    nmeta = ((news or {}).get("_meta") or {}) if isinstance(news, dict) else {}
     return SignalRecord(
         date=date, market=str(row.get("market", "US")),
         symbol=str(row.get("symbol", "")), source="batch",
         gated_by=str(row.get("gated_by", "") or ""),
         days_to_earnings=_i(row.get("days_to_earnings")),
+        news_count=_i(nmeta.get("count")) if nmeta else None,
+        news_pick=(1 if nmeta.get("pick") else 0) if nmeta else None,
+        news_sentiment=_f((news or {}).get("sentiment")) if isinstance(news, dict) else None,
         recommend=str((reco or {}).get("recommend", "")),
         # LLM 추천이 없는 기록(게이트 차단분)은 규칙엔진의 styles를 보유기간으로 쓴다.
         # 비우면 라벨러가 DEFAULT_HOLD(5일)로 대체해 통과분(단타 3일)과 보유기간이

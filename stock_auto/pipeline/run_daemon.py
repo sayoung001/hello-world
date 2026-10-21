@@ -36,6 +36,20 @@ KST = ZoneInfo("Asia/Seoul")
 ET = ZoneInfo("America/New_York")
 
 
+def _batch_time_kst() -> tuple[int, int]:
+    """STOCK_BATCH_TIME_KST=HH:MM (기본 09:30). 잘못 적으면 기본값 + 경고."""
+    raw = os.environ.get("STOCK_BATCH_TIME_KST", "09:30").strip()
+    try:
+        h, m = raw.split(":")
+        h, m = int(h), int(m)
+        if 0 <= h < 24 and 0 <= m < 60:
+            return h, m
+    except ValueError:
+        pass
+    print(f"[daemon] ⚠️ STOCK_BATCH_TIME_KST={raw!r} 를 읽을 수 없어 09:30 으로 둡니다")
+    return 9, 30
+
+
 def _active_markets() -> tuple[Market, ...]:
     """US 집중. KR은 확장성용 — 환경변수 ENABLE_KR=1 일 때만 포함."""
     if os.environ.get("ENABLE_KR", "").strip() in ("1", "true", "True"):
@@ -61,6 +75,18 @@ def _recalibrate_and_batch():
               f"대기 {stat.get('pending', 0)}건 · 미체결 {stat.get('skip', 0)}건")
     except Exception as e:  # noqa: BLE001 — 라벨링 실패가 배치를 막지 않게
         print(f"[daemon] 결과 라벨링 실패: {type(e).__name__}: {e}")
+
+    # ⓪-1 세이브티커 수집 데이터 동기화 — PC 들이 올린 뉴스를 받아 온다.
+    #     실패해도 배치는 간다(뉴스 없이 추천하는 쪽이 추천을 안 하는 것보다 낫다).
+    try:
+        from stock_auto.data import saveticker_store
+        st = saveticker_store.sync()
+        mark = "✅" if st["ok"] else "⚠️"
+        print(f"[daemon] {mark} 세이브티커 {st['action']}: {st['detail'][:120]}")
+        if st["ok"]:
+            print(f"[daemon]    {saveticker_store.summary()}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[daemon] 세이브티커 동기화 실패: {type(e).__name__}: {e}")
 
     # ⓪-2 진입 트리거 일봉 평가 — 장중 실시간 감시가 놓친 것을 받아낸다.
     #     RealtimeTriggerWatch(run_monitor)만으로는 구멍이 있다:
@@ -240,9 +266,16 @@ def main() -> int:
 
     sch = BlockingScheduler(timezone=ET)   # US 집중 → 기준 TZ를 ET로
     markets = _active_markets()
-    # 일일 배치 + 재구축: ET 17:00(마감+1h), DST 자동
+    # 일일 배치 + 재구축 — **KST 09:30, 화~토** (미국 월~금 장의 다음날 아침)
+    # 예전에는 ET 17:00(마감+1h = KST 06:00) 이었다. 옮긴 이유:
+    #   세이브티커 뉴스는 사용자 PC 의 브라우저가 수집하는데, PC 가 밤에 꺼져
+    #   있으면 미국장 시간대(한국 밤)의 뉴스가 06:00 에는 없다. PC 가 아침에
+    #   켜지면 확장이 밤 사이 것을 메우므로, 그 뒤에 돌려야 뉴스가 온전하다.
+    #   추천은 다음 미국장 개장(23:30 KST)용이라 09:30 이어도 14시간 남는다.
+    # STOCK_BATCH_TIME_KST=HH:MM 으로 바꿀 수 있다.
+    bh, bm = _batch_time_kst()
     sch.add_job(_recalibrate_and_batch,
-                CronTrigger(hour=17, minute=0, day_of_week="mon-fri", timezone=ET))
+                CronTrigger(hour=bh, minute=bm, day_of_week="tue-sat", timezone=KST))
     # 주간 성과 요약: 토요일 10:00 KST (한 주 결과 라벨링이 끝난 뒤)
     sch.add_job(_weekly_report,
                 CronTrigger(hour=10, minute=0, day_of_week="sat", timezone=KST))
@@ -255,7 +288,8 @@ def main() -> int:
                     CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=KST))
 
     print(f"[daemon] 시작 — 대상시장 {[m.value for m in markets]} "
-          "| 일일배치(US마감+1h) / 개장 모니터 / 자가보정 / 주간성과(토 10:00 KST)")
+          f"| 일일배치(KST {bh:02d}:{bm:02d} 화~토) / 개장 모니터 / 자가보정 / "
+          "주간성과(토 10:00 KST)")
     print("[daemon] Ctrl+C 로 종료")
     try:
         sch.start()

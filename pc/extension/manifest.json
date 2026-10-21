@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "SaveTicker 뉴스 수집기",
+  "version": "1.8.0",
+  "description": "saveticker.com 뉴스 제목을 브라우저에서 수집해 CSV/JSON으로 저장",
+  "permissions": ["storage", "downloads", "downloads.ui", "alarms"],
+  "background": { "service_worker": "background.js" },
+  "host_permissions": ["https://saveticker.com/*", "https://www.saveticker.com/*", "http://127.0.0.1:18765/*"],
+  "action": { "default_popup": "popup.html", "default_title": "뉴스 수집기" },
+  "content_scripts": [
+    {
+      "matches": ["https://saveticker.com/*", "https://www.saveticker.com/*"],
+      "js": ["hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://saveticker.com/*", "https://www.saveticker.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

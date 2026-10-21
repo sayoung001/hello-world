@@ -71,6 +71,13 @@ def run_agents(
     except Exception as e:  # noqa: BLE001 — 기저율 없이도 추천은 나와야 한다
         print(f"[agents] 기저율 조회 실패({type(e).__name__}) — 기저율 없이 진행")
 
+    # 오늘의 SAVE PICK — 종목 무관 시장 맥락. 모든 PM 호출에 같은 덩어리가 들어간다.
+    try:
+        from stock_auto.agents.news_collector import market_picks_text
+        market_news = market_picks_text() if market == Market.US else ""
+    except Exception:  # noqa: BLE001
+        market_news = ""
+
     out = AgentPipelineResult()
     for r in rows:
         sym = r["symbol"]
@@ -79,12 +86,20 @@ def run_agents(
         # 한 번만 실패해도 그날 추천·Notion·Telegram·신호기록이 전부 날아갔다.
         # 1종목 실패가 나머지를 죽이지 않게 한다.
         try:
-            n = news_a.analyze(sym, news_map.get(sym, []))
+            items = news_map.get(sym, [])
+            n = news_a.analyze(sym, items)
+            # 뉴스가 '있었는지'를 기록한다 — 뉴스가 성과를 더하는지 재려면
+            # 뉴스 있는 추천과 없는 추천을 나눌 수 있어야 한다(llm_eval).
+            if isinstance(n, dict):
+                n["_meta"] = {"count": len(items),
+                              "pick": any(getattr(x, "source", "") == "SAVE PICK"
+                                          for x in items)}
             f = flow_a.analyze(sym, r)
             v = value_a.analyze(sym, r)
             label = sector_label_map.get(sym, "-")
             reco = pm.decide(r, n, f, v, sector_label=label,
-                             prior_text=_prior_text(r, prior_rows))
+                             prior_text=_prior_text(r, prior_rows),
+                             market_news=market_news)
         except Exception as e:  # noqa: BLE001 — 1종목 실패를 격리
             msg = f"{type(e).__name__}: {e}"
             print(f"[agents] {sym} 분석 실패 — 건너뜁니다 ({msg})")

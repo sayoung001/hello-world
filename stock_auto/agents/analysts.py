@@ -33,8 +33,16 @@ _SENTIMENT_SCHEMA = {
 
 
 class NewsAgent(StockAgentBase):
-    """뉴스 요약 + 센티먼트. saveticker 헤드라인 원문 주입."""
+    """뉴스 요약 + 센티먼트. 헤드라인 목록(세이브티커·RSS) 주입.
+
+    모델은 STOCK_NEWS_MODEL(기본 Haiku 5.5). 뉴스 다리는 제목 목록을 요약·
+    점수화하는 일이라 싼 모델로 충분하고, 그래야 사이트를 통째로 읽어도
+    월 $1 미만이다. 종합 판단(PortfolioAgent)은 그대로 Opus 다.
+    """
     def __init__(self, **kw):
+        import os
+        kw.setdefault("model", os.environ.get("STOCK_NEWS_MODEL", "").strip()
+                      or "claude-haiku-5-5")
         super().__init__(
             agent_id="news", effort="low",
             system_prompt=(

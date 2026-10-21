@@ -132,7 +132,8 @@ class PortfolioAgent(StockAgentBase):
         super().__init__(agent_id="portfolio", system_prompt=_SYSTEM, **kw)
 
     def decide(self, row: dict, news: dict, flow: dict, value: dict,
-               sector_label: str = "-", prior_text: str = "") -> dict:
+               sector_label: str = "-", prior_text: str = "",
+               market_news: str = "") -> dict:
         """
         row: screener.scored_all 한 행(dict)
         news/flow/value: 각 분석 에이전트 결과 dict
@@ -155,6 +156,11 @@ class PortfolioAgent(StockAgentBase):
             f"[수급] {flow.get('summary')}\n"
             f"[밸류] {value.get('summary')}\n"
             + (f"[실측 기저율] {prior_text}\n" if prior_text else "")
+            # 편집자가 고른 당일 주요뉴스. 이 종목 얘기가 아니어도 시장 분위기·
+            # 섹터 흐름의 근거가 된다. 종목 무관 사실을 이 종목에 끌어다 붙이지
+            # 않도록 "직접 관련 있는 것만 반영"을 명시한다.
+            + (f"[오늘 주요뉴스 SAVE PICK — 이 종목과 직접 관련 있는 것만 반영]\n"
+               f"{market_news}\n" if market_news else "")
             + "\n위를 종합해 추천 JSON을 작성하라. expected_pnl_today는 ATR과 R:R을 활용해 "
             "당일 변동 분포의 P10/P50/P90(%)로 제시하고 basis에 산출 근거를 적어라.")
         result = self.call_json(prompt, RECO_SCHEMA, max_tokens=PM_MAX_TOKENS,

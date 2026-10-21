@@ -246,10 +246,12 @@ def _record_signals(result: BatchResult) -> int:
     recos = list(result.agents.recommendations)
     by_ticker = {r.get("ticker"): r for r in recos}
     records = []
+    per = getattr(result.agents, "per_ticker", {}) or {}
     for i, row in enumerate(rows):
         reco = recos[i] if i < len(recos) else by_ticker.get(row.get("symbol"))
         date = str(row.get("bar_date") or result.screen.as_of or result.date)
-        records.append(store.from_screen_row(row, date, reco))
+        news = (per.get(str(row.get("symbol"))) or {}).get("news")
+        records.append(store.from_screen_row(row, date, reco, news=news))
 
     # 게이트에 막힌 원신호도 동일하게 기록한다(LLM 추천은 없다).
     # 이게 없으면 하락장 구간 데이터가 통째로 비어 게이트의 실효성을 검증할 수 없다.
