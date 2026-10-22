@@ -88,6 +88,16 @@ def _recalibrate_and_batch():
     except Exception as e:  # noqa: BLE001
         print(f"[daemon] 세이브티커 동기화 실패: {type(e).__name__}: {e}")
 
+    # ⓪-1.5 미국 종목 거래소·회사명 캐시 — 뉴스 검색어('"Gartner" OR "NYSE: IT"')와
+    #     실시간 구독 키(DNYS…)가 쓴다. 7일 캐시라 보통 즉시 끝난다.
+    try:
+        from stock_auto.data import us_exchange
+        r = us_exchange.refresh()
+        print(f"[daemon] 거래소·회사명 목록 {r['action']} ({r.get('n', 0)}종목)"
+              + ("" if r["ok"] else f" — {r.get('detail', '')[:80]}"))
+    except Exception as e:  # noqa: BLE001
+        print(f"[daemon] 거래소·회사명 목록 실패: {type(e).__name__}: {e}")
+
     # ⓪-2 진입 트리거 일봉 평가 — 장중 실시간 감시가 놓친 것을 받아낸다.
     #     RealtimeTriggerWatch(run_monitor)만으로는 구멍이 있다:
     #       · KIS 실시간 등록 상한(약 40종목)을 넘는 종목

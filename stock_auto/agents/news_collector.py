@@ -11,10 +11,16 @@
   받으므로 "전체 뉴스 페이지에서 티커를 추측해 매칭"하던 불확실한 단계도
   사라진다. 소스를 체인으로 두어 하나가 죽어도 나머지로 간다.
 
-소스(STOCK_NEWS_SOURCES 로 순서·선택, 기본 "yahoo,google"):
-  yahoo       https://feeds.finance.yahoo.com/rss/2.0/headline?s=<T>
-  google      https://news.google.com/rss/search?q=<T>+stock
-  saveticker  https://www.saveticker.com/news  (브라우저 UA, 티커 추측 매칭)
+소스(STOCK_NEWS_SOURCES 로 순서·선택, 기본 "saveticker,yahoo,google"):
+  saveticker  PC 확장이 git 저장소에 올린 로컬 데이터(data/saveticker_store) — 종목 태그 정확
+  yahoo       https://feeds.finance.yahoo.com/rss/2.0/headline?s=<T>  (클라우드 IP 는 429 가 잦다)
+  google      https://news.google.com/rss/search?q="<회사명>" OR "<거래소>: <T>"
+              회사명·거래소는 data/us_exchange 캐시에서. 없으면 '<T> stock'.
+
+소스 차단기: 한 소스에서 429/403 이 연속 BREAKER_AFTER 번이면 이번 배치는 그 소스를
+접고 다음 소스로 간다(남은 종목마다 두드려 로그만 늘리지 않는다).
+
+시장 전체 헤드라인(PM 의 시장 맥락): 세이브티커 SAVE PICK → 없으면 공개 RSS(아래 MARKET_FEEDS).
 
 의존성: requests + 표준 xml.etree. feedparser 등 추가 설치 없음.
 네트워크 없는 환경에서는 parse_rss()/parse_html() 에 받아 둔 본문을 넣어
@@ -36,7 +42,27 @@ SAVETICKER_NEWS_URL = "https://www.saveticker.com/news"
 YAHOO_RSS = ("https://feeds.finance.yahoo.com/rss/2.0/headline"
              "?s={ticker}&region=US&lang=en-US")
 GOOGLE_RSS = ("https://news.google.com/rss/search"
-              "?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en")
+              "?q={query}&hl=en-US&gl=US&ceid=US:en")
+_EXCH_WORD = {"NAS": "NASDAQ", "NYS": "NYSE", "AMS": "NYSE American"}
+
+
+def google_query(ticker: str, name: str = "", exch: str = "") -> str:
+    """구글뉴스 검색어(URL 인코딩 전).
+
+    'IT stock' 은 정보기술 기사 90건을 받아 온다 — Gartner 와 무관하다.
+    회사명이 있으면 회사명으로, 보도자료 표기("NYSE: IT")도 함께 건다.
+    회사명이 없으면 예전처럼 '<티커> stock'. 짧은 티커의 한계는 남는다.
+    """
+    t = ticker.upper().strip()
+    parts = []
+    if name:
+        parts.append(f'"{name}"')
+    ex = _EXCH_WORD.get((exch or "").upper())
+    if ex:
+        parts.append(f'"{ex}: {t}"')
+    if not parts:
+        return f"{t} stock"
+    return " OR ".join(parts)
 
 DEFAULT_SOURCES = "saveticker,yahoo,google"
 MAX_PER_TICKER = 15          # NewsAgent 가 news[:15] 만 쓴다
@@ -64,14 +90,23 @@ class NewsItem:
 # ──────────────────────────────────────────────────────────────────────────
 # HTTP
 # ──────────────────────────────────────────────────────────────────────────
+# 마지막 실패의 HTTP 상태 — 소스 차단기(아래)가 429/403 을 구분하는 데 쓴다.
+LAST_FAIL: dict[str, Optional[int]] = {"status": None}
+# 같은 소스에서 연속 이만큼 429/403 이면 이번 배치는 그 소스를 접는다.
+BREAKER_AFTER = 2
+
+
 def fetch_text(url: str, timeout: int = 10) -> Optional[str]:
     """GET → 본문. 실패는 사유를 찍고 None (조용한 실패 금지)."""
+    LAST_FAIL["status"] = None
     try:
         import requests
         r = requests.get(url, headers=_HEADERS, timeout=timeout)
         r.raise_for_status()
         return r.text
     except Exception as e:  # noqa: BLE001
+        resp = getattr(e, "response", None)
+        LAST_FAIL["status"] = getattr(resp, "status_code", None)
         print(f"[news_collector] fetch 실패 {url[:60]}…: {type(e).__name__}: "
               f"{str(e)[:120]}")
         return None
@@ -321,19 +356,44 @@ def collect_for_tickers(tickers: list[str],
     chain = sources if sources is not None else sources_from_env()
     out: dict[str, list[NewsItem]] = {t: [] for t in tickers}
     stats: dict[str, int] = {}
+    skipped: dict[str, str] = {}
+
+    # 회사명·거래소 — 구글 검색어 정밀도용. 캐시가 없으면 티커로만 간다.
+    names: dict[str, str] = {}
+    exch: dict[str, str] = {}
+    try:
+        from stock_auto.data import us_exchange
+        names = us_exchange.load_names(tickers)
+        exch = us_exchange.load_map(tickers)
+    except Exception:  # noqa: BLE001
+        pass
 
     # 종목별 RSS 소스
+    from urllib.parse import quote_plus
     for src in chain:
         if src not in ("yahoo", "google"):
             continue
-        tmpl = YAHOO_RSS if src == "yahoo" else GOOGLE_RSS
         got = 0
+        consecutive = 0
         for i, t in enumerate(tickers):
             if i:
                 time.sleep(REQUEST_GAP_SEC)
-            body = fetch(tmpl.format(ticker=t))
+            if src == "yahoo":
+                url = YAHOO_RSS.format(ticker=t)
+            else:
+                url = GOOGLE_RSS.format(query=quote_plus(
+                    google_query(t, names.get(t.upper(), ""), exch.get(t.upper(), ""))))
+            body = fetch(url)
             if not body:
+                # 429/403 이 연속이면 이 소스는 오늘 막힌 것이다. 남은 종목까지
+                # 두드려 로그만 6줄 늘리지 말고 다음 소스로 넘어간다.
+                if LAST_FAIL.get("status") in (429, 403):
+                    consecutive += 1
+                    if consecutive >= BREAKER_AFTER:
+                        skipped[src] = f"{LAST_FAIL['status']} 연속 — 나머지 {len(tickers) - i - 1}종목 생략"
+                        break
                 continue
+            consecutive = 0
             items = parse_rss(body, t, src)
             out[t].extend(items)
             got += len(items)
@@ -362,7 +422,11 @@ def collect_for_tickers(tickers: list[str],
 
     n_with = sum(1 for t in tickers if out[t])
     print(f"[news_collector] {n_with}/{len(tickers)}종목 뉴스 확보 · "
-          + " · ".join(f"{k} {v}건" for k, v in stats.items()))
+          + " · ".join(f"{k} {v}건" for k, v in stats.items())
+          + (f" · 회사명 검색 {sum(1 for t in tickers if names.get(t.upper()))}/{len(tickers)}"
+             if "google" in chain else ""))
+    for src, why in skipped.items():
+        print(f"[news_collector] ⚠️ {src} 차단기 작동: {why} (다른 소스로 진행)")
     if tickers and n_with == 0:
         print("[news_collector] ⚠️ 모든 소스에서 0건 — 네트워크/차단을 의심하세요. "
               f"소스={chain}")

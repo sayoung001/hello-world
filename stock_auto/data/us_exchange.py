@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.request
 from pathlib import Path
@@ -45,22 +46,48 @@ def override_path() -> Path:
     return universe_dir() / "us_exchange_override.json"
 
 
+def names_path() -> Path:
+    """{symbol: 회사명} — 뉴스 검색어용. 'IT stock' 은 쓰레기를 받지만 'Gartner' 는 아니다."""
+    from stock_auto.config.paths import universe_dir
+    return universe_dir() / "us_names.json"
+
+
+def load_names(symbols: Optional[Iterable[str]] = None) -> dict[str, str]:
+    p = names_path()
+    if not p.exists():
+        return {}
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    d = {str(k).upper(): str(v) for k, v in d.items() if v}
+    if symbols is not None:
+        want = {s.upper() for s in symbols}
+        d = {k: v for k, v in d.items() if k in want}
+    return d
+
+
 def _fetch(url: str, timeout: int = 20) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", errors="replace")
 
 
-def parse_listing(nasdaq_text: str, other_text: str) -> dict[str, str]:
-    """두 파일 → {symbol: NAS|NYS|AMS}. 테스트 이슈·마지막 'File Creation Time' 줄 제외."""
-    out: dict[str, str] = {}
+def parse_listing_full(nasdaq_text: str, other_text: str
+                       ) -> tuple[dict[str, str], dict[str, str]]:
+    """두 파일 → ({symbol: NAS|NYS|AMS}, {symbol: 회사명}).
+    테스트 이슈·마지막 'File Creation Time' 줄 제외."""
+    exch: dict[str, str] = {}
+    names: dict[str, str] = {}
     for line in nasdaq_text.splitlines()[1:]:
         c = line.split("|")
         if len(c) < 4 or c[0].startswith("File Creation") or not c[0]:
             continue
         if c[3].strip() == "Y":            # Test Issue
             continue
-        out[c[0].strip()] = "NAS"
+        s = c[0].strip()
+        exch[s] = "NAS"
+        names[s] = clean_name(c[1])
     for line in other_text.splitlines()[1:]:
         c = line.split("|")
         if len(c) < 7 or c[0].startswith("File Creation") or not c[0]:
@@ -69,8 +96,32 @@ def parse_listing(nasdaq_text: str, other_text: str) -> dict[str, str]:
             continue
         code = OTHER_CODE.get(c[2].strip())
         if code:
-            out.setdefault(c[0].strip(), code)
-    return out
+            s = c[0].strip()
+            exch.setdefault(s, code)
+            names.setdefault(s, clean_name(c[1]))
+    return exch, names
+
+
+def parse_listing(nasdaq_text: str, other_text: str) -> dict[str, str]:
+    return parse_listing_full(nasdaq_text, other_text)[0]
+
+
+_NAME_CUT = re.compile(
+    r"\s+(?:-\s+)?(?:Common Stock|Class [A-Z]\b|Ordinary Shares|American Depositary"
+    r"|Depositary|Common Shares|Units?\b|Warrants?\b|Preferred).*$", re.IGNORECASE)
+_NAME_SUFFIX = re.compile(
+    r"(?:,?\s+(?:Inc\.?|Incorporated|Corporation|Corp\.?|Company|Co\.?|plc|PLC|Ltd\.?"
+    r"|Limited|N\.V\.|S\.A\.|AG|SE|LP|L\.P\.))+\s*$")
+
+
+def clean_name(raw: str) -> str:
+    """'Gartner, Inc. Common Stock' → 'Gartner'. 뉴스 검색어로 쓸 수 있는 꼴로.
+    법인 접미사와 증권 종류를 떼고, 'Hilton Worldwide Holdings' 처럼 뜻이 있는 말은 남긴다."""
+    s = (raw or "").strip()
+    s = _NAME_CUT.sub("", s)
+    s = _NAME_SUFFIX.sub("", s)
+    s = s.rstrip(" ,.-")
+    return s if len(s) >= 3 else (raw or "").strip()
 
 
 def refresh(force: bool = False) -> dict:
@@ -79,13 +130,15 @@ def refresh(force: bool = False) -> dict:
     if not force and p.exists() and time.time() - p.stat().st_mtime < REFRESH_SEC:
         return {"ok": True, "action": "cached", "n": len(_read(p))}
     try:
-        m = parse_listing(_fetch(NASDAQ_LISTED), _fetch(OTHER_LISTED))
+        m, names = parse_listing_full(_fetch(NASDAQ_LISTED), _fetch(OTHER_LISTED))
         if len(m) < 3000:                  # 반쪽짜리 파일로 캐시를 덮지 않는다
             return {"ok": False, "action": "skip", "detail": f"목록이 비정상({len(m)}종목)"}
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(m, separators=(",", ":")), encoding="utf-8")
-        tmp.replace(p)
+        for path, data in ((p, m), (names_path(), names)):
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, separators=(",", ":"), ensure_ascii=False),
+                           encoding="utf-8")
+            tmp.replace(path)
         return {"ok": True, "action": "refreshed", "n": len(m)}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "action": "fetch", "detail": f"{type(e).__name__}: {e}",
