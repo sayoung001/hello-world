@@ -71,12 +71,17 @@ def run_agents(
     except Exception as e:  # noqa: BLE001 — 기저율 없이도 추천은 나와야 한다
         print(f"[agents] 기저율 조회 실패({type(e).__name__}) — 기저율 없이 진행")
 
-    # 오늘의 SAVE PICK — 종목 무관 시장 맥락. 모든 PM 호출에 같은 덩어리가 들어간다.
-    try:
-        from stock_auto.agents.news_collector import market_picks_text
-        market_news = market_picks_text() if market == Market.US else ""
-    except Exception:  # noqa: BLE001
-        market_news = ""
+    # 오늘의 시장 뉴스 — 종목 무관 시장 맥락. 모든 PM 호출에 같은 덩어리가 들어간다.
+    # 세이브티커 SAVE PICK 이 있으면 그것, 없으면 공개 RSS(CNBC·MarketWatch·야후).
+    market_news, market_news_label = "", ""
+    if market == Market.US:
+        try:
+            from stock_auto.agents.news_collector import market_news_text
+            market_news, market_news_label = market_news_text()
+        except Exception as e:  # noqa: BLE001
+            print(f"[agents] 시장 뉴스 수집 실패: {type(e).__name__}: {e}")
+        n_lines = market_news.count("\n") + 1 if market_news else 0
+        print(f"[agents] 시장 뉴스 {n_lines}건 ({market_news_label or '없음'})")
 
     out = AgentPipelineResult()
     for r in rows:
@@ -99,7 +104,8 @@ def run_agents(
             label = sector_label_map.get(sym, "-")
             reco = pm.decide(r, n, f, v, sector_label=label,
                              prior_text=_prior_text(r, prior_rows),
-                             market_news=market_news)
+                             market_news=market_news,
+                             market_news_label=market_news_label)
         except Exception as e:  # noqa: BLE001 — 1종목 실패를 격리
             msg = f"{type(e).__name__}: {e}"
             print(f"[agents] {sym} 분석 실패 — 건너뜁니다 ({msg})")

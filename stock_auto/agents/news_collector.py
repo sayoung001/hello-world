@@ -223,6 +223,81 @@ def market_picks_text(days: int = 1, limit: int = 20) -> str:
     return "\n".join(lines)
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# 시장 전체 헤드라인 — 세이브티커 SAVE PICK 이 없을 때의 공개 RSS 대체
+# ──────────────────────────────────────────────────────────────────────────
+# 종목별 뉴스는 위 체인(야후·구글)이 이미 받는다. 비어 있던 것은 **시장 맥락**
+# 블록이었다: PM 프롬프트의 "오늘 주요뉴스"가 세이브티커 PICK 만 보고 있어서
+# PC 수집이 없는 날은 PM 이 시장 분위기를 전혀 모른 채 종목을 판단했다.
+# 공개 RSS 는 편집자 선별(PICK)만큼 정제돼 있지는 않지만, 없는 것보다 낫다.
+MARKET_FEEDS: dict[str, str] = {
+    "cnbc": "https://www.cnbc.com/id/100003114/device/rss/rss.html",       # Top News
+    "cnbc_finance": "https://www.cnbc.com/id/10000664/device/rss/rss.html",  # Finance
+    "marketwatch": "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+    "yahoo_market": "https://finance.yahoo.com/news/rssindex",
+    "google_market": ("https://news.google.com/rss/search"
+                      "?q=stock+market+when:1d&hl=en-US&gl=US&ceid=US:en"),
+}
+DEFAULT_MARKET_SOURCES = "cnbc,marketwatch,yahoo_market"
+MARKET_HEADLINE_LIMIT = 20
+
+
+def market_sources_from_env() -> list[str]:
+    raw = os.environ.get("STOCK_MARKET_NEWS_SOURCES", DEFAULT_MARKET_SOURCES)
+    return [s.strip().lower() for s in raw.split(",") if s.strip() and s.strip().lower() in MARKET_FEEDS]
+
+
+def market_headlines(fetch: Callable[[str], Optional[str]] = fetch_text,
+                     sources: Optional[list[str]] = None,
+                     limit: int = MARKET_HEADLINE_LIMIT,
+                     days: int = 2) -> list[NewsItem]:
+    """공개 RSS 에서 시장 헤드라인. 최근 days 일 것만, 제목 중복 제거, 최신순."""
+    chain = sources if sources is not None else market_sources_from_env()
+    items: list[NewsItem] = []
+    cutoff = ""
+    try:
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    except Exception:  # noqa: BLE001
+        pass
+    for i, src in enumerate(chain):
+        if i:
+            time.sleep(REQUEST_GAP_SEC)
+        body = fetch(MARKET_FEEDS[src])
+        if not body:
+            continue
+        for it in parse_rss(body, "", src):
+            # 날짜를 읽을 수 있고 너무 오래됐으면 버린다. 날짜 없는 건 둔다.
+            if cutoff and re.match(r"\d{4}-\d{2}-\d{2}", it.published) and it.published < cutoff:
+                continue
+            items.append(it)
+    return _dedup_recent(items, limit)
+
+
+def market_headlines_text(fetch: Callable[[str], Optional[str]] = fetch_text,
+                          sources: Optional[list[str]] = None,
+                          limit: int = MARKET_HEADLINE_LIMIT) -> str:
+    items = market_headlines(fetch, sources, limit)
+    return "\n".join(f"- {it.headline} ({it.source}, {it.published or '-'})" for it in items)
+
+
+def market_news_text(fetch: Callable[[str], Optional[str]] = fetch_text
+                     ) -> tuple[str, str]:
+    """(본문, 출처 라벨). 세이브티커 PICK 이 있으면 그것, 없으면 공개 RSS.
+
+    라벨은 PM 프롬프트 머리말과 로그에 쓴다 — 어느 쪽을 봤는지 나중에 알아야
+    '뉴스가 성과를 더하는가' 표를 소스별로 나눌 수 있다.
+    """
+    picks = market_picks_text()
+    if picks:
+        return picks, "SAVE PICK"
+    text = market_headlines_text(fetch)
+    if text:
+        srcs = market_sources_from_env()
+        return text, "공개 RSS " + "/".join(srcs)
+    return "", ""
+
+
 def sources_from_env() -> list[str]:
     raw = os.environ.get("STOCK_NEWS_SOURCES", DEFAULT_SOURCES)
     return [s.strip().lower() for s in raw.split(",") if s.strip()]
