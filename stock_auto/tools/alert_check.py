@@ -102,6 +102,20 @@ def inspect() -> dict[str, Any]:
             print(f"      진입문구: {str(r.get('rule_text',''))[:70]}")
         if len(pend) > 8:
             print(f"    … 외 {len(pend) - 8}건")
+        # 장중 감시가 실제로 체결을 받는지 — NYSE 종목을 NAS 코드로 구독하면
+        # 아무것도 안 온다. 대기 종목의 거래소 매핑을 보여 준다.
+        us_pend = sorted({r["symbol"] for r in pend if (r.get("market") or "US") == "US"})
+        if us_pend:
+            try:
+                from stock_auto.data import us_exchange
+                m = us_exchange.load_map(us_pend)
+                print(f"  KIS {us_exchange.summary(us_pend, m)}")
+                if len(m) < len(us_pend):
+                    print("    ⚠️ 매핑 캐시 없음/부족 — 데몬이 개장 시 자동 갱신. 지금 받으려면:")
+                    print("       .venv/bin/python -m stock_auto.data.us_exchange "
+                          + " ".join(us_pend[:5]))
+            except Exception as e:  # noqa: BLE001
+                print(f"  {WARN} 거래소 매핑 확인 실패: {type(e).__name__}")
         fired = [r for r in trows if r.get("status") == "fired"]
         if fired:
             print(f"  이미 발화한 건 {len(fired)}개 — 가장 최근:")

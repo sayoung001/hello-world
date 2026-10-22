@@ -85,28 +85,17 @@ def main() -> int:
     # 날짜는 스냅샷의 거래소 시각(ET) 기준 → 서버 TZ 무관(시간대 버그 수정)
     from stock_auto.realtime import observation_store
 
-    # 진입 트리거 장중 감시 — 조건가에 닿는 순간 Notion 정리 + Telegram 알림
-    try:
-        from stock_auto.tracking.trigger_eval import RealtimeTriggerWatch
-        tw = RealtimeTriggerWatch(market=market.value)
-        if tw.symbols:
-            print(f"[monitor] 진입 트리거 감시 {len(tw.symbols)}종목: {tw.symbols[:10]}")
-        else:
-            tw = None
-    except Exception as e:  # noqa: BLE001 — 트리거 감시 실패가 모니터를 막지 않게
-        print(f"[monitor] 트리거 감시 비활성({type(e).__name__})")
-        tw = None
+    # 진입 트리거 장중 감시 — 조건가에 닿는 순간 Notion 정리 + Telegram 알림.
+    # 데몬과 같은 배선(run_daemon._trigger_watch). 매 틱 판정(on_tick) —
+    # on_observation 은 개장 1·3·5분에만 불려서 거기 걸면 6분만 본다.
+    from stock_auto.pipeline.run_daemon import (
+        _trigger_watch, _trigger_tick, _exchange_map)
+    tw = _trigger_watch(sec, market, tg)
 
     def _record(snap, window):
         observation_store.record(
             snap.market, snap.ts.strftime("%Y-%m-%d"), snap.symbol,
             window, snap.cum_volume, snap.cum_turnover)
-        if tw is not None:
-            try:
-                tw.on_price(snap.symbol, float(snap.price),
-                            snap.ts.strftime("%Y-%m-%d %H:%M"))
-            except Exception as e:  # noqa: BLE001
-                print(f"[monitor] 트리거 판정 오류 {snap.symbol}: {type(e).__name__}")
 
     # 적응형 임계: 실측 RVOL 분포의 상위 분위수를 컷으로. 표본 부족 시 고정 임계 폴백
     provider = None
@@ -131,10 +120,14 @@ def main() -> int:
     monitor = SurgeMonitor(
         profiles, thresholds=DEFAULT_THRESHOLDS,
         on_signal=_on_signal, on_observation=_record,
-        threshold_provider=provider)
+        threshold_provider=provider,
+        on_tick=(_trigger_tick(tw) if tw is not None else None))
 
+    # --us-exchange 는 매핑에 없는 종목의 기본값일 뿐이다. 종목별 코드는
+    # 나스닥 심볼 디렉터리에서 받는다(NYSE 종목을 NAS 로 구독하면 체결이 안 온다).
     feed = KISFeed(sec.kis_app_key, sec.kis_app_secret, market,
-                   env=sec.kis_env, us_exchange=args.us_exchange)
+                   env=sec.kis_env, us_exchange=args.us_exchange,
+                   exchange_map=_exchange_map(market, symbols))
     print("[monitor] KIS WebSocket 연결 시작...")
     try:
         monitor.run(feed, symbols)

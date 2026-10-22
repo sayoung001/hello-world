@@ -192,6 +192,56 @@ def _weekly_report():
         print(f"[daemon] 주간 리포트 실패: {type(e).__name__}: {e}")
 
 
+def _trigger_watch(sec, market: Market, tg):
+    """pending 트리거 감시기. 실패하면 None — 트리거 때문에 모니터가 죽으면 안 된다."""
+    try:
+        from stock_auto.tracking.trigger_eval import RealtimeTriggerWatch, TriggerFirer
+        from stock_auto.integrations.notion_publisher import NotionPublisher
+        firer = TriggerFirer(
+            notion=NotionPublisher(token=sec.notion_token) if sec.has_notion else None,
+            db_id=sec.notion_trigger_db_id or None,
+            parent_page=sec.notion_parent_page_id or None,
+            telegram=tg, send_chart=False)          # 장중엔 차트 생략
+        tw = RealtimeTriggerWatch(firer=firer, market=market.value)
+        if tw.symbols:
+            print(f"[daemon] 진입 트리거 감시 {len(tw.symbols)}종목: {tw.symbols[:10]}")
+            return tw
+        print("[daemon] 진입 트리거 대기 건 없음")
+        return None
+    except Exception as e:  # noqa: BLE001
+        print(f"[daemon] 트리거 감시 비활성({type(e).__name__}: {e})")
+        return None
+
+
+def _trigger_tick(tw):
+    """매 스냅샷 → 트리거 판정. 시각은 ISO(오프셋 포함) — Notion 날짜 속성이 받는 형식."""
+    def _on_tick(snap):
+        try:
+            tw.on_price(snap.symbol, float(snap.price),
+                        snap.ts.isoformat(timespec="seconds"))
+        except Exception as e:  # noqa: BLE001
+            print(f"[daemon] 트리거 판정 오류 {snap.symbol}: {type(e).__name__}: {e}")
+    return _on_tick
+
+
+def _exchange_map(market: Market, syms: list[str]) -> dict[str, str]:
+    """US 종목별 KIS 거래소 코드. 없으면 NYSE 종목은 체결이 안 온다."""
+    if market != Market.US:
+        return {}
+    try:
+        from stock_auto.data import us_exchange
+        r = us_exchange.refresh()
+        if not r.get("ok"):
+            print(f"[daemon] 거래소 목록 갱신 실패({r.get('detail', '')[:80]}) — "
+                  f"캐시 {r.get('n', 0)}종목으로 진행")
+        m = us_exchange.load_map(syms)
+        print("[daemon] " + us_exchange.summary(syms, m))
+        return m
+    except Exception as e:  # noqa: BLE001
+        print(f"[daemon] 거래소 매핑 실패({type(e).__name__}) — 전부 NAS 로 구독")
+        return {}
+
+
 def _run_monitor_thread(market: Market, session_minutes: int):
     """개장 시 모니터를 스레드로 구동, 장 마감까지 자동 정지."""
     sec = get_secrets()
@@ -237,13 +287,23 @@ def _run_monitor_thread(market: Market, session_minutes: int):
         except Exception as e:  # noqa: BLE001
             print(f"[daemon] 알림 기록 실패: {type(e).__name__}: {e}")
 
+    # 진입 트리거 장중 감시 — 추천의 '0.5% 눌림' 같은 조건가에 닿는 순간
+    # Notion 정리 + Telegram 알림. 매 틱마다 판정한다(on_tick).
+    # 예전에는 데몬 스레드에 이 훅이 아예 없었다(CLI run_monitor 에만 있었고,
+    # 그마저 on_observation 에 걸려 개장 1·3·5분에만 가격을 봤다). 그래서
+    # 조건이 장중에 닿아도 알림이 안 가고, 다음날 아침 일봉 사후점검이
+    # 하루 늦게 발화했다.
+    tw = _trigger_watch(sec, market, tg)
+
     monitor = SurgeMonitor(profiles, DEFAULT_THRESHOLDS,
                            on_signal=_on_signal,
                            on_observation=_record,
-                           threshold_provider=provider)
+                           threshold_provider=provider,
+                           on_tick=(_trigger_tick(tw) if tw is not None else None))
     deadline = datetime.now() + timedelta(minutes=session_minutes)
     feed = KISFeed(sec.kis_app_key, sec.kis_app_secret, market, env=sec.kis_env,
-                   should_stop=lambda: datetime.now() >= deadline)
+                   should_stop=lambda: datetime.now() >= deadline,
+                   exchange_map=_exchange_map(market, syms))
 
     def _run():
         print(f"[daemon] {market.value} 모니터 시작 ({session_minutes}분)")

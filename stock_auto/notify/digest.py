@@ -27,6 +27,12 @@ MAX_SECTOR_LINES = 12
 AUTOPULL_STALE_MIN = 30     # heartbeat 가 이보다 오래되면 타이머가 죽은 것으로 본다
 
 
+def _clip(v, n: int) -> str:
+    """n자 넘으면 '…' 를 붙여 잘렸음을 보이게 한다(조용히 잘리면 문장이 끝난 줄 안다)."""
+    s = str(v if v not in (None, "") else "-").strip()
+    return s if len(s) <= n else s[: n - 1].rstrip() + "…"
+
+
 def _num(v, fmt: str = "{:,.2f}") -> str:
     try:
         if v is None or v == "":
@@ -162,7 +168,9 @@ def batch_digest(result: Any, sector_lines: Optional[list[str]] = None,
                    if _action_hint(r.get('conviction')) else ""),
                 f"   Eff {_num(row.get('effective_score'))} · "
                 f"종가 {_num(row.get('close'))} · {row.get('strategies', '-')}{earn}",
-                f"   진입: {str(r.get('entry_rule', '-'))[:120]}",
+                # 220자 — 요즘 진입 문장은 150~230자다. 120 에서 자르면 '분할 진입'
+                # '손절선 위 지지' 같은 뒷부분이 폰 알림에서 사라진다.
+                f"   진입: {_clip(r.get('entry_rule'), 220)}",
                 f"   손절 {_num(r.get('stop'))} · "
                 f"목표 {', '.join(_num(t) for t in targets) or '-'} · "
                 f"R:R {_num(row.get('rr_ratio'), '{:.2f}')}",

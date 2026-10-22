@@ -131,6 +131,30 @@ def _pct(raw: str, source: str = "") -> float:
     return v
 
 
+def _basis_near(t: str, pos: int) -> str:
+    """% 숫자 **앞에서 가장 가까운** 기준가 표현. 없으면 문장 전체에서 우선순위대로.
+
+    예전엔 문장 어디에 있든 '시가'가 '종가'를 이겼다. 그런데 실제 진입 문장은
+    "신호 종가(359.29) 대비 0.8% 눌림 … 시가에 바로 추격 매수하지 않습니다"
+    처럼 뒤쪽에 '시가'를 다른 뜻으로 쓴다. 그러면 기준이 '당일 시가'로 잘못
+    적혀 Notion 에 '당일 시가 대비 0.8% 눌림'이라고 남는다(도달가 자체는 종가로
+    계산되어 틀리지 않았지만, 읽는 사람이 헷갈린다)."""
+    head = t[:pos]
+    spans: list[tuple[int, int, str]] = []      # (start, end, name) 우선순위 순
+    for name, rx in _BASIS:
+        for mm in rx.finditer(head):
+            # '전일 종가' 안의 '종가'처럼 상위 표현에 포함된 하위 매치는 버린다
+            if any(s <= mm.start() and mm.end() <= e for s, e, _ in spans):
+                continue
+            spans.append((mm.start(), mm.end(), name))
+    if spans:
+        return max(spans)[2]                     # 가장 뒤(= % 에 가장 가까운) 것
+    for name, rx in _BASIS:
+        if rx.search(t):
+            return name
+    return "signal_close"
+
+
 def parse_rule(text: str) -> dict[str, Any]:
     """
     진입 조건 문장에서 기계용 조건을 뽑는다. 못 뽑으면 immediate.
@@ -147,17 +171,12 @@ def parse_rule(text: str) -> dict[str, Any]:
     if not t:
         return out
 
-    # 기준가 — 먼저 나오는 표현을 택한다
-    for name, rx in _BASIS:
-        if rx.search(t):
-            out["basis"] = name
-            break
-
     # % 값이 비정상이면 kind 를 바꾸지 않고 immediate 로 남긴다.
     # pullback 에 value_pct=0 을 두면 기준가에 닿는 순간 발화해버려 의도와
     # 정반대가 된다(눌림을 기다리라는 조건이 '지금 사라'가 된다).
     m = _PULLBACK.search(t)
     if m:
+        out["basis"] = _basis_near(t, m.start())
         v = _pct(m.group(1), t)
         if v > 0:
             out["kind"] = "pullback"
@@ -166,11 +185,13 @@ def parse_rule(text: str) -> dict[str, Any]:
 
     m = _BREAKOUT.search(t)
     if m:
+        out["basis"] = _basis_near(t, m.start())
         v = _pct(m.group(1), t)
         if v > 0:
             out["kind"] = "breakout"
             out["value_pct"] = v
         return out
+    out["basis"] = _basis_near(t, len(t))
 
     if _BREAKOUT_BARE.search(t):
         out["kind"] = "breakout"

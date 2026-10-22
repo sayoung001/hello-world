@@ -286,6 +286,7 @@ class SurgeMonitor:
         cooldown_sec: int = DEDUP_COOLDOWN_SEC,
         on_observation: Optional[Callable[[TickSnapshot, int], None]] = None,
         threshold_provider: Optional[Callable[[Market, int], SurgeThresholds]] = None,
+        on_tick: Optional[Callable[[TickSnapshot], None]] = None,
     ):
         self.profiles = profiles
         self.thresholds = thresholds
@@ -296,6 +297,11 @@ class SurgeMonitor:
         self.cooldown_sec = cooldown_sec
         # 자가보정 피드백: 각 윈도우에서 누적거래량 1회 기록(폭주 여부 무관)
         self.on_observation = on_observation
+        # 모든 스냅샷마다 호출 — 진입 트리거 판정용.
+        # on_observation 은 개장 후 1·3·5분 윈도우에 종목당 1회만 불린다(그게
+        # 설계다 — 자가보정 표본). 그 콜백에 트리거 판정을 걸어 두면 하루에
+        # 세 번, 개장 6분 안에만 가격을 본다. '0.5% 눌림'은 보통 그 뒤에 온다.
+        self.on_tick = on_tick
 
         # 종목별 롤링 상태: (시각, 가격, 체결건수) 1분 윈도우
         self._hist: dict[str, deque[tuple[datetime, float, int]]] = {}
@@ -332,6 +338,11 @@ class SurgeMonitor:
 
     def process(self, snap: TickSnapshot) -> Optional[SurgeSignal]:
         """스냅샷 1건 처리 → 폭주면 SurgeSignal 반환(+콜백)."""
+        if self.on_tick is not None:
+            try:
+                self.on_tick(snap)
+            except Exception:  # noqa: BLE001 — 트리거 판정 실패가 모니터를 막지 않게
+                pass
         price_1m, count_1m, secs = self._rolling_ref(snap.symbol, snap)
 
         window = self._which_window(snap.elapsed_min)

@@ -95,6 +95,19 @@ def category_of(trigger: dict) -> str:
     return ETF_CATEGORY.get(str(trigger.get("sector_etf", "")).upper(), "미상")
 
 
+def iso_when(fired_at: str) -> str:
+    """Notion 날짜 속성은 ISO 8601 만 받는다.
+    일봉 경로는 'YYYY-MM-DD', 실시간 경로는 ISO(오프셋 포함)를 주지만, 예전
+    실시간 경로가 'YYYY-MM-DD HH:MM'(공백)을 줘서 Notion 이 400 으로 거부했고
+    그 실패는 삼켜져 알림에 링크만 빠졌다. 어떤 형식이 와도 ISO 로 맞춘다."""
+    s = str(fired_at or "").strip()
+    if len(s) >= 16 and s[10] == " ":
+        s = s[:10] + "T" + s[11:]
+    if len(s) == 16:          # 'YYYY-MM-DDTHH:MM' → 초 보충
+        s += ":00"
+    return s
+
+
 def trigger_row(trigger: dict, fired_price: float, fired_at: str,
                 chart_note: str = "") -> dict:
     """Trigger(dict) → Notion 행 properties."""
@@ -117,7 +130,7 @@ def trigger_row(trigger: dict, fired_price: float, fired_at: str,
         "확신도": {"number": _num(trigger.get("conviction"))},
         "섹터상태": {"rich_text": _rt(trigger.get("sector_label") or "-")},
         "추천근거": {"rich_text": _rt(rationale or "-")},
-        "도달시각": {"date": {"start": fired_at}},
+        "도달시각": {"date": {"start": iso_when(fired_at)}},
     }
 
 

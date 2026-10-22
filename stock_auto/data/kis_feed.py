@@ -150,12 +150,16 @@ class KISFeed:
     def __init__(self, app_key: str, app_secret: str, market: Market,
                  env: str = "real", us_exchange: str = "NAS",
                  debug_raw: int = 0, should_stop=None,
-                 reconnect: bool = True, recv_timeout: float = 30.0):
+                 reconnect: bool = True, recv_timeout: float = 30.0,
+                 exchange_map: Optional[dict[str, str]] = None):
         self.app_key = app_key
         self.app_secret = app_secret
         self.market = market
         self.env = env
         self.us_exchange = us_exchange
+        # 종목별 거래소(NAS/NYS/AMS). 없으면 us_exchange 를 전부에 붙인다 —
+        # 그러면 NYSE 종목은 구독만 되고 체결이 안 온다(us_exchange.py 참고).
+        self.exchange_map = {k.upper(): v for k, v in (exchange_map or {}).items()}
         self._tr = TR_KR if market == Market.KR else TR_US
         self.debug_raw = debug_raw       # >0이면 첫 N개 원시 패킷을 출력(필드 정렬용)
         self.should_stop = should_stop   # 콜백: True면 스트림 종료(데몬 자동정지)
@@ -168,7 +172,7 @@ class KISFeed:
     def _tr_key(self, symbol: str) -> str:
         if self.market == Market.KR:
             return symbol
-        exch = US_EXCH.get(self.us_exchange, "NAS")
+        exch = self.exchange_map.get(symbol.upper()) or US_EXCH.get(self.us_exchange, "NAS")
         return f"D{exch}{symbol}"
 
     def stream(self, symbols) -> Iterator[TickSnapshot]:
