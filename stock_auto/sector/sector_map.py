@@ -251,13 +251,43 @@ _KEYWORD_SECTOR = {
 }
 
 
+# GICS 섹터명의 다른 표기 — 데이터 제공자마다 다르다
+#   FinanceDataReader S&P500 'Sector' 열: GICS 정식 명칭(아래 GICS_SECTOR_ETF 키)
+#   yfinance/Morningstar: 'Consumer Cyclical', 'Consumer Defensive', 'Basic Materials',
+#                         'Financial Services', 'Technology', 'Healthcare'
+_SECTOR_ALIAS = {
+    'consumer cyclical': 'Consumer Discretionary',
+    'consumer defensive': 'Consumer Staples',
+    'basic materials': 'Materials',
+    'financial services': 'Financials',
+    'financial': 'Financials',
+    'technology': 'Information Technology',
+    'healthcare': 'Health Care',
+    'telecommunication services': 'Communication Services',
+    'telecommunications': 'Communication Services',
+    'communication': 'Communication Services',
+    'industrial': 'Industrials',
+}
+_GICS_LOWER = {k.lower(): k for k in GICS_SECTOR_ETF}
+
+
 def get_sector_etf(ticker, industry=''):
     """
-    종목의 섹터 ETF 조회 (3단계 Fallback)
-    
+    종목의 섹터 ETF 조회 (0~2단계 Fallback)
+
     Returns: (etf_ticker, sector_name_kr) tuple
     """
     industry = str(industry).strip() if industry else ''
+
+    # 0단계: 입력이 GICS 섹터명 그 자체인 경우(유니버스는 FDR S&P500 의 'Sector' 열을
+    # 넘긴다). 예전에는 이 단계가 없어 'Consumer Discretionary'·'Consumer Staples'·
+    # 'Materials'·'Communication Services'·'Utilities'·'Real Estate' 가 키워드 표에
+    # 걸리지 않아 '-' 가 됐다 — S&P500 의 절반 가까이가 섹터 없음으로 돌았다.
+    # (섹터 게이트 미적용, LLM 에 '섹터 데이터 없음', 트리거 카테고리 '미상')
+    key = _GICS_LOWER.get(industry.lower()) or _SECTOR_ALIAS.get(industry.lower())
+    if key:
+        info = GICS_SECTOR_ETF[key]
+        return info['etf'], info['name_kr']
 
     # 1단계: 정확한 Industry 매칭
     if industry in INDUSTRY_TO_SECTOR:
