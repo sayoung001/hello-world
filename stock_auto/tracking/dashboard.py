@@ -137,8 +137,8 @@ def build_html(rows: list[dict], fwd_rows: list[dict]) -> str:
     trades = pnl.closed_trades(rows)
     s = pnl.summarize(trades)
     se = pnl.summarize(pnl.closed_trades(rows, executed_only=True))
-    recos = [r for r in rows if r.get("source") == "batch" and not r.get("gated_by")]
-    waiting = sum(1 for r in recos if not r.get("exit_type"))
+    recos = [r for r in rows if pnl.is_recommendation(r)]      # BUY/WATCH 만(AVOID·LLM 미분석 제외)
+    waiting = sum(1 for r in recos if not r.get("exit_type") or r.get("exit_type") == "nodata")
     cv = forward.curve(fwd_rows)
     best = forward.best_horizon(cv)
     now = datetime.now().strftime("%Y-%m-%d %H:%M")

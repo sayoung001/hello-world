@@ -68,8 +68,10 @@ def label_record(rec: dict[str, Any], df: pd.DataFrame,
                        exit_date=pd.Timestamp(fwd.index[0]).strftime("%Y-%m-%d"),
                        exit_price=round(entry, 4))
 
-    n = hold_days or HOLD_DAYS.get(str(rec.get("horizon", "")), DEFAULT_HOLD)
-    path = fwd.iloc[1:n + 1]                 # 진입 다음 봉부터 관찰
+    n = hold_days or hold_days_for(rec)
+    # 진입일(시가 진입) 봉부터 관찰한다. 예전에는 fwd.iloc[1:] 로 진입일을 건너뛰어
+    # 진입 당일 장중에 손절선·목표가를 스친 것을 못 봤다 — 둘 다 과소 집계.
+    path = fwd.iloc[0:n]
     if path.empty:
         return Outcome(exit_type="nodata")
 
@@ -86,9 +88,49 @@ def label_record(rec: dict[str, Any], df: pd.DataFrame,
         if hit_tp:
             return _mk("tp", ts, tp, entry, mae, mfe, i, 1)
 
+    # ★ 보유기간이 다 차지 않았으면 아직 결과가 없다 — timeout 이 아니다.
+    #   예전에는 일봉이 하루치만 있어도(추천 다음날 아침) 그 하루를 '타임아웃'으로
+    #   확정했다. 그래서 주간 요약이 "타임아웃 59건 · 평균 보유 1.0일" 이 됐고,
+    #   한 번 라벨이 붙으면 다시 보지 않아 통계가 영구히 오염됐다.
+    if len(path) < n:
+        return Outcome(exit_type="nodata")
+
     last_ts = path.index[-1]
     last_close = float(path.iloc[-1]["Close"])
     return _mk("timeout", last_ts, last_close, entry, mae, mfe, len(path), -1)
+
+
+def hold_days_for(rec: dict) -> int:
+    return HOLD_DAYS.get(str(rec.get("horizon", "")), DEFAULT_HOLD)
+
+
+def premature_timeouts(rows: list[dict]) -> list[dict]:
+    """보유기간이 차기 전에 timeout 으로 확정된 행 — 재라벨 대상."""
+    out = []
+    for r in rows:
+        if str(r.get("exit_type", "")) != "timeout":
+            continue
+        try:
+            held = int(float(r.get("days_held") or 0))
+        except (TypeError, ValueError):
+            held = 0
+        if held < hold_days_for(r):
+            out.append(r)
+    return out
+
+
+_RESULT_FIELDS = ("labeled_at", "exit_type", "exit_date", "exit_price", "ret_pct",
+                  "mae_pct", "mfe_pct", "days_held", "label", "direction_correct")
+
+
+def reset_premature(rows: list[dict]) -> int:
+    """조기 타임아웃 라벨을 지워 다시 라벨링되게 한다. 바뀐 행 수를 돌려준다.
+    label_pending 이 매번 먼저 호출한다(멱등) — 과거에 잘못 붙은 라벨도 자연히 고쳐진다."""
+    bad = premature_timeouts(rows)
+    for r in bad:
+        for k in _RESULT_FIELDS:
+            r[k] = ""
+    return len(bad)
 
 
 def _barriers(rec: dict, entry: float, hist: Optional[pd.DataFrame] = None
@@ -154,9 +196,14 @@ def label_pending(base: Optional[str] = None,
     from stock_auto.config.settings import Market
 
     rows = store.load(base)
+    n_reset = reset_premature(rows)
+    if n_reset:
+        print(f"[labeler] 조기 타임아웃 {n_reset}건 라벨 해제 — 보유기간이 찬 뒤 다시 판정")
     todo = [r for r in rows if not r.get("exit_type")]
     if not todo:
-        return {"labeled": 0, "pending": 0, "nodata": 0}
+        if n_reset:
+            store.save_all(rows, base)
+        return {"labeled": 0, "pending": 0, "nodata": 0, "skip": 0, "reset": n_reset}
 
     # 종목별 일봉 확보
     if ohlcv_map is None:
@@ -176,7 +223,7 @@ def label_pending(base: Optional[str] = None,
             except Exception as e:  # noqa: BLE001
                 print(f"[labeler] {s} 일봉 실패: {type(e).__name__}: {e}")
 
-    stat = {"labeled": 0, "pending": 0, "nodata": 0, "skip": 0}
+    stat = {"labeled": 0, "pending": 0, "nodata": 0, "skip": 0, "reset": n_reset}
     # 라벨 시각도 거래소(ET) 기준 — 서버 TZ가 바뀌어도 감사 추적이 흔들리지 않게
     from stock_auto.config.clock import now_et
     now = now_et().strftime("%Y-%m-%d %H:%M %Z")

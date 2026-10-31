@@ -250,6 +250,10 @@ def untriaged(base: Optional[str] = None, source: Optional[str] = "batch",
             continue
         if source and r.get("source") != source:
             continue
+        # AVOID("사지 마라")와 추천이 비어 있는 행(LLM 분석 실패 후보)에는 "샀나요?"를
+        # 묻지 않는다 — 주간 요약의 '미입력 N건'이 그런 행으로 부풀어 있었다.
+        if source == "batch" and str(r.get("recommend") or "").upper() not in ("BUY", "WATCH"):
+            continue
         if not include_gated and r.get("gated_by"):
             continue
         out.append(r)
