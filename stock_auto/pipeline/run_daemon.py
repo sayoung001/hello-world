@@ -361,7 +361,7 @@ def main() -> int:
     #   추천은 다음 미국장 개장(23:30 KST)용이라 09:30 이어도 14시간 남는다.
     # STOCK_BATCH_TIME_KST=HH:MM 으로 바꿀 수 있다.
     us = market_spec(Market.US)
-    bh, bm = batch_time_kst(Market.US)
+    bh, bm = _batch_time_kst(Market.US)
     sch.add_job(lambda: _recalibrate_and_batch((Market.US,)),
                 CronTrigger(hour=bh, minute=bm, day_of_week=us.batch_days, timezone=KST))
     # 주간 성과 요약: 토요일 10:00 KST (한 주 결과 라벨링이 끝난 뒤)
@@ -376,7 +376,7 @@ def main() -> int:
     # 국내장 — ENABLE_KR=1 일 때만. 배치는 장 마감 뒤(16:10 KST) 자기 시각에 따로 돈다.
     if Market.KR in markets:
         kr = market_spec(Market.KR)
-        kh, km = batch_time_kst(Market.KR)
+        kh, km = _batch_time_kst(Market.KR)
         sch.add_job(lambda: _recalibrate_and_batch((Market.KR,)),
                     CronTrigger(hour=kh, minute=km, day_of_week=kr.batch_days, timezone=KST))
         sch.add_job(lambda: _run_monitor_thread(Market.KR, kr.session_minutes),
