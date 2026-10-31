@@ -126,7 +126,7 @@ def _recalibrate_and_batch(markets: tuple[Market, ...] | None = None):
         earn_days: dict = {}
         if market == Market.US:
             try:
-                from stock_auto.data import earnings
+                from stock_auto.markets.us import earnings
                 earnings.refresh(syms)
                 earn_blocked, earn_days = earnings.blocked_map(syms)
                 print("[daemon] " + earnings.summary_line(earn_blocked, earn_days))
@@ -256,7 +256,7 @@ def _exchange_map(market: Market, syms: list[str]) -> dict[str, str]:
     if market != Market.US:
         return {}
     try:
-        from stock_auto.data import us_exchange
+        from stock_auto.markets.us import exchange as us_exchange
         r = us_exchange.refresh()
         if not r.get("ok"):
             print(f"[daemon] 거래소 목록 갱신 실패({r.get('detail', '')[:80]}) — "
