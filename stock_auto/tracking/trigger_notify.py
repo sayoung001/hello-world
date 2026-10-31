@@ -109,18 +109,24 @@ def iso_when(fired_at: str) -> str:
 
 
 def trigger_row(trigger: dict, fired_price: float, fired_at: str,
-                chart_note: str = "") -> dict:
+                chart_note: str = "", notes: Optional[list] = None,
+                status: str = "fired") -> dict:
     """Trigger(dict) → Notion 행 properties."""
     rationale = str(trigger.get("rationale", ""))
+    if notes:
+        rationale = ("[도달 메모] " + " / ".join(notes) + "\n" + rationale).strip()
     if chart_note:
         rationale = (rationale + "\n[차트] " + chart_note).strip()
+    cond = _condition_text(trigger)
+    if status == "cancelled":
+        cond = "⛔ 무효(손절선 아래 도달) · " + cond
     return {
         "종목": {"title": _rt(trigger.get("symbol", "-"))},
         "시장": {"select": {"name": trigger.get("market") or "US"}},
         "카테고리": {"select": {"name": category_of(trigger)}},
         "기간": {"select": {"name": HORIZON_BUCKET.get(
             str(trigger.get("horizon", "")), "중기")}},
-        "진입조건": {"rich_text": _rt(_condition_text(trigger))},
+        "진입조건": {"rich_text": _rt(cond)},
         "도달가": {"number": _num(fired_price)},
         "기준가": {"number": _num(trigger.get("basis_price"))},
         "손절": {"number": _num(trigger.get("stop"))},
@@ -191,21 +197,31 @@ def trigger_page_blocks(trigger: dict, fired_price: float,
 
 
 # ── Telegram 단축 알림 ────────────────────────────────────────────────────
-def short_alert(trigger: dict, fired_price: float, notion_url: str = "") -> str:
+def short_alert(trigger: dict, fired_price: float, notion_url: str = "",
+                notes: Optional[list] = None, status: str = "fired") -> str:
     """
     짧게. 폰 알림 한 줄에 들어가야 쓸모가 있다.
     세부는 Notion 링크로 넘긴다.
+
+    status='cancelled' 는 "조건가에는 닿았지만 손절선 아래" — 제목부터 ⛔ 로 바꿔
+    🎯 와 한눈에 구분되게 한다. 폰에서 첫 줄만 보고 사면 안 되는 경우다.
     """
     sym = trigger.get("symbol", "-")
     cond = _condition_text(trigger).split("  (")[0]
     bucket = HORIZON_BUCKET.get(str(trigger.get("horizon", "")), "중기")
     cat = category_of(trigger)
+    head = (f"⛔ {sym} 조건가 도달했지만 손절선 아래 — 진입 무효"
+            if status == "cancelled" else f"🎯 {sym} 진입 조건 도달")
     lines = [
-        f"🎯 {sym} 진입 조건 도달",
+        head,
         f"{cond} · {fired_price:,.2f}",
         f"{cat} · {bucket} · 손절 {trigger.get('stop') or '-'}",
     ]
-    if _is_split(trigger):
+    for n in (notes or []):
+        if status == "cancelled" and n.startswith("⛔"):
+            continue                      # 제목이 이미 말했다
+        lines.append(n)
+    if _is_split(trigger) and status != "cancelled":
         lines.append("※ 분할 진입 권고")
     lines.append("노션에 정리했습니다" + (f" → {notion_url}" if notion_url else ""))
     return "\n".join(lines)

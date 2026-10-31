@@ -41,15 +41,24 @@ class TriggerFirer:
 
     def fire(self, row: dict, price: float, when: str,
              df: Optional[pd.DataFrame] = None) -> dict:
-        """트리거 1건 발화. row를 제자리에서 갱신해 돌려준다."""
+        """트리거 1건 발화. row를 제자리에서 갱신해 돌려준다.
+
+        도달가가 조건가보다 한참 아래면 '눌림'이 아니라 급락(갭하락)이다. 10-26 개장
+        첫 틱에 8건이 한꺼번에 발화했는데 CSGP 는 조건가 35.1 에 도달가 33.92 였다.
+        사용자의 진입 문장은 대개 "시가가 손절선 아래면 무효"를 달고 있으므로:
+          · 조건가보다 GAP_WARN_PCT 넘게 아래 → ⚠️ 갭하락 경고를 붙인다
+          · 손절선 아래                      → ⛔ 무효(status=cancelled), 진입 금지로 알린다
+        """
         chart_note = N.chart_note_from(df) if df is not None else ""
         notion_url = ""
+        notes, status = _gap_notes(row, price)
 
         # 1) Notion 정리 — 먼저 한다. 링크를 알림에 담아야 하므로
         if self.notion is not None and getattr(self.notion, "enabled", False):
             try:
                 if self.db_id:
-                    props = N.trigger_row(row, price, when, chart_note)
+                    props = N.trigger_row(row, price, when, chart_note,
+                                          notes=notes, status=status)
                     pid = self.notion.add_row(self.db_id, props)
                     if pid:
                         notion_url = f"https://www.notion.so/{str(pid).replace('-', '')}"
@@ -66,9 +75,10 @@ class TriggerFirer:
 
         # 2) Telegram 단축 알림 (+ 차트)
         tg = self._tg()
-        msg = N.short_alert(row, price, notion_url)
+        msg = N.short_alert(row, price, notion_url, notes=notes, status=status)
+        sent = False
         if getattr(tg, "enabled", False):
-            tg.send_message(msg, parse_mode="")
+            sent = bool(tg.send_message(msg, parse_mode=""))
             if self.send_chart and df is not None:
                 try:
                     from stock_auto.notify.chart import render_signal_chart
@@ -85,12 +95,39 @@ class TriggerFirer:
         else:
             print("[trigger] 텔레그램 미설정 — 콘솔 출력\n" + msg)
 
-        row["status"] = "fired"
+        # 발송 결과를 한 줄로 남긴다 — "알림이 왔나?"를 로그로 답할 수 있게.
+        # 예전에는 send_message 의 반환값을 버려서 실패해도 흔적이 없었다.
+        print(f"[trigger] {row.get('symbol')} {status} @ {price} ({when}) · "
+              f"텔레그램 {'전송' if sent else ('실패' if getattr(tg, 'enabled', False) else '미설정')} · "
+              f"노션 {'기록' if notion_url else '없음'}"
+              + (" · " + " / ".join(notes) if notes else ""))
+
+        row["status"] = status
         row["fired_at"] = when
         row["fired_price"] = price
         row["notion_url"] = notion_url
-        row["notify_at"] = when
+        row["notify_at"] = when if sent else ""
         return row
+
+
+# 조건가보다 이만큼(%) 넘게 아래서 닿으면 '눌림'이 아니라 갭하락으로 본다
+GAP_WARN_PCT = 1.0
+
+
+def _gap_notes(row: dict, price: float) -> tuple[list[str], str]:
+    """(알림에 덧붙일 줄들, 상태). 손절선 아래면 cancelled."""
+    notes: list[str] = []
+    status = "fired"
+    tgt = T._f(row.get("target_price"))
+    stop = T._f(row.get("stop"))
+    if tgt and tgt > 0 and price < tgt * (1 - GAP_WARN_PCT / 100):
+        gap = (1 - price / tgt) * 100
+        notes.append(f"⚠️ 갭하락 — 조건가 {tgt:,.2f} 보다 {gap:.1f}% 아래. "
+                     "눌림이 아니라 급락일 수 있음")
+    if stop and stop > 0 and price <= stop:
+        notes.append(f"⛔ 손절선 {stop:,.2f} 아래 — 셋업 무효, 진입 금지")
+        status = "cancelled"
+    return notes, status
 
 
 # ── 일봉 사후점검 ──────────────────────────────────────────────────────────
@@ -164,8 +201,16 @@ def evaluate_daily(ohlcv_map: Optional[dict[str, pd.DataFrame]] = None,
 
         if hit_idx is not None:
             # 체결가는 보수적으로: pullback은 목표가(그 아래로 갔으므로 체결),
-            # breakout도 목표가. 갭으로 더 유리하게 열렸어도 목표가로 본다.
+            # breakout도 목표가. 단, 그날 **시가가 이미 목표가 아래**면(갭하락)
+            # 목표가로 살 수 있던 순간이 없었다 — 시가를 쓴다. 그래야 fire() 의
+            # 갭하락 경고·손절선 무효 판정이 일봉 경로에서도 작동한다.
             price = tgt if tgt is not None else float(window.loc[hit_idx, "Close"])
+            try:
+                o = float(window.loc[hit_idx, "Open"])
+                if kind == "pullback" and tgt is not None and o < tgt:
+                    price = o
+            except (KeyError, TypeError, ValueError):
+                pass
             when = pd.Timestamp(hit_idx).strftime("%Y-%m-%d")
             # dry_run 이면 사본을 넘긴다 — fire() 는 row 를 제자리에서 바꾼다.
             firer.fire(dict(r) if dry_run else r, float(price), when,

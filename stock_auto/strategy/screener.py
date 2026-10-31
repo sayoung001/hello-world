@@ -195,8 +195,41 @@ def screen_universe(
     exits = pd.DataFrame(exit_rows)
     if scored_all.empty:
         return ScreenResult(scored_all, scored_all, exits, macro, failures)
+    return _finish(scored_all, exits, macro, failures, top_n)
+
+
+def flag_stale(scored_all: pd.DataFrame, as_of: str) -> pd.DataFrame:
+    """마지막 봉이 as_of(전체 최댓값)보다 오래된 종목은 추천에서 빼고 gated_by='stale_data'.
+
+    배치는 09:30 KST 에 돈다 — 전날 미국장은 이미 끝났다. 어떤 종목의 캐시가 그 봉을
+    못 받았으면(제공자 지연) 그 종목만 하루 묵은 종가로 점수·'신호 종가'가 나온다.
+    그대로 추천하면 진입 트리거의 기준가가 이미 지난 세션 것이 되고, 다음날 아침
+    일봉 점검이 **추천 전에 이미 끝난 세션의 저가**로 발화한다 — 10-21 IT·MSCI 가
+    그렇게 '추천일 당일' 날짜로 발화했다. 섹션 전체가 하루 늦은 경우(as_of 자체가
+    어제)는 여기서 걸리지 않고 Notion 제목의 '(기준봉 …)' 로 드러난다.
+    """
+    if scored_all.empty or "bar_date" not in scored_all.columns:
+        return scored_all
+    stale = scored_all["bar_date"].astype(str) < str(as_of)
+    n = int(stale.sum())
+    if not n:
+        return scored_all
+    scored_all = scored_all.copy()
+    scored_all.loc[stale, "final_buy"] = False
+    scored_all.loc[stale, "gated_by"] = "stale_data"
+    syms = scored_all.loc[stale, "symbol"].astype(str).tolist()
+    print(f"[screener] ⚠️ 데이터 지연 {n}종목 — 마지막 봉이 {as_of} 이전이라 추천 제외: "
+          + " ".join(syms[:10]) + (" …" if n > 10 else ""))
+    return scored_all
+
+
+def _finish(scored_all: pd.DataFrame, exits: pd.DataFrame, macro, failures: dict,
+            top_n: int) -> ScreenResult:
+    if scored_all.empty:
+        return ScreenResult(scored_all, scored_all, exits, macro, failures)
 
     as_of = str(scored_all["bar_date"].max())
+    scored_all = flag_stale(scored_all, as_of)
     scored_all = scored_all.sort_values("effective_score", ascending=False)
     candidates = (scored_all[scored_all["final_buy"]]
                   .head(top_n).reset_index(drop=True))
