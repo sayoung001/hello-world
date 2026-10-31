@@ -30,14 +30,17 @@ class TriggerFirer:
         self.parent_page, self.telegram = parent_page, telegram
         self.send_chart = send_chart
 
-    def _tg(self):
+    def _tg(self, market: str = "US"):
+        """시장별 텔레그램. 주입된 것이 있으면 그것(데몬은 시장별 감시기에 주입한다),
+        없으면 트리거 행의 market 으로 고른다 — 일봉 사후점검은 전 시장을 한 번에 돈다."""
         if self.telegram is not None:
             return self.telegram
-        from stock_auto.config.env import get_secrets
-        from stock_auto.notify.telegram import Telegram
-        sec = get_secrets()
-        self.telegram = Telegram(sec.telegram_bot_token, sec.telegram_chat_id)
-        return self.telegram
+        cache = self.__dict__.setdefault("_tg_cache", {})
+        key = str(market or "US").upper()
+        if key not in cache:
+            from stock_auto.notify.telegram import for_market
+            cache[key] = for_market(key)
+        return cache[key]
 
     def fire(self, row: dict, price: float, when: str,
              df: Optional[pd.DataFrame] = None) -> dict:
@@ -73,8 +76,8 @@ class TriggerFirer:
                 print(f"[trigger] Notion 정리 실패 {row.get('symbol')}: "
                       f"{type(e).__name__}: {e}")
 
-        # 2) Telegram 단축 알림 (+ 차트)
-        tg = self._tg()
+        # 2) Telegram 단축 알림 (+ 차트) — 시장별 채널
+        tg = self._tg(str(row.get("market") or "US"))
         msg = N.short_alert(row, price, notion_url, notes=notes, status=status)
         sent = False
         if getattr(tg, "enabled", False):

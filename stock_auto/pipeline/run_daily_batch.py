@@ -21,6 +21,8 @@ import argparse
 
 from stock_auto.config.env import get_secrets
 from stock_auto.config.settings import Market
+from stock_auto.notify.telegram import for_market
+from stock_auto.markets import fmt_price
 from stock_auto.config.universe import load_universe, resolve_universe
 from stock_auto.integrations.notion_publisher import NotionPublisher
 from stock_auto.pipeline.daily_batch import run_daily
@@ -79,7 +81,7 @@ def main() -> int:
     earn_blocked: dict = {}
     earn_days: dict = {}
     if not args.no_earnings and market == Market.US:
-        from stock_auto.data import earnings
+        from stock_auto.markets.us import earnings
         try:
             earnings.refresh(symbols)
             earn_blocked, earn_days = earnings.blocked_map(symbols)
@@ -103,6 +105,7 @@ def main() -> int:
         earnings_blocked=earn_blocked or None,
         earnings_days=earn_days or None,
         llm_client=None,                 # base가 .env의 키로 실제 생성
+        telegram=for_market(market, sec),   # 국내장은 KR 채널(없으면 기본 채널)
         send_telegram=not args.no_telegram,
         notion=notion,
         notion_db_id=sec.notion_reco_db_id or None,
@@ -142,7 +145,8 @@ def main() -> int:
     print("\n===== 매도 신호 =====")
     if exits is not None and not exits.empty:
         for r in exits.itertuples():
-            print(f"  [EXIT] {r.symbol} — Exit_Score {r.exit_score}/5 · 종가 {r.close:,.2f}")
+            print(f"  [EXIT] {r.symbol} — Exit_Score {r.exit_score}/5 · 종가 "
+                  f"{fmt_price(market, r.close)}")
         print("  ※ 보유 중인 종목이면 청산 조건을 점검하세요")
     else:
         print("  없음")

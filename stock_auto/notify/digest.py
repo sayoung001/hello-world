@@ -33,6 +33,15 @@ def _clip(v, n: int) -> str:
     return s if len(s) <= n else s[: n - 1].rstrip() + "…"
 
 
+def _etf_line(etfs: list) -> str:
+    """국내장 관련 ETF 한 줄 — 'KODEX 반도체(091160) · 지수 KODEX 200(069500)'."""
+    try:
+        from stock_auto.markets.kr.etf import format_line
+        return format_line(etfs)
+    except Exception:  # noqa: BLE001
+        return " · ".join(f"{e.get('name')}({e.get('code')})" for e in etfs)
+
+
 def _num(v, fmt: str = "{:,.2f}") -> str:
     try:
         if v is None or v == "":
@@ -151,6 +160,12 @@ def batch_digest(result: Any, sector_lines: Optional[list[str]] = None,
 
     if recos:
         rows = [] if cands is None or cands.empty else cands.to_dict("records")
+        # 가격 표기는 시장 통화 — 원화에 소수점을 붙이면 '72,500.00' 처럼 읽기 어렵다
+        from stock_auto.markets import fmt_price
+        mkt = getattr(result, "market", None) or "US"
+        pf = lambda v: fmt_price(mkt, v)   # noqa: E731
+        etf_map = getattr(result, "etf_map", {}) or {}
+        names = getattr(result, "names", {}) or {}
         for i, r in enumerate(recos[:max_reco]):
             row = rows[i] if i < len(rows) else {}
             sym = row.get("symbol") or r.get("ticker") or "-"
@@ -162,18 +177,21 @@ def batch_digest(result: Any, sector_lines: Optional[list[str]] = None,
                 "",
                 # 확신도 뒤에 '그래서 뭘 다르게 하나'를 붙인다. 숫자만 보여주면
                 # 읽는 사람이 0.52 와 0.68 로 무엇을 달리할지 알 수 없다.
-                f"{i + 1}. {sym}  [{r.get('recommend', '-')}/{r.get('horizon', '-')}] "
+                f"{i + 1}. {sym}{(' ' + names[str(sym)]) if names.get(str(sym)) else ''}"
+                f"  [{r.get('recommend', '-')}/{r.get('horizon', '-')}] "
                 f"확신 {_num(r.get('conviction'), '{:.2f}')}"
                 + (f" ({_action_hint(r.get('conviction'))})"
                    if _action_hint(r.get('conviction')) else ""),
                 f"   Eff {_num(row.get('effective_score'))} · "
-                f"종가 {_num(row.get('close'))} · {row.get('strategies', '-')}{earn}",
+                f"종가 {pf(row.get('close'))} · {row.get('strategies', '-')}{earn}",
                 # 220자 — 요즘 진입 문장은 150~230자다. 120 에서 자르면 '분할 진입'
                 # '손절선 위 지지' 같은 뒷부분이 폰 알림에서 사라진다.
                 f"   진입: {_clip(r.get('entry_rule'), 220)}",
-                f"   손절 {_num(r.get('stop'))} · "
-                f"목표 {', '.join(_num(t) for t in targets) or '-'} · "
+                f"   손절 {pf(r.get('stop'))} · "
+                f"목표 {', '.join(pf(t) for t in targets) or '-'} · "
                 f"R:R {_num(row.get('rr_ratio'), '{:.2f}')}",
+            ] + ([f"   관련 ETF: {_etf_line(etf_map[str(sym)])}"]
+                 if etf_map.get(str(sym)) else []) + [
                 f"   당일 예상 P10 {_num(pnl.get('p10_pct'), '{:+.1f}')}% / "
                 f"P50 {_num(pnl.get('p50_pct'), '{:+.1f}')}% / "
                 f"P90 {_num(pnl.get('p90_pct'), '{:+.1f}')}%",

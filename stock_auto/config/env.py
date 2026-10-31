@@ -58,10 +58,17 @@ class Secrets:
     # Telegram
     telegram_bot_token: str
     telegram_chat_id: str
+    # 국내장 전용 텔레그램(선택). 비어 있으면 국내장 알림도 위 기본 채널로 간다.
+    telegram_kr_bot_token: str = ""
+    telegram_kr_chat_id: str = ""
 
     @property
     def has_kis(self) -> bool:
         return bool(self.kis_app_key and self.kis_app_secret)
+
+    @property
+    def has_telegram_kr(self) -> bool:
+        return bool(self.telegram_kr_bot_token and self.telegram_kr_chat_id)
 
     @property
     def has_anthropic(self) -> bool:
@@ -94,4 +101,6 @@ def get_secrets(load: bool = True) -> Secrets:
         notion_trigger_db_id=g("NOTION_TRIGGER_DB_ID", ""),
         telegram_bot_token=g("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=g("TELEGRAM_CHAT_ID", ""),
+        telegram_kr_bot_token=g("TELEGRAM_KR_BOT_TOKEN", ""),
+        telegram_kr_chat_id=g("TELEGRAM_KR_CHAT_ID", ""),
     )

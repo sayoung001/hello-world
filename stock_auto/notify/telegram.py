@@ -38,6 +38,23 @@ def chunk_text(text: str, limit: int = MAX_MESSAGE_LEN) -> list[str]:
     return out
 
 
+def for_market(market, sec=None) -> "Telegram":
+    """시장별 채널. 국내장은 TELEGRAM_KR_* 가 있으면 그쪽, 없으면 기본 채널.
+
+    "국장 알림은 따로 받고 싶다"는 요구의 확장점이다. 채널을 나누는 코드는 여기
+    한 곳이고, 호출측은 for_market(market) 만 부른다. 국내장 전용 토큰이 없을 때
+    기본 채널로 가는 건 의도된 폴백 — 알림이 조용히 사라지는 것보다 섞여 오는 쪽이 낫다.
+    """
+    from stock_auto.config.settings import Market
+    if sec is None:
+        from stock_auto.config.env import get_secrets
+        sec = get_secrets()
+    m = Market(market.upper()) if isinstance(market, str) else market
+    if m == Market.KR and getattr(sec, "has_telegram_kr", False):
+        return Telegram(sec.telegram_kr_bot_token, sec.telegram_kr_chat_id)
+    return Telegram(sec.telegram_bot_token, sec.telegram_chat_id)
+
+
 class Telegram:
     def __init__(self, token: Optional[str] = None, chat_id: Optional[str] = None):
         self.token = token or os.environ.get("TELEGRAM_BOT_TOKEN", "")

@@ -56,12 +56,14 @@ def run_agents(
     value_a = ValueAgent(client=client)
     pm = PortfolioAgent(client=client)
 
-    # 뉴스 수집(미국만)
+    # 뉴스 수집 — 시장별 소스(markets.<us|kr>.news). 국내장은 회사명으로 구글뉴스(ko).
     tickers = [r["symbol"] for r in rows]
-    news_map: dict[str, list[NewsItem]] = (
-        collect_for_tickers(tickers, html_text=news_html)
-        if market == Market.US else {t: [] for t in tickers}
-    )
+    try:
+        news_map: dict[str, list[NewsItem]] = collect_for_tickers(
+            tickers, html_text=news_html, market=market)
+    except Exception as e:  # noqa: BLE001 — 뉴스가 없어도 추천은 나와야 한다
+        print(f"[agents] 뉴스 수집 실패({type(e).__name__}: {e}) — 뉴스 없이 진행")
+        news_map = {t: [] for t in tickers}
 
     # 실측 기저율은 한 번만 읽는다(종목마다 CSV 를 다시 읽을 이유가 없다)
     prior_rows: list = []
@@ -74,14 +76,13 @@ def run_agents(
     # 오늘의 시장 뉴스 — 종목 무관 시장 맥락. 모든 PM 호출에 같은 덩어리가 들어간다.
     # 세이브티커 SAVE PICK 이 있으면 그것, 없으면 공개 RSS(CNBC·MarketWatch·야후).
     market_news, market_news_label = "", ""
-    if market == Market.US:
-        try:
-            from stock_auto.agents.news_collector import market_news_text
-            market_news, market_news_label = market_news_text()
-        except Exception as e:  # noqa: BLE001
-            print(f"[agents] 시장 뉴스 수집 실패: {type(e).__name__}: {e}")
-        n_lines = market_news.count("\n") + 1 if market_news else 0
-        print(f"[agents] 시장 뉴스 {n_lines}건 ({market_news_label or '없음'})")
+    try:
+        from stock_auto.agents.news_collector import market_news_text
+        market_news, market_news_label = market_news_text(market=market)
+    except Exception as e:  # noqa: BLE001
+        print(f"[agents] 시장 뉴스 수집 실패: {type(e).__name__}: {e}")
+    n_lines = market_news.count("\n") + 1 if market_news else 0
+    print(f"[agents] 시장 뉴스 {n_lines}건 ({market_news_label or '없음'})")
 
     out = AgentPipelineResult()
     for r in rows:

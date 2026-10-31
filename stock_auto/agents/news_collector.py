@@ -1,30 +1,18 @@
 """
-뉴스 수집 — 티커별 RSS(야후·구글뉴스) 우선, saveticker 는 보조.
+뉴스 수집 — 시장별 소스 체인(markets.<us|kr>.news)에서 받아 종목별로 합친다.
 
-왜 바꿨나:
-  원래는 saveticker.com/news 한 페이지만 긁었다. VM 에서 매 배치 403 이
-  났고(봇 식별 UA + 사이트 차단), 소스가 하나뿐이라 그 순간 15종목 전부가
-  "수집된 뉴스 없음"이 됐다. 분석 3종 중 뉴스 다리가 운영에서 늘 죽어 있던
-  셈이다. 게다가 saveticker 파서는 DOM 을 라이브로 확정한 적이 없었다.
-
-  RSS 는 기계용 공개 피드라 차단이 드물고 형식이 안정적이다. 종목별로
-  받으므로 "전체 뉴스 페이지에서 티커를 추측해 매칭"하던 불확실한 단계도
-  사라진다. 소스를 체인으로 두어 하나가 죽어도 나머지로 간다.
-
-소스(STOCK_NEWS_SOURCES 로 순서·선택, 기본 "saveticker,yahoo,google"):
-  saveticker  PC 확장이 git 저장소에 올린 로컬 데이터(data/saveticker_store) — 종목 태그 정확
-  yahoo       https://feeds.finance.yahoo.com/rss/2.0/headline?s=<T>  (클라우드 IP 는 429 가 잦다)
-  google      https://news.google.com/rss/search?q="<회사명>" OR "<거래소>: <T>"
-              회사명·거래소는 data/us_exchange 캐시에서. 없으면 '<T> stock'.
+이 모듈은 **수집 로직만** 가진다(HTTP·RSS 파싱·중복 제거·소스 차단기). 어떤 피드를
+어떤 검색어로 치는지는 시장 모듈이 정한다:
+  markets/us/news.py  야후·구글뉴스(en)·세이브티커(로컬) + CNBC·MarketWatch 시장 헤드라인
+  markets/kr/news.py  구글뉴스(ko, 회사명) + 연합뉴스 경제 RSS
 
 소스 차단기: 한 소스에서 429/403 이 연속 BREAKER_AFTER 번이면 이번 배치는 그 소스를
 접고 다음 소스로 간다(남은 종목마다 두드려 로그만 늘리지 않는다).
 
-시장 전체 헤드라인(PM 의 시장 맥락): 세이브티커 SAVE PICK → 없으면 공개 RSS(아래 MARKET_FEEDS).
+시장 전체 헤드라인(PM 의 시장 맥락): 시장 모듈의 market_picks_text(세이브티커 PICK)
+→ 없으면 공개 RSS(MARKET_FEEDS).
 
-의존성: requests + 표준 xml.etree. feedparser 등 추가 설치 없음.
-네트워크 없는 환경에서는 parse_rss()/parse_html() 에 받아 둔 본문을 넣어
-파서만 검증할 수 있다.
+네트워크 없는 환경에서는 fetch 인자를 바꿔 끼워 체인 로직을 검증한다.
 """
 
 from __future__ import annotations
@@ -34,47 +22,28 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Callable, Optional
 
+from stock_auto.config.settings import Market
+from stock_auto.markets import news_module
+
+# ── 미국 소스 상수 재노출(호환) — 새 코드는 markets.us.news 를 직접 본다 ──
+from stock_auto.markets.us.news import (  # noqa: F401
+    YAHOO_RSS, GOOGLE_RSS, MARKET_FEEDS, DEFAULT_SOURCES, DEFAULT_MARKET_SOURCES,
+    google_query, market_picks_text)
+
 SAVETICKER_NEWS_URL = "https://www.saveticker.com/news"
-YAHOO_RSS = ("https://feeds.finance.yahoo.com/rss/2.0/headline"
-             "?s={ticker}&region=US&lang=en-US")
-GOOGLE_RSS = ("https://news.google.com/rss/search"
-              "?q={query}&hl=en-US&gl=US&ceid=US:en")
-_EXCH_WORD = {"NAS": "NASDAQ", "NYS": "NYSE", "AMS": "NYSE American"}
-
-
-def google_query(ticker: str, name: str = "", exch: str = "") -> str:
-    """구글뉴스 검색어(URL 인코딩 전).
-
-    'IT stock' 은 정보기술 기사 90건을 받아 온다 — Gartner 와 무관하다.
-    회사명이 있으면 회사명으로, 보도자료 표기("NYSE: IT")도 함께 건다.
-    회사명이 없으면 예전처럼 '<티커> stock'. 짧은 티커의 한계는 남는다.
-    """
-    t = ticker.upper().strip()
-    parts = []
-    if name:
-        parts.append(f'"{name}"')
-    ex = _EXCH_WORD.get((exch or "").upper())
-    if ex:
-        parts.append(f'"{ex}: {t}"')
-    if not parts:
-        return f"{t} stock"
-    return " OR ".join(parts)
-
-DEFAULT_SOURCES = "saveticker,yahoo,google"
 MAX_PER_TICKER = 15          # NewsAgent 가 news[:15] 만 쓴다
 REQUEST_GAP_SEC = 0.3        # 종목별 연속 요청 사이 간격(예의상 rate limit)
+MARKET_HEADLINE_LIMIT = 20
 
-# 봇 식별 UA("StockAuto news collector")가 403 의 한 원인이었다.
-# 일반 브라우저 UA 로 보낸다. RSS 는 어차피 공개 피드다.
 _HEADERS = {
     "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
     "Accept": "application/rss+xml, application/xml, text/xml, text/html;q=0.9, */*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Language": "en-US,en;q=0.9,ko;q=0.8",
 }
 
 
@@ -90,7 +59,7 @@ class NewsItem:
 # ──────────────────────────────────────────────────────────────────────────
 # HTTP
 # ──────────────────────────────────────────────────────────────────────────
-# 마지막 실패의 HTTP 상태 — 소스 차단기(아래)가 429/403 을 구분하는 데 쓴다.
+# 마지막 실패의 HTTP 상태 — 소스 차단기가 429/403 을 구분하는 데 쓴다.
 LAST_FAIL: dict[str, Optional[int]] = {"status": None}
 # 같은 소스에서 연속 이만큼 429/403 이면 이번 배치는 그 소스를 접는다.
 BREAKER_AFTER = 2
@@ -139,14 +108,12 @@ def parse_rss(xml_text: str, ticker: str, default_source: str) -> list[NewsItem]
         return out
     for item in root.iter("item"):
         title = html.unescape((item.findtext("title") or "").strip())
-        if len(title) < 15:
+        if len(title) < 8:
             continue
         link = (item.findtext("link") or "").strip()
         src_el = item.find("source")
         source = (src_el.text or "").strip() if src_el is not None and src_el.text else default_source
-        # 구글뉴스는 제목 끝에 " - 매체명" 을 붙인다. 같은 기사가 야후에서는
-        # 꼬리 없이 와서 중복 제거가 안 되고 LLM 이 같은 헤드라인을 두 번 본다.
-        # 매체명은 source 에 따로 있으니 제목에서는 떼어낸다.
+        # 구글뉴스는 제목 끝에 " - 매체명" 을 붙인다. 중복 제거를 위해 떼어낸다.
         if source and title.endswith(f" - {source}"):
             title = title[: -len(f" - {source}")].rstrip()
         pub = item.findtext("pubDate") or ""
@@ -156,7 +123,7 @@ def parse_rss(xml_text: str, ticker: str, default_source: str) -> list[NewsItem]
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# saveticker HTML 파서 — 보조 소스로만 남긴다
+# saveticker HTML 파서 — 호환용으로만 남긴다
 # ──────────────────────────────────────────────────────────────────────────
 def parse_html(html_text: str) -> list[NewsItem]:
     """HTML → NewsItem. bs4 있으면 사용, 없으면 정규식 폴백. 티커는 추측이다."""
@@ -231,120 +198,31 @@ def _dedup_recent(items: list[NewsItem], limit: int = MAX_PER_TICKER) -> list[Ne
     return uniq[:limit]
 
 
-def _best_title(it) -> str:
-    """한글 번역 제목이 있으면 그걸, 없으면 영문. LLM 은 한국어로 쓴다."""
-    t = (it.title or "").replace("[SAVE PICK]", "").strip()
-    return t or (it.title_en or "").strip()
+def _mkt(market) -> Market:
+    return Market(market.upper()) if isinstance(market, str) else (market or Market.US)
 
 
-def market_picks_text(days: int = 1, limit: int = 20) -> str:
-    """오늘의 SAVE PICK(편집자 선정 주요뉴스)을 종목 무관하게 한 덩어리로.
-
-    종목별 NewsAgent 가 아니라 **PortfolioAgent 의 시장 맥락**으로 들어간다.
-    모든 종목 호출에 같은 덩어리가 들어가므로 1,024 토큰을 넘기면 프롬프트
-    캐시를 탄다. 데이터가 없으면 빈 문자열 — 호출측이 섹션을 생략한다.
-    """
-    try:
-        from stock_auto.data import saveticker_store as SS
-        items = SS.picks(days=days)[:limit]
-    except Exception:  # noqa: BLE001
-        return ""
-    if not items:
-        return ""
-    lines = []
-    for it in items:
-        tk = f" [{' '.join(it.tickers[:4])}]" if it.tickers else ""
-        lines.append(f"- {_best_title(it)}{tk} ({it.source or 'saveticker'}, {it.kst_date})")
-    return "\n".join(lines)
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# 시장 전체 헤드라인 — 세이브티커 SAVE PICK 이 없을 때의 공개 RSS 대체
-# ──────────────────────────────────────────────────────────────────────────
-# 종목별 뉴스는 위 체인(야후·구글)이 이미 받는다. 비어 있던 것은 **시장 맥락**
-# 블록이었다: PM 프롬프트의 "오늘 주요뉴스"가 세이브티커 PICK 만 보고 있어서
-# PC 수집이 없는 날은 PM 이 시장 분위기를 전혀 모른 채 종목을 판단했다.
-# 공개 RSS 는 편집자 선별(PICK)만큼 정제돼 있지는 않지만, 없는 것보다 낫다.
-MARKET_FEEDS: dict[str, str] = {
-    "cnbc": "https://www.cnbc.com/id/100003114/device/rss/rss.html",       # Top News
-    "cnbc_finance": "https://www.cnbc.com/id/10000664/device/rss/rss.html",  # Finance
-    "marketwatch": "https://feeds.content.dowjones.io/public/rss/mw_topstories",
-    "yahoo_market": "https://finance.yahoo.com/news/rssindex",
-    "google_market": ("https://news.google.com/rss/search"
-                      "?q=stock+market+when:1d&hl=en-US&gl=US&ceid=US:en"),
-}
-DEFAULT_MARKET_SOURCES = "cnbc,marketwatch,yahoo_market"
-MARKET_HEADLINE_LIMIT = 20
-
-
-def market_sources_from_env() -> list[str]:
-    raw = os.environ.get("STOCK_MARKET_NEWS_SOURCES", DEFAULT_MARKET_SOURCES)
-    return [s.strip().lower() for s in raw.split(",") if s.strip() and s.strip().lower() in MARKET_FEEDS]
-
-
-def market_headlines(fetch: Callable[[str], Optional[str]] = fetch_text,
-                     sources: Optional[list[str]] = None,
-                     limit: int = MARKET_HEADLINE_LIMIT,
-                     days: int = 2) -> list[NewsItem]:
-    """공개 RSS 에서 시장 헤드라인. 최근 days 일 것만, 제목 중복 제거, 최신순."""
-    chain = sources if sources is not None else market_sources_from_env()
-    items: list[NewsItem] = []
-    cutoff = ""
-    try:
-        from datetime import timedelta
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
-    except Exception:  # noqa: BLE001
-        pass
-    for i, src in enumerate(chain):
-        if i:
-            time.sleep(REQUEST_GAP_SEC)
-        body = fetch(MARKET_FEEDS[src])
-        if not body:
-            continue
-        for it in parse_rss(body, "", src):
-            # 날짜를 읽을 수 있고 너무 오래됐으면 버린다. 날짜 없는 건 둔다.
-            if cutoff and re.match(r"\d{4}-\d{2}-\d{2}", it.published) and it.published < cutoff:
-                continue
-            items.append(it)
-    return _dedup_recent(items, limit)
-
-
-def market_headlines_text(fetch: Callable[[str], Optional[str]] = fetch_text,
-                          sources: Optional[list[str]] = None,
-                          limit: int = MARKET_HEADLINE_LIMIT) -> str:
-    items = market_headlines(fetch, sources, limit)
-    return "\n".join(f"- {it.headline} ({it.source}, {it.published or '-'})" for it in items)
-
-
-def market_news_text(fetch: Callable[[str], Optional[str]] = fetch_text
-                     ) -> tuple[str, str]:
-    """(본문, 출처 라벨). 세이브티커 PICK 이 있으면 그것, 없으면 공개 RSS.
-
-    라벨은 PM 프롬프트 머리말과 로그에 쓴다 — 어느 쪽을 봤는지 나중에 알아야
-    '뉴스가 성과를 더하는가' 표를 소스별로 나눌 수 있다.
-    """
-    picks = market_picks_text()
-    if picks:
-        return picks, "SAVE PICK"
-    text = market_headlines_text(fetch)
-    if text:
-        srcs = market_sources_from_env()
-        return text, "공개 RSS " + "/".join(srcs)
-    return "", ""
-
-
-def sources_from_env() -> list[str]:
-    raw = os.environ.get("STOCK_NEWS_SOURCES", DEFAULT_SOURCES)
+def sources_from_env(market: Market | str = Market.US) -> list[str]:
+    mod = news_module(_mkt(market))
+    raw = os.environ.get(mod.SOURCES_ENV, mod.DEFAULT_SOURCES)
     return [s.strip().lower() for s in raw.split(",") if s.strip()]
+
+
+def market_sources_from_env(market: Market | str = Market.US) -> list[str]:
+    mod = news_module(_mkt(market))
+    raw = os.environ.get(mod.MARKET_SOURCES_ENV, mod.DEFAULT_MARKET_SOURCES)
+    return [s.strip().lower() for s in raw.split(",")
+            if s.strip() and s.strip().lower() in mod.MARKET_FEEDS]
 
 
 def collect_for_tickers(tickers: list[str],
                         html_text: Optional[str] = None,
                         fetch: Callable[[str], Optional[str]] = fetch_text,
                         sources: Optional[list[str]] = None,
+                        market: Market | str = Market.US,
                         ) -> dict[str, list[NewsItem]]:
     """
-    티커별 뉴스. 소스 체인을 순서대로 시도하고 결과를 합친다.
+    종목별 뉴스. 시장 모듈의 소스 체인을 순서대로 시도하고 결과를 합친다.
 
     html_text 를 주면 (호환·테스트용) saveticker 파서만 돌린다.
     fetch 를 바꿔 끼우면 네트워크 없이 체인 로직을 검증할 수 있다.
@@ -353,44 +231,37 @@ def collect_for_tickers(tickers: list[str],
     if html_text is not None:
         return _match_saveticker(parse_html(html_text), tickers)
 
-    chain = sources if sources is not None else sources_from_env()
+    m = _mkt(market)
+    mod = news_module(m)
+    chain = sources if sources is not None else sources_from_env(m)
     out: dict[str, list[NewsItem]] = {t: [] for t in tickers}
     stats: dict[str, int] = {}
     skipped: dict[str, str] = {}
 
-    # 회사명·거래소 — 구글 검색어 정밀도용. 캐시가 없으면 티커로만 간다.
-    names: dict[str, str] = {}
-    exch: dict[str, str] = {}
+    # 검색어 정밀도용 부가 정보(회사명·거래소). 캐시가 없으면 빈 dict.
     try:
-        from stock_auto.data import us_exchange
-        names = us_exchange.load_names(tickers)
-        exch = us_exchange.load_map(tickers)
+        ctx = mod.context(tickers) or {}
     except Exception:  # noqa: BLE001
-        pass
+        ctx = {}
+    names = ctx.get("names", {}) or {}
 
-    # 종목별 RSS 소스
-    from urllib.parse import quote_plus
+    # 종목별 원격 소스
     for src in chain:
-        if src not in ("yahoo", "google"):
+        builder = mod.TICKER_SOURCES.get(src)
+        if builder is None:
             continue
         got = 0
         consecutive = 0
         for i, t in enumerate(tickers):
             if i:
                 time.sleep(REQUEST_GAP_SEC)
-            if src == "yahoo":
-                url = YAHOO_RSS.format(ticker=t)
-            else:
-                url = GOOGLE_RSS.format(query=quote_plus(
-                    google_query(t, names.get(t.upper(), ""), exch.get(t.upper(), ""))))
-            body = fetch(url)
+            body = fetch(builder(t, ctx))
             if not body:
-                # 429/403 이 연속이면 이 소스는 오늘 막힌 것이다. 남은 종목까지
-                # 두드려 로그만 6줄 늘리지 말고 다음 소스로 넘어간다.
                 if LAST_FAIL.get("status") in (429, 403):
                     consecutive += 1
                     if consecutive >= BREAKER_AFTER:
-                        skipped[src] = f"{LAST_FAIL['status']} 연속 — 나머지 {len(tickers) - i - 1}종목 생략"
+                        skipped[src] = (f"{LAST_FAIL['status']} 연속 — 나머지 "
+                                        f"{len(tickers) - i - 1}종목 생략")
                         break
                 continue
             consecutive = 0
@@ -399,35 +270,92 @@ def collect_for_tickers(tickers: list[str],
             got += len(items)
         stats[src] = got
 
-    # saveticker — VM 이 직접 받지 않는다(클라우드플레어). PC 확장이 수집해 git
-    # 저장소에 올린 것을 로컬에서 읽는다. 종목 태그가 있어 추측 매칭이 없다.
-    if "saveticker" in chain:
+    # 로컬 소스(미국: 세이브티커 저장소) — 체인에 이름이 있을 때만
+    local_names = [s for s in chain if s not in mod.TICKER_SOURCES]
+    if local_names:
         try:
-            from stock_auto.data import saveticker_store as SS
             got = 0
-            for t, its in SS.items_for(tickers, days=2).items():
-                for it in its[:MAX_PER_TICKER]:
-                    out[t].append(NewsItem(
-                        ticker=t, headline=_best_title(it), url=it.url,
-                        source=("SAVE PICK" if it.is_pick else (it.source or "saveticker")),
-                        published=it.kst_date))
+            for t, its in (mod.local_items(tickers) or {}).items():
+                for d in its:
+                    out.setdefault(t, []).append(NewsItem(
+                        ticker=t, headline=d.get("headline", ""), url=d.get("url", ""),
+                        source=d.get("source", ""), published=d.get("published", "")))
                     got += 1
-            stats["saveticker"] = got
-        except Exception as e:  # noqa: BLE001 — 데이터 저장소가 없어도 체인은 간다
-            print(f"[news_collector] saveticker 로컬 읽기 실패: {type(e).__name__}: {e}")
-            stats["saveticker"] = 0
+            stats[local_names[0]] = got
+        except Exception as e:  # noqa: BLE001 — 로컬 저장소가 없어도 체인은 간다
+            print(f"[news_collector] 로컬 소스 읽기 실패: {type(e).__name__}: {e}")
+            stats[local_names[0]] = 0
 
     for t in tickers:
         out[t] = _dedup_recent(out[t])
 
     n_with = sum(1 for t in tickers if out[t])
-    print(f"[news_collector] {n_with}/{len(tickers)}종목 뉴스 확보 · "
+    print(f"[news_collector] {m.value} {n_with}/{len(tickers)}종목 뉴스 확보 · "
           + " · ".join(f"{k} {v}건" for k, v in stats.items())
-          + (f" · 회사명 검색 {sum(1 for t in tickers if names.get(t.upper()))}/{len(tickers)}"
-             if "google" in chain else ""))
+          + (f" · 회사명 검색 {sum(1 for t in tickers if names.get(t.upper()) or names.get(t))}"
+             f"/{len(tickers)}" if "google" in chain else ""))
     for src, why in skipped.items():
         print(f"[news_collector] ⚠️ {src} 차단기 작동: {why} (다른 소스로 진행)")
     if tickers and n_with == 0:
         print("[news_collector] ⚠️ 모든 소스에서 0건 — 네트워크/차단을 의심하세요. "
               f"소스={chain}")
     return out
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 시장 전체 헤드라인 — PM 의 시장 맥락
+# ──────────────────────────────────────────────────────────────────────────
+def market_headlines(fetch: Callable[[str], Optional[str]] = fetch_text,
+                     sources: Optional[list[str]] = None,
+                     limit: int = MARKET_HEADLINE_LIMIT,
+                     days: int = 2,
+                     market: Market | str = Market.US) -> list[NewsItem]:
+    """공개 RSS 에서 시장 헤드라인. 최근 days 일 것만, 제목 중복 제거, 최신순."""
+    m = _mkt(market)
+    mod = news_module(m)
+    chain = sources if sources is not None else market_sources_from_env(m)
+    items: list[NewsItem] = []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    for i, src in enumerate(chain):
+        if i:
+            time.sleep(REQUEST_GAP_SEC)
+        url = mod.MARKET_FEEDS.get(src)
+        if not url:
+            continue
+        body = fetch(url)
+        if not body:
+            continue
+        for it in parse_rss(body, "", src):
+            if re.match(r"\d{4}-\d{2}-\d{2}", it.published) and it.published < cutoff:
+                continue
+            items.append(it)
+    return _dedup_recent(items, limit)
+
+
+def market_headlines_text(fetch: Callable[[str], Optional[str]] = fetch_text,
+                          sources: Optional[list[str]] = None,
+                          limit: int = MARKET_HEADLINE_LIMIT,
+                          market: Market | str = Market.US) -> str:
+    items = market_headlines(fetch, sources, limit, market=market)
+    return "\n".join(f"- {it.headline} ({it.source}, {it.published or '-'})" for it in items)
+
+
+def market_news_text(fetch: Callable[[str], Optional[str]] = fetch_text,
+                     market: Market | str = Market.US) -> tuple[str, str]:
+    """(본문, 출처 라벨). 편집자 선정(세이브티커 PICK)이 있으면 그것, 없으면 공개 RSS.
+
+    라벨은 PM 프롬프트 머리말과 로그에 쓴다 — 어느 쪽을 봤는지 나중에 알아야
+    '뉴스가 성과를 더하는가' 표를 소스별로 나눌 수 있다.
+    """
+    m = _mkt(market)
+    mod = news_module(m)
+    try:
+        picks = mod.market_picks_text()
+    except Exception:  # noqa: BLE001
+        picks = ""
+    if picks:
+        return picks, "SAVE PICK"
+    text = market_headlines_text(fetch, market=m)
+    if text:
+        return text, "공개 RSS " + "/".join(market_sources_from_env(m))
+    return "", ""

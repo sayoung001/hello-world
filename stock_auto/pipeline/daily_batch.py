@@ -35,6 +35,9 @@ class BatchResult:
     screen: ScreenResult
     agents: AgentPipelineResult = field(default_factory=AgentPipelineResult)
     sector_lines: list[str] = field(default_factory=list)   # 섹터 현황 요약(게시용)
+    # 국내장: 추천 종목 → 관련 ETF [{code,name,kind}] (markets/kr/etf). 미국장은 비어 있다.
+    etf_map: dict[str, list[dict]] = field(default_factory=dict)
+    names: dict[str, str] = field(default_factory=dict)      # 국내장: 종목코드 → 회사명
 
 
 def _load_map(symbols: list[str], market: Market, start: str,
@@ -120,6 +123,19 @@ def run_daily(
             print(f"[batch] ⚠️ LLM 분석 전체 실패 — 규칙 시그널만 기록합니다 "
                   f"({type(e).__name__}: {e})")
 
+    # 3.4) 국내장: 추천·후보 종목에 관련 ETF 를 묶는다(한국투자증권에서 바로 주문 가능한
+    #      KRX 상장 ETF). 다이제스트·Notion 본문에 붙인다. 실패해도 추천은 간다.
+    if market == Market.KR and not screen.candidates.empty:
+        try:
+            from stock_auto.markets.kr import etf as kr_etf, universe as kru
+            codes = [str(s) for s in screen.candidates["symbol"].tolist()]
+            result.names = kru.load_names(codes)
+            result.etf_map = kr_etf.bundle(codes, names=result.names)
+            n_with = sum(1 for v in result.etf_map.values() if v)
+            print(f"[batch] 관련 ETF 묶음 {n_with}/{len(codes)}종목")
+        except Exception as e:  # noqa: BLE001
+            print(f"[batch] 관련 ETF 묶기 실패: {type(e).__name__}: {e}")
+
     # 3.5) 결과 라벨링 루프: 추천 전 건을 기록 (실행 여부 무관 — 선택 편향 방지)
     try:
         n = _record_signals(result)
@@ -177,10 +193,8 @@ def _send_charts(result: BatchResult, ohlcv_map: dict, telegram: Any = None) -> 
     limit = int(os.environ.get("STOCK_CHART_MAX", "5") or 5)
     tg = telegram
     if tg is None:
-        from stock_auto.config.env import get_secrets
-        from stock_auto.notify.telegram import Telegram
-        sec = get_secrets()
-        tg = Telegram(sec.telegram_bot_token, sec.telegram_chat_id)
+        from stock_auto.notify.telegram import for_market
+        tg = for_market(result.market)        # 국내장은 KR 채널(없으면 기본)
     rows = ([] if result.screen.candidates.empty
             else result.screen.candidates.to_dict("records"))
     by_sym = {str(r.get("symbol")): r for r in rows}
@@ -214,10 +228,8 @@ def _send_digest(result: BatchResult, telegram: Any = None) -> None:
     from stock_auto.notify.digest import batch_digest
     tg = telegram
     if tg is None:
-        from stock_auto.config.env import get_secrets
-        from stock_auto.notify.telegram import Telegram
-        sec = get_secrets()
-        tg = Telegram(sec.telegram_bot_token, sec.telegram_chat_id)
+        from stock_auto.notify.telegram import for_market
+        tg = for_market(result.market)        # 국내장은 KR 채널(없으면 기본)
     text = batch_digest(result, result.sector_lines or None)
     if getattr(tg, "enabled", False):
         # parse_mode 없이 평문 — LLM 문장의 `_`·`*`가 Markdown 파싱을 깨뜨린다
@@ -332,9 +344,15 @@ def _publish_notion(notion, db_id, parent_page, result: BatchResult,
         for i, reco in enumerate(result.agents.recommendations):
             row = cands[i] if i < len(cands) else {}
             sym = row.get("symbol") or reco.get("ticker", "-")
+            children = None
+            etfs = (result.etf_map or {}).get(str(sym))
+            if etfs:
+                from stock_auto.markets.kr.etf import format_line
+                from stock_auto.integrations.notion_publisher import _bullet
+                children = [_bullet(f"관련 ETF(KRX 상장·한국투자증권 주문 가능): {format_line(etfs)}")]
             notion.add_recommendation(
                 db_id, reco, result.market.value, as_of,
-                sector_label=sector_label_map.get(sym, "-"), row=row)
+                sector_label=sector_label_map.get(sym, "-"), row=row, children=children)
     # 일자 요약
     if parent_page:
         sl = result.screen.scored_all

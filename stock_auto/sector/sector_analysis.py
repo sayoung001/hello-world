@@ -85,16 +85,29 @@ US_SECTOR_TICKERS = {
 }
 
 # ── 한국 섹터 ETF 리스트 ──
-KR_SECTOR_TICKERS = {
-    '091160': {'name': 'KODEX 반도체',       'gics': 'Semiconductors'},
-    '091170': {'name': 'KODEX 은행',         'gics': 'Financials'},
-    '091180': {'name': 'KODEX 자동차',       'gics': 'Consumer Discretionary'},
-    '117700': {'name': 'KODEX 건설',         'gics': 'Industrials'},
-    '117460': {'name': 'KODEX 에너지화학',   'gics': 'Energy'},
-    '266370': {'name': 'KODEX 바이오',       'gics': 'Health Care'},
-    '305720': {'name': 'KODEX 2차전지',      'gics': 'Materials'},
-    '244580': {'name': 'KODEX 바이오(대형)', 'gics': 'Health Care'},
-}
+# 단일 출처는 markets/kr/etf.SECTORS 다(유니버스의 업종→섹터 ETF 와 같은 표를 쓴다).
+# 예전 하드코딩은 266370 을 'KODEX 바이오'로 적었는데 그 코드는 KODEX IT 다 —
+# 표가 둘로 갈려 서로 다른 소리를 했다. 아래는 그 표에서 만든다.
+def _kr_sector_tickers() -> dict:
+    try:
+        from stock_auto.markets.kr.etf import gate_tickers
+        t = gate_tickers()
+        if t:
+            return t
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        '091160': {'name': 'KODEX 반도체',     'gics': '반도체'},
+        '091170': {'name': 'KODEX 은행',       'gics': '은행'},
+        '091180': {'name': 'KODEX 자동차',     'gics': '자동차'},
+        '117700': {'name': 'KODEX 건설',       'gics': '건설'},
+        '117460': {'name': 'KODEX 에너지화학', 'gics': '화학'},
+        '305720': {'name': 'KODEX 2차전지산업', 'gics': '2차전지'},
+        '244580': {'name': 'KODEX 바이오',     'gics': '바이오'},
+    }
+
+
+KR_SECTOR_TICKERS = _kr_sector_tickers()
 
 
 # ============================================================

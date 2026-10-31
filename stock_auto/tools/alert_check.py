@@ -107,12 +107,12 @@ def inspect() -> dict[str, Any]:
         us_pend = sorted({r["symbol"] for r in pend if (r.get("market") or "US") == "US"})
         if us_pend:
             try:
-                from stock_auto.data import us_exchange
+                from stock_auto.markets.us import exchange as us_exchange
                 m = us_exchange.load_map(us_pend)
                 print(f"  KIS {us_exchange.summary(us_pend, m)}")
                 if len(m) < len(us_pend):
                     print("    ⚠️ 매핑 캐시 없음/부족 — 데몬이 개장 시 자동 갱신. 지금 받으려면:")
-                    print("       .venv/bin/python -m stock_auto.data.us_exchange "
+                    print("       .venv/bin/python -m stock_auto.markets.us.exchange "
                           + " ".join(us_pend[:5]))
             except Exception as e:  # noqa: BLE001
                 print(f"  {WARN} 거래소 매핑 확인 실패: {type(e).__name__}")

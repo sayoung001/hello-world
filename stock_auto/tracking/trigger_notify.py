@@ -92,7 +92,31 @@ ETF_CATEGORY = {
 
 
 def category_of(trigger: dict) -> str:
-    return ETF_CATEGORY.get(str(trigger.get("sector_etf", "")).upper(), "미상")
+    etf = str(trigger.get("sector_etf", "")).upper()
+    if etf in ETF_CATEGORY:
+        return ETF_CATEGORY[etf]
+    if str(trigger.get("market") or "").upper() == "KR":
+        # 국내 섹터 ETF(KODEX 반도체 …) → 섹터 키. markets/kr/etf.SECTORS 가 단일 출처.
+        try:
+            from stock_auto.markets.kr.etf import SECTORS
+            for key, s in SECTORS.items():
+                if s["etf"] and s["etf"] == etf:
+                    return key
+        except Exception:  # noqa: BLE001
+            pass
+    return "미상"
+
+
+def _kr_name_suffix(symbol: str, market: str) -> str:
+    """국내 종목코드 뒤에 회사명을 붙인다('005930 삼성전자'). 캐시가 없으면 빈 문자열."""
+    if str(market).upper() != "KR":
+        return ""
+    try:
+        from stock_auto.markets.kr.universe import load_names
+        nm = load_names([symbol]).get(symbol, "")
+        return f" {nm}" if nm else ""
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def iso_when(fired_at: str) -> str:
@@ -206,16 +230,24 @@ def short_alert(trigger: dict, fired_price: float, notion_url: str = "",
     status='cancelled' 는 "조건가에는 닿았지만 손절선 아래" — 제목부터 ⛔ 로 바꿔
     🎯 와 한눈에 구분되게 한다. 폰에서 첫 줄만 보고 사면 안 되는 경우다.
     """
-    sym = trigger.get("symbol", "-")
+    sym = str(trigger.get("symbol", "-"))
+    market = str(trigger.get("market") or "US")
+    label = sym + _kr_name_suffix(sym, market)      # 국내장: '005930 삼성전자'
     cond = _condition_text(trigger).split("  (")[0]
     bucket = HORIZON_BUCKET.get(str(trigger.get("horizon", "")), "중기")
     cat = category_of(trigger)
-    head = (f"⛔ {sym} 조건가 도달했지만 손절선 아래 — 진입 무효"
-            if status == "cancelled" else f"🎯 {sym} 진입 조건 도달")
+    head = (f"⛔ {label} 조건가 도달했지만 손절선 아래 — 진입 무효"
+            if status == "cancelled" else f"🎯 {label} 진입 조건 도달")
+    try:
+        from stock_auto.markets import fmt_price
+        price_txt = fmt_price(market, fired_price)      # 원화는 소수점 없이
+        stop_txt = fmt_price(market, trigger.get("stop")) if trigger.get("stop") else "-"
+    except Exception:  # noqa: BLE001
+        price_txt, stop_txt = f"{fired_price:,.2f}", str(trigger.get("stop") or "-")
     lines = [
         head,
-        f"{cond} · {fired_price:,.2f}",
-        f"{cat} · {bucket} · 손절 {trigger.get('stop') or '-'}",
+        f"{cond} · {price_txt}",
+        f"{cat} · {bucket} · 손절 {stop_txt}",
     ]
     for n in (notes or []):
         if status == "cancelled" and n.startswith("⛔"):

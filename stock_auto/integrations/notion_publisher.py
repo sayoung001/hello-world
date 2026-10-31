@@ -366,13 +366,18 @@ class NotionPublisher:
 
     def add_recommendation(self, db_id: str, reco: dict, market: str,
                            date: str, sector_label: str = "-",
-                           row: Optional[dict] = None) -> Optional[str]:
+                           row: Optional[dict] = None,
+                           children: Optional[list] = None) -> Optional[str]:
         # row(screener 행)는 Effective·종목명·섹터상태의 정답 출처다 — recommendation_row 참조.
         # parent는 Notion API 2025-09-03 의 data_source_id 방식(VM에서 마이그레이션).
+        # children: 행 페이지 본문(예: 국내장 관련 ETF). DB 속성을 늘리지 않고 본문에 둔다 —
+        #           기존 DB 스키마를 건드리면 add_row 가 400 으로 막힌다.
         props = recommendation_row(reco, market, date, sector_label, row)
-        res = self._post("/pages", {"parent": {"type": "data_source_id",
-                                               "data_source_id": db_id},
-                                    "properties": props})
+        payload: dict = {"parent": {"type": "data_source_id", "data_source_id": db_id},
+                         "properties": props}
+        if children:
+            payload["children"] = children[:100]
+        res = self._post("/pages", payload)
         return res.get("id") if res else None
 
     def create_summary_page(self, parent_page_id: str, title: str,

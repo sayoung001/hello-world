@@ -188,7 +188,7 @@ def main() -> int:
     earn_blocked = earn_days = {}
     if market == Market.US:
         try:
-            from stock_auto.data import earnings
+            from stock_auto.markets.us import earnings
             earnings.refresh(syms)
             earn_blocked, earn_days = earnings.blocked_map(syms)
             known = sum(1 for v in earn_days.values() if v is not None)

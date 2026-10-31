@@ -44,12 +44,13 @@ KR_SAMPLE: dict[str, str] = {
     "005930": "091160",  # 삼성전자 → 반도체
     "000660": "091160",  # SK하이닉스 → 반도체
     "373220": "305720",  # LG에너지솔루션 → 2차전지
-    "207940": "266370",  # 삼성바이오로직스 → 바이오
+    "207940": "244580",  # 삼성바이오로직스 → 바이오 (KODEX 바이오)
     "005380": "091180",  # 현대차 → 자동차
     "051910": "117460",  # LG화학 → 에너지화학
     "105560": "091170",  # KB금융 → 은행
-    "035420": "261060",  # NAVER → IT
+    "035420": "266370",  # NAVER → IT (KODEX IT)
 }
+# 섹터 ETF 코드의 단일 출처는 markets/kr/etf.SECTORS 다. 위 샘플은 오프라인 즉시 동작용.
 
 # ── 나스닥100(QQQ) 구성 중 S&P500에 없는 종목 ──
 # FinanceDataReader는 S&P500 구성종목은 제공하지만 나스닥100은 제공하지 않는다.
@@ -156,30 +157,22 @@ def fdr_universe(market: Market, top_n: Optional[int] = None) -> dict[str, str]:
     return uni
 
 
-def _krx_universe(top_n: int = 300) -> dict[str, str]:
-    """KR 확장성용. 시가총액 상위로 정렬(컬럼이 있을 때)."""
+def _krx_universe(top_n: Optional[int] = None) -> dict[str, str]:
+    """국내 유니버스 — markets/kr/universe 가 만든다(KRX 시총 상위 + 업종→섹터 ETF).
+    실패 시 (a) 마지막 스냅샷 → (b) 샘플 순 폴백. 미국장과 같은 규약."""
     try:
-        import FinanceDataReader as fdr
-        from stock_auto.sector.sector_map import get_sector_etf
-        df = fdr.StockListing("KRX")
-        sym_col = _pick(df, ("Code", "Symbol", "code"))
-        ind_col = _pick(df, ("Industry", "Sector", "industry"))
-        cap_col = _pick(df, ("Marcap", "MarketCap", "marcap"))
-        if sym_col is None:
-            raise ValueError("심볼 컬럼 없음")
-        if cap_col is not None:
-            df = df.sort_values(cap_col, ascending=False)
-        else:
-            print("[universe] ⚠️ KRX 시총 컬럼 없음 — 정렬 없이 앞에서 자릅니다")
-        out: dict[str, str] = {}
-        for _, r in df.head(top_n).iterrows():
-            sym = str(r[sym_col]).strip()
-            etf, _ = get_sector_etf(sym, str(r[ind_col]) if ind_col else "")
-            out[sym] = etf
-        return out or load_universe(Market.KR)
+        from stock_auto.markets.kr import universe as kru
+        uni = kru.build(top_n)
+        if uni:
+            return uni
     except Exception as e:  # noqa: BLE001
-        print(f"[universe] KRX 상장목록 실패({type(e).__name__}) → 샘플 사용")
-        return load_universe(Market.KR)
+        print(f"[universe] KRX 유니버스 실패({type(e).__name__}: {str(e)[:80]})")
+    cached = load_snapshot(Market.KR)
+    if cached:
+        print(f"[universe] ⚠️ 라이브 실패 → 마지막 KR 스냅샷 {len(cached)}종목 사용")
+        return cached
+    print("[universe] ⚠️ KR 라이브·스냅샷 모두 실패 → 샘플 8종목 사용")
+    return load_universe(Market.KR)
 
 
 def _pick(df, names: tuple[str, ...]) -> Optional[str]:

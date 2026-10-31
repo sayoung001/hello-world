@@ -77,7 +77,8 @@ def main() -> int:
           + (" …" if len(symbols) > 15 else ""))
 
     profiles = _load_profiles(market, symbols)
-    tg = Telegram(sec.telegram_bot_token, sec.telegram_chat_id)
+    from stock_auto.notify.telegram import for_market
+    tg = for_market(market, sec)             # 국내장은 KR 채널(없으면 기본)
     if not tg.enabled:
         print("⚠️ 텔레그램 미설정 — 알림은 콘솔로 출력")
 

@@ -1,12 +1,14 @@
 """
 자동 운영 데몬 (매일 자동 실행 + 자가보정 피드백).
 
-APScheduler(zoneinfo)로 거래소 현지시각 기준 트리거 → DST 자동:
-  - 일일 배치 + 프로파일 재구축:  US 마감(16:00 ET)+1h
-      ① 관측 저장소(전일 실시간 누적)로 프로파일 자가보정 재구축(--from-observations)
-      ② run_daily(US/KR) → 추천 → Notion 게시(아카이브) + Telegram 다이제스트(푸시)
-  - KR 개장(09:00 KST):  KR 모니터 스레드 시작(장중 누적 관측 적립 + 폭주 Telegram)
-  - US 개장(09:30 ET):   US 모니터 스레드 시작(동일)
+APScheduler(zoneinfo)로 거래소 현지시각 기준 트리거 → DST 자동. 시간표는 markets.SPECS:
+  - US 일일 배치:  KST 09:30 화~토 (미국장 다음날 아침)        STOCK_BATCH_TIME_KST
+      ⓪ 라벨링 · 세이브티커 동기화 · 거래소 캐시 · 트리거 일봉 평가
+      ① 관측 저장소로 프로파일 자가보정 재구축 ② run_daily → Notion + Telegram
+  - KR 일일 배치:  KST 16:10 월~금 (국내장 마감 뒤, 다음 날 개장용)  STOCK_BATCH_TIME_KR_KST
+      ENABLE_KR=1 일 때만. 관련 ETF 묶음 포함, 알림은 KR 채널(TELEGRAM_KR_*; 없으면 기본)
+  - US 개장(09:30 ET):   US 모니터 스레드(폭주 Telegram + 진입 트리거 장중 감시)
+  - KR 개장(09:00 KST):  KR 모니터 스레드(동일, ENABLE_KR=1)
 
 → 매일 돌수록 관측이 쌓여 프로파일이 실측으로 수렴(정적 frac → 실측 보정).
 
@@ -30,41 +32,33 @@ from stock_auto.realtime.volume_monitor import (
     SurgeMonitor, HistoricalProfile, DEFAULT_THRESHOLDS)
 from stock_auto.realtime import observation_store
 from stock_auto.data.kis_feed import KISFeed
-from stock_auto.notify.telegram import Telegram, surge_alert_callback
+from stock_auto.notify.telegram import Telegram, surge_alert_callback, for_market
+from stock_auto.markets import batch_time_kst, enabled_markets, spec as market_spec
 
 KST = ZoneInfo("Asia/Seoul")
 ET = ZoneInfo("America/New_York")
 
 
-def _batch_time_kst() -> tuple[int, int]:
-    """STOCK_BATCH_TIME_KST=HH:MM (기본 09:30). 잘못 적으면 기본값 + 경고."""
-    raw = os.environ.get("STOCK_BATCH_TIME_KST", "09:30").strip()
-    try:
-        h, m = raw.split(":")
-        h, m = int(h), int(m)
-        if 0 <= h < 24 and 0 <= m < 60:
-            return h, m
-    except ValueError:
-        pass
-    print(f"[daemon] ⚠️ STOCK_BATCH_TIME_KST={raw!r} 를 읽을 수 없어 09:30 으로 둡니다")
-    return 9, 30
+def _batch_time_kst(market: Market = Market.US) -> tuple[int, int]:
+    """시장별 배치 시각(KST) — markets.SPECS. (호환용 래퍼)"""
+    return batch_time_kst(market)
 
 
 def _active_markets() -> tuple[Market, ...]:
-    """US 집중. KR은 확장성용 — 환경변수 ENABLE_KR=1 일 때만 포함."""
-    if os.environ.get("ENABLE_KR", "").strip() in ("1", "true", "True"):
-        return (Market.US, Market.KR)
-    return (Market.US,)
+    """US 집중. KR은 ENABLE_KR=1 일 때만 포함 (markets.enabled_markets)."""
+    return enabled_markets()
 
 
-def _recalibrate_and_batch():
-    """일일 배치 + 프로파일 자가보정 재구축."""
+def _recalibrate_and_batch(markets: tuple[Market, ...] | None = None):
+    """일일 배치 + 프로파일 자가보정 재구축. markets 를 주면 그 시장만(시장별 시각에 따로 돈다)."""
     from stock_auto.realtime.profile_builder import save_profile, build_and_save
     from stock_auto.pipeline.daily_batch import run_daily
     from stock_auto.integrations.notion_publisher import NotionPublisher
     from stock_auto.config.clock import now_et
     sec = get_secrets()
-    print(f"[daemon] {now_et():%Y-%m-%d %H:%M %Z} 일일 배치 + 프로파일 재구축")
+    markets = tuple(markets) if markets else _active_markets()
+    print(f"[daemon] {now_et():%Y-%m-%d %H:%M %Z} 일일 배치 + 프로파일 재구축 "
+          f"({'/'.join(m.value for m in markets)})")
 
     # ⓪ 결과 라벨링 — 전일까지 쌓인 미라벨 신호에 TP/SL/타임아웃 결과를 붙인다.
     #    이 단계가 없으면 신호만 쌓이고 점수→승률 캘리브레이션이 영원히 갱신되지 않는다.
@@ -76,27 +70,10 @@ def _recalibrate_and_batch():
     except Exception as e:  # noqa: BLE001 — 라벨링 실패가 배치를 막지 않게
         print(f"[daemon] 결과 라벨링 실패: {type(e).__name__}: {e}")
 
-    # ⓪-1 세이브티커 수집 데이터 동기화 — PC 들이 올린 뉴스를 받아 온다.
-    #     실패해도 배치는 간다(뉴스 없이 추천하는 쪽이 추천을 안 하는 것보다 낫다).
-    try:
-        from stock_auto.data import saveticker_store
-        st = saveticker_store.sync()
-        mark = "✅" if st["ok"] else "⚠️"
-        print(f"[daemon] {mark} 세이브티커 {st['action']}: {st['detail'][:120]}")
-        if st["ok"]:
-            print(f"[daemon]    {saveticker_store.summary()}")
-    except Exception as e:  # noqa: BLE001
-        print(f"[daemon] 세이브티커 동기화 실패: {type(e).__name__}: {e}")
-
-    # ⓪-1.5 미국 종목 거래소·회사명 캐시 — 뉴스 검색어('"Gartner" OR "NYSE: IT"')와
-    #     실시간 구독 키(DNYS…)가 쓴다. 7일 캐시라 보통 즉시 끝난다.
-    try:
-        from stock_auto.data import us_exchange
-        r = us_exchange.refresh()
-        print(f"[daemon] 거래소·회사명 목록 {r['action']} ({r.get('n', 0)}종목)"
-              + ("" if r["ok"] else f" — {r.get('detail', '')[:80]}"))
-    except Exception as e:  # noqa: BLE001
-        print(f"[daemon] 거래소·회사명 목록 실패: {type(e).__name__}: {e}")
+    if Market.US in markets:
+        _us_chores()
+    if Market.KR in markets:
+        _kr_chores()
 
     # ⓪-2 진입 트리거 일봉 평가 — 장중 실시간 감시가 놓친 것을 받아낸다.
     #     RealtimeTriggerWatch(run_monitor)만으로는 구멍이 있다:
@@ -121,7 +98,7 @@ def _recalibrate_and_batch():
     except Exception as e:  # noqa: BLE001 — 트리거 평가 실패가 배치를 막지 않게
         print(f"[daemon] 트리거 일봉 평가 실패: {type(e).__name__}: {e}")
 
-    for market in _active_markets():
+    for market in markets:
         uni_map = resolve_universe(market)
         syms = list(uni_map.keys())
         print(f"[daemon] {market.value} 유니버스 N={len(syms)}")
@@ -168,6 +145,7 @@ def _recalibrate_and_batch():
                   sector_lines=(summary_lines(sec_scores, sec_labels, market)
                                 if sec_scores else None),
                   notion=notion, send_telegram=True,
+                  telegram=for_market(market, sec),     # 국내장은 KR 채널(없으면 기본)
                   notion_db_id=sec.notion_reco_db_id or None,
                   notion_parent_page=sec.notion_parent_page_id or None,
                   run_llm=sec.has_anthropic)
@@ -180,6 +158,45 @@ def _recalibrate_and_batch():
         print(f"[daemon] 보유일 곡선 갱신 {fs['updated']}건 · 대시보드 → {dp}")
     except Exception as e:  # noqa: BLE001
         print(f"[daemon] 보유일 곡선/대시보드 실패: {type(e).__name__}: {e}")
+
+
+def _us_chores() -> None:
+    """미국장 배치 앞 준비 — 세이브티커 동기화, 거래소·회사명 캐시. 실패해도 배치는 간다."""
+    # 세이브티커 수집 데이터 동기화 — PC 들이 올린 뉴스를 받아 온다.
+    try:
+        from stock_auto.markets.us import saveticker_store
+        st = saveticker_store.sync()
+        mark = "✅" if st["ok"] else "⚠️"
+        print(f"[daemon] {mark} 세이브티커 {st['action']}: {st['detail'][:120]}")
+        if st["ok"]:
+            print(f"[daemon]    {saveticker_store.summary()}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[daemon] 세이브티커 동기화 실패: {type(e).__name__}: {e}")
+    # 미국 종목 거래소·회사명 캐시 — 뉴스 검색어('"Gartner" OR "NYSE: IT"')와
+    # 실시간 구독 키(DNYS…)가 쓴다. 7일 캐시라 보통 즉시 끝난다.
+    try:
+        from stock_auto.markets.us import exchange as us_exchange
+        r = us_exchange.refresh()
+        print(f"[daemon] 거래소·회사명 목록 {r['action']} ({r.get('n', 0)}종목)"
+              + ("" if r["ok"] else f" — {r.get('detail', '')[:80]}"))
+    except Exception as e:  # noqa: BLE001
+        print(f"[daemon] 거래소·회사명 목록 실패: {type(e).__name__}: {e}")
+
+
+def _kr_chores() -> None:
+    """국내장 배치 앞 준비 — KRX ETF 상장목록 캐시(관련 ETF 묶음용) + 대표 ETF 코드 검증."""
+    try:
+        from stock_auto.markets.kr import etf as kr_etf
+        r = kr_etf.refresh()
+        print(f"[daemon] KRX ETF 목록 {r['action']} ({r.get('n', 0)}개)"
+              + ("" if r["ok"] else f" — {r.get('detail', '')[:80]}"))
+        bad = kr_etf.verify_seeds()
+        if bad:
+            print("[daemon] ⚠️ 섹터 대표 ETF 코드 불일치 — markets/kr/etf.SECTORS 확인:")
+            for b in bad[:8]:
+                print(f"[daemon]    · {b}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[daemon] KRX ETF 목록 실패: {type(e).__name__}: {e}")
 
 
 def _weekly_report():
@@ -267,7 +284,7 @@ def _run_monitor_thread(market: Market, session_minutes: int):
     # 프로파일 로드
     from stock_auto.pipeline.run_monitor import _load_profiles
     profiles = _load_profiles(market, syms)
-    tg = Telegram(sec.telegram_bot_token, sec.telegram_chat_id)
+    tg = for_market(market, sec)             # 국내장은 KR 채널(없으면 기본)
 
     def _record(snap, window):
         # 날짜는 스냅샷 거래소시각(ET) 기준 — 서버 TZ 무관
@@ -343,23 +360,34 @@ def main() -> int:
     #   켜지면 확장이 밤 사이 것을 메우므로, 그 뒤에 돌려야 뉴스가 온전하다.
     #   추천은 다음 미국장 개장(23:30 KST)용이라 09:30 이어도 14시간 남는다.
     # STOCK_BATCH_TIME_KST=HH:MM 으로 바꿀 수 있다.
-    bh, bm = _batch_time_kst()
-    sch.add_job(_recalibrate_and_batch,
-                CronTrigger(hour=bh, minute=bm, day_of_week="tue-sat", timezone=KST))
+    us = market_spec(Market.US)
+    bh, bm = batch_time_kst(Market.US)
+    sch.add_job(lambda: _recalibrate_and_batch((Market.US,)),
+                CronTrigger(hour=bh, minute=bm, day_of_week=us.batch_days, timezone=KST))
     # 주간 성과 요약: 토요일 10:00 KST (한 주 결과 라벨링이 끝난 뒤)
     sch.add_job(_weekly_report,
                 CronTrigger(hour=10, minute=0, day_of_week="sat", timezone=KST))
-    # US 개장 09:30 ET → 약 390분 (정규장)
-    sch.add_job(lambda: _run_monitor_thread(Market.US, 390),
-                CronTrigger(hour=9, minute=30, day_of_week="mon-fri", timezone=ET))
-    # KR 개장(확장성): ENABLE_KR=1 일 때만
-    if Market.KR in markets:
-        sch.add_job(lambda: _run_monitor_thread(Market.KR, 390),
-                    CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=KST))
+    # US 개장 09:30 ET → 390분 (정규장)
+    sch.add_job(lambda: _run_monitor_thread(Market.US, us.session_minutes),
+                CronTrigger(hour=us.open_hm[0], minute=us.open_hm[1],
+                            day_of_week="mon-fri", timezone=ET))
+    sched_lines = [f"US 배치 KST {bh:02d}:{bm:02d} {us.batch_days} · 모니터 09:30 ET"]
 
-    print(f"[daemon] 시작 — 대상시장 {[m.value for m in markets]} "
-          f"| 일일배치(KST {bh:02d}:{bm:02d} 화~토) / 개장 모니터 / 자가보정 / "
-          "주간성과(토 10:00 KST)")
+    # 국내장 — ENABLE_KR=1 일 때만. 배치는 장 마감 뒤(16:10 KST) 자기 시각에 따로 돈다.
+    if Market.KR in markets:
+        kr = market_spec(Market.KR)
+        kh, km = batch_time_kst(Market.KR)
+        sch.add_job(lambda: _recalibrate_and_batch((Market.KR,)),
+                    CronTrigger(hour=kh, minute=km, day_of_week=kr.batch_days, timezone=KST))
+        sch.add_job(lambda: _run_monitor_thread(Market.KR, kr.session_minutes),
+                    CronTrigger(hour=kr.open_hm[0], minute=kr.open_hm[1],
+                                day_of_week="mon-fri", timezone=KST))
+        sched_lines.append(f"KR 배치 KST {kh:02d}:{km:02d} {kr.batch_days} · 모니터 09:00 KST"
+                           + (" · KR 전용 텔레그램" if get_secrets().has_telegram_kr
+                              else " · 알림은 기본 텔레그램(TELEGRAM_KR_* 미설정)"))
+
+    print(f"[daemon] 시작 — 대상시장 {[m.value for m in markets]} | "
+          + " | ".join(sched_lines) + " | 자가보정 / 주간성과(토 10:00 KST)")
     print("[daemon] Ctrl+C 로 종료")
     try:
         sch.start()
