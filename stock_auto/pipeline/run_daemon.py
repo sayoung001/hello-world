@@ -99,56 +99,15 @@ def _recalibrate_and_batch(markets: tuple[Market, ...] | None = None):
         print(f"[daemon] 트리거 일봉 평가 실패: {type(e).__name__}: {e}")
 
     for market in markets:
-        uni_map = resolve_universe(market)
-        syms = list(uni_map.keys())
-        print(f"[daemon] {market.value} 유니버스 N={len(syms)}")
-        # ① 실측 우선 재구축, 부족분 frac 폴백
-        emp = observation_store.build_profiles_from_observations(market, syms, min_days=10)
-        for s, prof in emp.items():
-            save_profile(prof, market)
-        rest = [s for s in syms if s not in emp]
-        if rest:
-            build_and_save(rest, market)
-        print(f"[daemon] {market.value} 프로파일: 실측 {len(emp)} / frac {len(rest)}")
-
-        # ② 섹터 게이트 — 하락위험 섹터 종목 매수 차단
-        from stock_auto.sector.sector_status import (
-            compute_sector_status, labels_for_symbols, summary_lines)
+        # 한 시장이 죽어도 다른 시장과 ⑤는 돌아야 하고, 죽었다는 사실은 폰으로 와야 한다.
+        # 예전에는 예외가 APScheduler 로그에만 남아 "알림이 안 온다"로만 드러났다.
         try:
-            sec_scores, sec_labels = compute_sector_status(market)
-        except Exception as e:  # noqa: BLE001 — 섹터 실패가 배치를 막지 않게
-            print(f"[daemon] 섹터 진단 실패: {type(e).__name__}: {e}")
-            sec_scores, sec_labels = {}, {}
-        print(f"[daemon] {market.value} 섹터 게이트: {len(sec_scores)}개 진단")
-
-        # ③ 실적 발표일 게이트 — 갭이 손절을 건너뛰는 구간을 진입에서 제외
-        earn_blocked: dict = {}
-        earn_days: dict = {}
-        if market == Market.US:
-            try:
-                from stock_auto.markets.us import earnings
-                earnings.refresh(syms)
-                earn_blocked, earn_days = earnings.blocked_map(syms)
-                print("[daemon] " + earnings.summary_line(earn_blocked, earn_days))
-            except Exception as e:  # noqa: BLE001 — 실적 수집 실패가 배치를 막지 않게
-                print(f"[daemon] 실적 캘린더 실패: {type(e).__name__}: {e}")
-
-        # ④ 추천 배치
-        notion = NotionPublisher(token=sec.notion_token) if sec.has_notion else None
-        run_daily(market=market, universe=syms,
-                  stock_sector_etf=uni_map,
-                  earnings_blocked=earn_blocked or None,
-                  earnings_days=earn_days or None,
-                  sector_status=sec_scores or None,
-                  sector_label_map=(labels_for_symbols(uni_map, sec_labels)
-                                    if sec_labels else None),
-                  sector_lines=(summary_lines(sec_scores, sec_labels, market)
-                                if sec_scores else None),
-                  notion=notion, send_telegram=True,
-                  telegram=for_market(market, sec),     # 국내장은 KR 채널(없으면 기본)
-                  notion_db_id=sec.notion_reco_db_id or None,
-                  notion_parent_page=sec.notion_parent_page_id or None,
-                  run_llm=sec.has_anthropic)
+            _batch_one_market(market, sec)
+        except Exception as e:  # noqa: BLE001
+            import traceback
+            print(f"[daemon] 🚨 {market.value} 일일 배치 실패: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            _notify_failure(market, sec, e)
 
     # ⑤ 보유일별 수익 곡선 갱신 + 대시보드 재생성 (배치마다)
     try:
@@ -158,6 +117,81 @@ def _recalibrate_and_batch(markets: tuple[Market, ...] | None = None):
         print(f"[daemon] 보유일 곡선 갱신 {fs['updated']}건 · 대시보드 → {dp}")
     except Exception as e:  # noqa: BLE001
         print(f"[daemon] 보유일 곡선/대시보드 실패: {type(e).__name__}: {e}")
+
+
+def _batch_one_market(market: Market, sec) -> None:
+    """시장 1개의 일일 배치 — 유니버스 → 프로파일 → 섹터 게이트 → (US) 실적 → 추천·게시·알림."""
+    from stock_auto.realtime.profile_builder import save_profile, build_and_save
+    from stock_auto.pipeline.daily_batch import run_daily
+    from stock_auto.integrations.notion_publisher import NotionPublisher
+
+    uni_map = resolve_universe(market)
+    syms = list(uni_map.keys())
+    print(f"[daemon] {market.value} 유니버스 N={len(syms)}")
+    # ① 실측 우선 재구축, 부족분 frac 폴백
+    try:
+        emp = observation_store.build_profiles_from_observations(market, syms, min_days=10)
+        for s, prof in emp.items():
+            save_profile(prof, market)
+        rest = [s for s in syms if s not in emp]
+        if rest:
+            build_and_save(rest, market)
+        print(f"[daemon] {market.value} 프로파일: 실측 {len(emp)} / frac {len(rest)}")
+    except Exception as e:  # noqa: BLE001 — 프로파일(실시간용)은 추천과 무관하다
+        print(f"[daemon] {market.value} 프로파일 재구축 실패: {type(e).__name__}: {e}")
+
+    # ② 섹터 게이트 — 하락위험 섹터 종목 매수 차단
+    from stock_auto.sector.sector_status import (
+        compute_sector_status, labels_for_symbols, summary_lines)
+    try:
+        sec_scores, sec_labels = compute_sector_status(market)
+    except Exception as e:  # noqa: BLE001 — 섹터 실패가 배치를 막지 않게
+        print(f"[daemon] 섹터 진단 실패: {type(e).__name__}: {e}")
+        sec_scores, sec_labels = {}, {}
+    print(f"[daemon] {market.value} 섹터 게이트: {len(sec_scores)}개 진단")
+
+    # ③ 실적 발표일 게이트 — 갭이 손절을 건너뛰는 구간을 진입에서 제외 (미국만)
+    earn_blocked: dict = {}
+    earn_days: dict = {}
+    if market == Market.US:
+        try:
+            from stock_auto.markets.us import earnings
+            earnings.refresh(syms)
+            earn_blocked, earn_days = earnings.blocked_map(syms)
+            print("[daemon] " + earnings.summary_line(earn_blocked, earn_days))
+        except Exception as e:  # noqa: BLE001 — 실적 수집 실패가 배치를 막지 않게
+            print(f"[daemon] 실적 캘린더 실패: {type(e).__name__}: {e}")
+
+    # ④ 추천 배치
+    notion = NotionPublisher(token=sec.notion_token) if sec.has_notion else None
+    run_daily(market=market, universe=syms,
+              stock_sector_etf=uni_map,
+              earnings_blocked=earn_blocked or None,
+              earnings_days=earn_days or None,
+              sector_status=sec_scores or None,
+              sector_label_map=(labels_for_symbols(uni_map, sec_labels)
+                                if sec_labels else None),
+              sector_lines=(summary_lines(sec_scores, sec_labels, market)
+                            if sec_scores else None),
+              notion=notion, send_telegram=True,
+              telegram=for_market(market, sec),     # 국내장은 KR 채널(없으면 기본)
+              notion_db_id=sec.notion_reco_db_id or None,
+              notion_parent_page=sec.notion_parent_page_id or None,
+              run_llm=sec.has_anthropic)
+
+
+def _notify_failure(market: Market, sec, exc: BaseException) -> None:
+    """배치가 죽었음을 그 시장 채널로 알린다. 알림 자체가 실패해도 조용히."""
+    try:
+        tg = for_market(market, sec)
+        if getattr(tg, "enabled", False):
+            tg.send_message(
+                f"🚨 [{market.value}] 일일 배치 실패 — 추천 알림이 오지 않습니다\n"
+                f"{type(exc).__name__}: {str(exc)[:300]}\n"
+                f"확인: grep -n '배치 실패' -A12 ~/auto_trade/logs/daemon.log | tail -30",
+                parse_mode="")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _us_chores() -> None:
@@ -343,7 +377,45 @@ def _run_monitor_thread(market: Market, session_minutes: int):
     threading.Thread(target=_run, daemon=True).start()
 
 
-def main() -> int:
+def schedule_lines() -> list[str]:
+    """지금 설정으로 무엇이 언제 도는지 — 시작 로그와 --show-schedule 이 같은 걸 보여 준다."""
+    from stock_auto.config.env import load_env
+    load_env()                                   # ENABLE_KR 등은 .env 에서 온다
+    markets = _active_markets()
+    sec = get_secrets()
+    us = market_spec(Market.US)
+    bh, bm = _batch_time_kst(Market.US)
+    L = [f"대상시장 {[m.value for m in markets]}",
+         f"US 배치 KST {bh:02d}:{bm:02d} {us.batch_days} · 모니터 09:30 ET · "
+         f"텔레그램 {'설정' if sec.has_telegram else '미설정'}"]
+    if Market.KR in markets:
+        kr = market_spec(Market.KR)
+        kh, km = _batch_time_kst(Market.KR)
+        L.append(f"KR 배치 KST {kh:02d}:{km:02d} {kr.batch_days} · 모니터 09:00 KST · "
+                 + ("KR 전용 텔레그램" if sec.has_telegram_kr
+                    else "알림은 기본 텔레그램(TELEGRAM_KR_* 미설정)"))
+    else:
+        L.append("KR 꺼짐 — .env 에 ENABLE_KR=1 을 넣고 데몬을 재시작하면 켜진다")
+    return L
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description="자동 운영 데몬")
+    ap.add_argument("--show-schedule", action="store_true",
+                    help="지금 .env 기준으로 어떤 시장이 언제 도는지만 출력하고 종료")
+    args = ap.parse_args(argv)
+
+    # .env 를 가장 먼저 — 시장 목록(ENABLE_KR)·배치 시각이 여기서 결정된다.
+    # 패키지 import 때도 한 번 올리지만, 명시적으로 다시 보장한다.
+    from stock_auto.config.env import load_env
+    load_env()
+
+    if args.show_schedule:
+        for line in schedule_lines():
+            print(line)
+        return 0
+
     try:
         from apscheduler.schedulers.blocking import BlockingScheduler
         from apscheduler.triggers.cron import CronTrigger
