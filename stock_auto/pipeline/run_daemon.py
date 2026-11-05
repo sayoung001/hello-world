@@ -183,6 +183,11 @@ def _batch_one_market(market: Market, sec) -> None:
 def _notify_failure(market: Market, sec, exc: BaseException) -> None:
     """배치가 죽었음을 그 시장 채널로 알린다. 알림 자체가 실패해도 조용히."""
     try:
+        from stock_auto.ui import status as ui_status
+        ui_status.record_failure(market.value, exc)       # PC 화면 '배치 실패 기록'
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         tg = for_market(market, sec)
         if getattr(tg, "enabled", False):
             tg.send_message(

@@ -167,16 +167,28 @@ def run_daily(
     # 5) Telegram 다이제스트 (푸시 — 오늘 뭘 볼지)
     #    Notion만 쓰면 (a) 미설정 시 결과가 콘솔에만 남고 (b) '가서 봐야' 한다.
     #    미국장 배치는 KST 06~07시에 끝나므로 먼저 알려주지 않으면 그날 장을 놓친다.
+    digest_text = ""
+    n_charts = 0
     if send_telegram:
         try:
-            _send_digest(result, telegram)
+            digest_text = _send_digest(result, telegram) or ""
         except Exception as e:  # noqa: BLE001 — 알림 실패가 배치를 망치지 않게
             print(f"[batch] 텔레그램 다이제스트 실패: {type(e).__name__}: {e}")
         # 5.5) 추천 종목 차트 — 다이제스트 뒤에 추천당 1장 (코인봇 sendPhoto 방식)
         try:
-            _send_charts(result, ohlcv_map, telegram)
+            n_charts = _send_charts(result, ohlcv_map, telegram) or 0
         except Exception as e:  # noqa: BLE001 — 차트 실패가 배치를 망치지 않게
             print(f"[batch] 차트 전송 실패: {type(e).__name__}: {e}")
+    else:
+        try:
+            from stock_auto.notify.digest import batch_digest
+            digest_text = batch_digest(result, result.sector_lines or None)
+        except Exception:  # noqa: BLE001
+            digest_text = ""
+
+    # 6) PC 운영 화면용 기록 — 마지막 배치 요약 + 다이제스트 원문(logs/ui/)
+    from stock_auto.ui import status as ui_status
+    ui_status.record_batch(result, digest_text, n_charts)
     return result
 
 
@@ -224,7 +236,8 @@ def _send_charts(result: BatchResult, ohlcv_map: dict, telegram: Any = None) -> 
     return sent
 
 
-def _send_digest(result: BatchResult, telegram: Any = None) -> None:
+def _send_digest(result: BatchResult, telegram: Any = None) -> str:
+    """다이제스트를 보내고 본문을 돌려준다(PC 화면이 같은 원문을 보여 준다)."""
     from stock_auto.notify.digest import batch_digest
     tg = telegram
     if tg is None:
@@ -238,6 +251,7 @@ def _send_digest(result: BatchResult, telegram: Any = None) -> None:
     else:
         print("[batch] 텔레그램 미설정 — 다이제스트 콘솔 출력\n")
         print(text)
+    return text
 
 
 def _record_signals(result: BatchResult) -> int:
