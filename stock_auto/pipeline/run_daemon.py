@@ -11,6 +11,8 @@ APScheduler(zoneinfo)로 거래소 현지시각 기준 트리거 → DST 자동.
   - KR 개장(09:00 KST):  KR 모니터 스레드(동일)
   - 주간 성과(토 10:00 KST): 가상계좌 요약 + **수익/손실 추천 공통점 분석**(tracking.attribution)
       텔레그램 + Notion 페이지
+  - 백테스트(일 11:00 KST, 별 프로세스): 규칙엔진 신호 1년 → 수익(≥2%)/손실 특이점(research.backtest)
+      텔레그램 요약 + Notion 전체 표. 보고서가 한 번도 없으면 시작 3분 뒤 1회
 
 놓친 배치 보충: 데몬이 시작할 때 "오늘 돌았어야 하는데 기록(logs/ui/last_batch_*.json)이
 없는" 배치·주간 리포트를 1~2분 뒤 한 번 돈다. autopull 재시작·VM 재부팅이 배치 시각과
@@ -288,6 +290,37 @@ def _weekly_report():
         traceback.print_exc()
 
 
+def _backtest_job(markets: tuple[Market, ...]) -> None:
+    """1년 백테스트 + 수익/손실 특이점(research.backtest)을 **별 프로세스**로 돈다.
+
+    수백 종목 2년치 지표 계산이라 데몬 스레드에서 돌리면 모니터·배치와 CPU 를 다툰다.
+    nice 로 우선순위를 낮춰 순차 실행. 결과는 텔레그램 요약 + Notion 전체 표 + logs/ui/backtest_<MKT>.md.
+    """
+    import subprocess
+    import sys as _sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    for m in markets:
+        cmd = ["nice", "-n", "10", _sys.executable, "-m", "stock_auto.research.backtest",
+               "--market", m.value, "--notion", "--telegram"]
+        print(f"[daemon] 백테스트 시작 {m.value}: {' '.join(cmd[3:])}")
+        try:
+            r = subprocess.run(cmd, cwd=str(root), timeout=3 * 3600,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            tail = "\n".join((r.stdout or "").strip().splitlines()[-6:])
+            print(f"[daemon] 백테스트 {m.value} 종료 rc={r.returncode}\n{tail}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[daemon] 백테스트 {m.value} 실행 실패: {type(e).__name__}: {e}")
+
+
+def missing_backtests(markets: tuple[Market, ...]) -> list[Market]:
+    """보고서를 한 번도 못 낸 시장(logs/ui/backtest_<MKT>.done 없음) — 시작 때 한 번 돈다.
+    실패해도 .done 을 남기므로 재시작마다 반복되지 않는다(원인은 로그에)."""
+    from stock_auto.ui import status as ui_status
+    d = ui_status.ui_dir()
+    return [m for m in markets if not (d / f"backtest_{m.value}.done").exists()]
+
+
 # ── 놓친 배치 보충 ────────────────────────────────────────────────────────
 _DOW = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
 
@@ -522,6 +555,9 @@ def schedule_lines() -> list[str]:
         L.append(f"오늘 미실행 배치 {[m.value for m in missed]} — 데몬 시작 직후 보충 실행")
     if missed_weekly():
         L.append("오늘 주간 성과 리포트 미발송 — 데몬 시작 직후 보충 발송")
+    L.append("백테스트(1년 규칙엔진 신호 · 수익/손실 특이점) 일 11:00 KST"
+             + (f" · 첫 보고서 없음 {[m.value for m in missing_backtests(markets)]} → 시작 직후 실행"
+                if missing_backtests(markets) else ""))
     return L
 
 
@@ -606,6 +642,17 @@ def main(argv: list[str] | None = None) -> int:
             sch.add_job(_weekly_report, "date", run_date=when, misfire_grace_time=3600)
     except Exception as e:  # noqa: BLE001
         print(f"[daemon] 주간 리포트 보충 판단 실패: {type(e).__name__}: {e}")
+    # 1년 백테스트 — 일요일 11:00 KST(장 없는 날, 배치와 겹치지 않음). 보고서가 없는 시장은 시작 3분 뒤 한 번.
+    sch.add_job(lambda: _backtest_job(markets),
+                CronTrigger(hour=11, minute=0, day_of_week="sun", timezone=KST), misfire_grace_time=3600)
+    try:
+        need = tuple(missing_backtests(markets))
+        if need:
+            when = datetime.now(KST) + timedelta(seconds=180)
+            print(f"[daemon] ⏩ 백테스트 보고서 없음 {[m.value for m in need]} → {when:%H:%M:%S} KST 에 실행(별 프로세스)")
+            sch.add_job(lambda need=need: _backtest_job(need), "date", run_date=when, misfire_grace_time=3600)
+    except Exception as e:  # noqa: BLE001
+        print(f"[daemon] 백테스트 판단 실패: {type(e).__name__}: {e}")
     print("[daemon] Ctrl+C 로 종료")
     try:
         sch.start()

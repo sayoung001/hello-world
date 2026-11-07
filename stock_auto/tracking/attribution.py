@@ -241,8 +241,8 @@ def _bucket_categorical(trades: list[dict], key: str) -> dict[str, list[dict]]:
     return dict(b)
 
 
-def _group_stats(sub: list[dict], W: int, L: int) -> dict[str, Any]:
-    wins = [t for t in sub if t["ret_pct"] > 0]
+def _group_stats(sub: list[dict], W: int, L: int, win_pct: float = 0.0) -> dict[str, Any]:
+    wins = [t for t in sub if t["ret_pct"] > 0 and t["ret_pct"] >= win_pct]
     losses = [t for t in sub if t["ret_pct"] < 0]
     n = len(sub)
     gw = sum(t["ret_pct"] for t in wins)
@@ -279,8 +279,9 @@ def _median(v: list[float]) -> float:
 
 def analyze(rows: list[dict], triggers: Optional[list[dict]] = None,
             market: Optional[str] = None, days: Optional[int] = None,
-            min_n: int = MIN_N, include_gated: bool = False) -> dict[str, Any]:
-    """전체 분석 → dict. markdown()/telegram_text() 가 글로 만든다."""
+            min_n: int = MIN_N, include_gated: bool = False,
+            win_pct: float = 0.0, accept_pct: float = 0.0) -> dict[str, Any]:
+    """signals.csv 행 → 전체 분석 dict. markdown()/telegram_text() 가 글로 만든다."""
     if triggers is None:
         try:
             from stock_auto.tracking import triggers as trig_store
@@ -288,13 +289,34 @@ def analyze(rows: list[dict], triggers: Optional[list[dict]] = None,
         except Exception:  # noqa: BLE001
             triggers = []
     trades = closed_recommendations(rows, triggers, market, days, include_gated)
-    wins = [t for t in trades if t["ret_pct"] > 0]
+    res = analyze_trades(trades, NUMERIC, CATEGORICAL, OUTCOME_SIDE, min_n=min_n,
+                         win_pct=win_pct, accept_pct=accept_pct)
+    res.update({"market": market or "ALL", "days": days})
+    return res
+
+
+def analyze_trades(trades: list[dict], numeric: list[tuple[str, str]],
+                   categorical: list[tuple[str, str]],
+                   outcome_side: list[tuple[str, str]] = (),
+                   min_n: int = MIN_N, win_pct: float = 0.0, accept_pct: float = 0.0,
+                   title_scope: str = "") -> dict[str, Any]:
+    """피처가 이미 붙은 거래 목록(각 dict 에 ret_pct·exit_type 필수) → 분석.
+
+    win_pct   : '수익'으로 세는 최소 수익률(%). 0 이면 양수 전부. 2.0 이면 +2% 이상만 수익,
+                0~2% 는 어느 쪽도 아닌 '미미' 로 두고 비교에서 뺀다. 손실은 항상 0% 미만.
+    accept_pct: 수익 쪽 특이 공통점으로 받아들이는 최소 **구간 평균 수익률**(%).
+                "수익률 2% 이상의 특이점만 수용" → accept_pct=2.0.
+    """
+    trades = [t for t in trades if t.get("ret_pct") is not None]
+    wins = [t for t in trades if t["ret_pct"] >= win_pct and t["ret_pct"] > 0]
     losses = [t for t in trades if t["ret_pct"] < 0]
     W, L = len(wins), len(losses)
     res: dict[str, Any] = {
-        "market": market or "ALL", "days": days, "min_n": min_n,
-        "n": len(trades), "n_win": W, "n_loss": L,
+        "market": title_scope or "ALL", "days": None, "min_n": min_n,
+        "win_pct": win_pct, "accept_pct": accept_pct,
+        "n": len(trades), "n_win": W, "n_loss": L, "n_flat": len(trades) - W - L,
         "win_rate": (W / len(trades) * 100) if trades else 0.0,
+        "avg_ret": (sum(t["ret_pct"] for t in trades) / len(trades)) if trades else 0.0,
         "avg_win": (sum(t["ret_pct"] for t in wins) / W) if W else 0.0,
         "avg_loss": (sum(t["ret_pct"] for t in losses) / L) if L else 0.0,
         "factors": [], "numeric": [], "outcome": [], "top_win": [], "top_loss": [],
@@ -307,28 +329,30 @@ def analyze(rows: list[dict], triggers: Optional[list[dict]] = None,
 
     # 청산 유형 구성(결과 양상)
     for side, grp in (("win", wins), ("loss", losses)):
-        res["exit_mix"][side] = {k: sum(1 for t in grp if t["exit_type"] == k)
+        res["exit_mix"][side] = {k: sum(1 for t in grp if t.get("exit_type") == k)
                                  for k in ("tp", "sl", "timeout")}
 
-    # 구간별 lift
-    labels = dict(NUMERIC + CATEGORICAL)
-    for key, _ in NUMERIC:
-        for bucket, (sub, lo, hi) in _bucket_numeric(trades, key).items():
-            st = _group_stats(sub, W, L)
+    # 구간별 lift — 비교 모집단은 수익+손실(미미한 건은 뺀다)
+    pool = wins + losses
+    labels = dict(numeric + categorical)
+    for key, _ in numeric:
+        for bucket, (sub, lo, hi) in _bucket_numeric(pool, key).items():
+            st = _group_stats(sub, W, L, win_pct)
             st.update({"factor": key, "label": labels[key], "bucket": bucket, "numeric": True,
                        "lo": lo, "hi": hi})
             res["factors"].append(st)
-    for key, _ in CATEGORICAL:
-        bk = _bucket_categorical(trades, key)
+    for key, _ in categorical:
+        bk = _bucket_categorical(pool, key)
         if len(bk) < 2:
             continue   # 전부 같은 값이면 비교가 안 된다
         for bucket, sub in bk.items():
-            st = _group_stats(sub, W, L)
+            st = _group_stats(sub, W, L, win_pct)
             st.update({"factor": key, "label": labels[key], "bucket": bucket, "numeric": False})
             res["factors"].append(st)
 
     # 수치 피처 — 평균·중앙값·AUC
-    for key, label in NUMERIC + OUTCOME_SIDE:
+    out_keys = dict(outcome_side)
+    for key, label in list(numeric) + list(outcome_side):
         vw = [t[key] for t in wins if t.get(key) is not None]
         vl = [t[key] for t in losses if t.get(key) is not None]
         if len(vw) < 3 or len(vl) < 3:
@@ -336,13 +360,16 @@ def analyze(rows: list[dict], triggers: Optional[list[dict]] = None,
         row = {"factor": key, "label": label, "n_w": len(vw), "n_l": len(vl),
                "mean_w": sum(vw) / len(vw), "mean_l": sum(vl) / len(vl),
                "med_w": _median(vw), "med_l": _median(vl), "auc": _auc(vw, vl)}
-        (res["outcome"] if key in dict(OUTCOME_SIDE) else res["numeric"]).append(row)
+        (res["outcome"] if key in out_keys else res["numeric"]).append(row)
     res["numeric"].sort(key=lambda x: -abs((x["auc"] or 0.5) - 0.5))
 
     # 특이 공통점 — 치우침 큰 구간. 한 피처당 한 구간만(같은 피처의 반대쪽 구간은 중복 정보)
     def _pick(side: str) -> list[dict]:
-        cands = [f for f in res["factors"] if f["n"] >= min_n
-                 and ((f["lift"] >= LIFT_CUT) if side == "win" else (f["lift"] <= 1 / LIFT_CUT))]
+        if side == "win":
+            cands = [f for f in res["factors"] if f["n"] >= min_n and f["lift"] >= LIFT_CUT
+                     and f["avg_ret"] >= accept_pct]
+        else:
+            cands = [f for f in res["factors"] if f["n"] >= min_n and f["lift"] <= 1 / LIFT_CUT]
         cands.sort(key=lambda f: -f["score"])
         seen, out = set(), []
         for f in cands:
@@ -353,7 +380,7 @@ def analyze(rows: list[dict], triggers: Optional[list[dict]] = None,
         return out[:8]
     res["top_win"], res["top_loss"] = _pick("win"), _pick("loss")
 
-    # 조합 검증 — 상위 두 특징을 동시에 만족하는 추천
+    # 조합 검증 — 상위 두 특징을 동시에 만족하는 추천(미미한 건 포함한 전체에서)
     def _combo(top: list[dict]) -> Optional[dict]:
         if len(top) < 2:
             return None
@@ -361,7 +388,7 @@ def analyze(rows: list[dict], triggers: Optional[list[dict]] = None,
         sub = [t for t in trades if _in_bucket(t, a) and _in_bucket(t, b)]
         if not sub:
             return None
-        st = _group_stats(sub, W, L)
+        st = _group_stats(sub, W, L, win_pct)
         st["desc"] = f"{a['label']}={a['bucket']} 그리고 {b['label']}={b['bucket']}"
         return st
     res["combo_win"], res["combo_loss"] = _combo(res["top_win"]), _combo(res["top_loss"])
@@ -389,15 +416,26 @@ def _lift(v: float) -> str:
 
 def _head(res: dict) -> list[str]:
     scope = res["market"] + (f" · 최근 {res['days']}일" if res.get("days") else "")
-    return [f"청산 완료 추천 {res['n']}건({scope}) — 수익 {res['n_win']}건 · 손실 {res['n_loss']}건 · "
-            f"승률 {res['win_rate']:.0f}%",
-            f"평균 수익 {res['avg_win']:+.2f}% / 평균 손실 {res['avg_loss']:+.2f}%"]
+    wp = res.get("win_pct") or 0.0
+    win_word = f"수익(≥{wp:g}%)" if wp > 0 else "수익"
+    flat = f" · 미미(0~{wp:g}%) {res.get('n_flat', 0)}건" if wp > 0 else ""
+    L = [f"청산 완료 {res['n']}건({scope}) — {win_word} {res['n_win']}건 · 손실 {res['n_loss']}건{flat} · "
+         f"{win_word} 비율 {res['win_rate']:.0f}%",
+         f"평균 수익 {res['avg_win']:+.2f}% / 평균 손실 {res['avg_loss']:+.2f}% / 전체 평균 {res.get('avg_ret', 0.0):+.2f}%"]
+    if (res.get("accept_pct") or 0) > 0:
+        L.append(f"수익 쪽 특이점은 구간 평균 수익률 ≥ {res['accept_pct']:g}% 인 것만 수용")
+    return L
 
 
-def _trait_line(f: dict, side: str) -> str:
+def _win_word(res: dict) -> str:
+    wp = res.get("win_pct") or 0.0
+    return f"≥{wp:g}% 비율" if wp > 0 else "승률"
+
+
+def _trait_line(f: dict, side: str, ww: str = "승률") -> str:
     other = "손실" if side == "win" else "수익"
     mine = "수익" if side == "win" else "손실"
-    return (f"{f['label']} = {f['bucket']} — {f['n']}건, 승률 {f['win_rate']:.0f}%, 평균 {f['avg_ret']:+.2f}% "
+    return (f"{f['label']} = {f['bucket']} — {f['n']}건, {ww} {f['win_rate']:.0f}%, 평균 {f['avg_ret']:+.2f}% "
             f"({mine} 중 {f['share_w' if side == 'win' else 'share_l']:.0f}% vs {other} 중 "
             f"{f['share_l' if side == 'win' else 'share_w']:.0f}%, {_lift(f['lift'] if side == 'win' else 1 / f['lift'])})")
 
@@ -410,11 +448,11 @@ def telegram_text(res: dict) -> str:
     if res["top_win"]:
         L.append("")
         L.append("✅ 수익 쪽에 몰린 특징")
-        L += [f"· {_trait_line(f, 'win')}" for f in res["top_win"][:4]]
+        L += [f"· {_trait_line(f, 'win', _win_word(res))}" for f in res["top_win"][:4]]
     if res["top_loss"]:
         L.append("")
         L.append("❌ 손실 쪽에 몰린 특징")
-        L += [f"· {_trait_line(f, 'loss')}" for f in res["top_loss"][:4]]
+        L += [f"· {_trait_line(f, 'loss', _win_word(res))}" for f in res["top_loss"][:4]]
     if not res["top_win"] and not res["top_loss"]:
         L.append(f"\n{LIFT_CUT}배 이상 치우친 특징이 없습니다(min_n={res['min_n']}). "
                  "수익과 손실이 특징상 구분되지 않음 — 점수·게이트가 결과를 설명하지 못하는 상태.")
@@ -423,9 +461,9 @@ def telegram_text(res: dict) -> str:
         L.append("")
         L.append("🧩 조합 검증(두 특징 동시 만족)")
         if cw:
-            L.append(f"· 수익 특징 2개: {cw['n']}건 승률 {cw['win_rate']:.0f}% 평균 {cw['avg_ret']:+.2f}% PF {_pf(cw['pf'])}")
+            L.append(f"· 수익 특징 2개: {cw['n']}건 {_win_word(res)} {cw['win_rate']:.0f}% 평균 {cw['avg_ret']:+.2f}% PF {_pf(cw['pf'])}")
         if cl:
-            L.append(f"· 손실 특징 2개: {cl['n']}건 승률 {cl['win_rate']:.0f}% 평균 {cl['avg_ret']:+.2f}%")
+            L.append(f"· 손실 특징 2개: {cl['n']}건 {_win_word(res)} {cl['win_rate']:.0f}% 평균 {cl['avg_ret']:+.2f}%")
     em = res.get("exit_mix") or {}
     if em:
         w, l = em.get("win", {}), em.get("loss", {})
@@ -441,7 +479,9 @@ def telegram_text(res: dict) -> str:
         L += [f"· {x['label']}: 수익 중앙값 {x['med_w']:.2f} vs 손실 {x['med_l']:.2f} (AUC {x['auc']:.2f})"
               for x in strong]
     L.append("")
-    L.append(f"※ 표본 {res['n']}건 기준 가설입니다. 전체 표: PC 화면 성과 탭 / Notion '[성과] 추천 요인 분석'")
+    where = ("Notion '[백테스트] … 요인 분석'" if res.get("backtest")
+             else "PC 화면 성과 탭 / Notion '[성과] 추천 요인 분석'")
+    L.append(f"※ 표본 {res['n']}건 기준 가설입니다. 전체 표: {where}")
     return "\n".join(L)
 
 
@@ -459,7 +499,7 @@ def markdown(res: dict) -> str:
         if not top:
             L += ["_해당 없음_", ""]
             continue
-        L += ["| 특징 | 구간 | 건수 | 승률 | 평균수익 | PF | 수익 중 | 손실 중 | 치우침 |",
+        L += [f"| 특징 | 구간 | 건수 | {_win_word(res)} | 평균수익 | PF | 수익 중 | 손실 중 | 치우침 |",
               "|---|---|---:|---:|---:|---:|---:|---:|---:|"]
         for f in top:
             L.append(f"| {f['label']} | {f['bucket']} | {f['n']} | {f['win_rate']:.0f}% | "
@@ -469,7 +509,7 @@ def markdown(res: dict) -> str:
     for key, title in (("combo_win", "수익 특징 2개 동시 만족"), ("combo_loss", "손실 특징 2개 동시 만족")):
         c = res.get(key)
         if c:
-            L += [f"**{title}** — {c['desc']}: {c['n']}건 · 승률 {c['win_rate']:.0f}% · "
+            L += [f"**{title}** — {c['desc']}: {c['n']}건 · {_win_word(res)} {c['win_rate']:.0f}% · "
                   f"평균 {c['avg_ret']:+.2f}% · PF {_pf(c['pf'])}", ""]
 
     L += ["## 2. 수치 피처 — 수익 vs 손실 분포", "",
@@ -492,7 +532,7 @@ def markdown(res: dict) -> str:
     L.append("")
 
     L += ["## 4. 전체 구간표", "",
-          "| 특징 | 구간 | 건수 | 승률 | 평균수익 | PF | 치우침 |", "|---|---|---:|---:|---:|---:|---:|"]
+          f"| 특징 | 구간 | 건수 | {_win_word(res)} | 평균수익 | PF | 치우침 |", "|---|---|---:|---:|---:|---:|---:|"]
     for f in sorted(res["factors"], key=lambda f: (f["label"], f["bucket"])):
         L.append(f"| {f['label']} | {f['bucket']} | {f['n']} | {f['win_rate']:.0f}% | "
                  f"{f['avg_ret']:+.2f}% | {_pf(f['pf'])} | {_lift(f['lift'])} |")
