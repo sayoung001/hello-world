@@ -6,9 +6,16 @@ APScheduler(zoneinfo)로 거래소 현지시각 기준 트리거 → DST 자동.
       ⓪ 라벨링 · 세이브티커 동기화 · 거래소 캐시 · 트리거 일봉 평가
       ① 관측 저장소로 프로파일 자가보정 재구축 ② run_daily → Notion + Telegram
   - KR 일일 배치:  KST 16:10 월~금 (국내장 마감 뒤, 다음 날 개장용)  STOCK_BATCH_TIME_KR_KST
-      ENABLE_KR=1 일 때만. 관련 ETF 묶음 포함, 알림은 KR 채널(TELEGRAM_KR_*; 없으면 기본)
+      기본 켜짐(ENABLE_KR=0 이면 끔). 관련 ETF 묶음 포함, 알림은 KR 채널(TELEGRAM_KR_*; 없으면 기본)
   - US 개장(09:30 ET):   US 모니터 스레드(폭주 Telegram + 진입 트리거 장중 감시)
-  - KR 개장(09:00 KST):  KR 모니터 스레드(동일, ENABLE_KR=1)
+  - KR 개장(09:00 KST):  KR 모니터 스레드(동일)
+  - 주간 성과(토 10:00 KST): 가상계좌 요약 + **수익/손실 추천 공통점 분석**(tracking.attribution)
+      텔레그램 + Notion 페이지
+
+놓친 배치 보충: 데몬이 시작할 때 "오늘 돌았어야 하는데 기록(logs/ui/last_batch_*.json)이
+없는" 배치·주간 리포트를 1~2분 뒤 한 번 돈다. autopull 재시작·VM 재부팅이 배치 시각과
+겹치거나, 시장을 방금 켠 날에도 그날 추천이 비지 않게. 오늘 이미 실패 기록이 있으면
+되돌지 않는다(실패 반복 방지).
 
 → 매일 돌수록 관측이 쌓여 프로파일이 실측으로 수렴(정적 frac → 실측 보정).
 
@@ -239,9 +246,14 @@ def _kr_chores() -> None:
 
 
 def _weekly_report():
-    """주 1회(토요일) 성과 요약을 텔레그램으로 — 라벨링·곡선 갱신 후 요약 + 대시보드 파일."""
-    from stock_auto.tracking import labeler, forward, store, pnl, dashboard
+    """주 1회(토요일) 성과 요약 — 라벨링·곡선 갱신 → 가상계좌 요약 + 수익/손실 공통점 분석.
+
+    텔레그램: 요약 1통 + 공통점 분석 1통 + 대시보드 파일.
+    Notion:  '[성과] 추천 요인 분석 (날짜)' 페이지 — 표 전체. 텔레그램엔 핵심만 간다.
+    """
+    from stock_auto.tracking import labeler, forward, store, pnl, dashboard, attribution
     from stock_auto.config.clock import now_et
+    from stock_auto.ui import status as ui_status
     print(f"[daemon] {now_et():%Y-%m-%d %H:%M %Z} 주간 성과 리포트")
     try:
         labeler.label_pending()
@@ -249,13 +261,111 @@ def _weekly_report():
         rows, fwd_rows = store.load(), forward.load()
         dp = dashboard.write(rows=rows, fwd_rows=fwd_rows)
         sec = get_secrets()
+        summary = pnl.telegram_summary(rows, fwd_rows)
+        res = attribution.analyze(rows)
+        attr_tg = attribution.telegram_text(res)
+        attr_md = attribution.markdown(res)
+        ui_status.record_weekly(summary + "\n\n" + attr_tg, attr_md)
         tg = Telegram(sec.telegram_bot_token, sec.telegram_chat_id)
         if tg.enabled:
-            tg.send_message(pnl.telegram_summary(rows, fwd_rows), parse_mode="")
+            tg.send_message(summary, parse_mode="")
+            tg.send_message(attr_tg, parse_mode="")
             tg.send_document(str(dp), caption="추천 성과 대시보드 (브라우저로 열기)")
+        if sec.has_notion and sec.notion_parent_page_id:
+            try:
+                from stock_auto.integrations.notion_publisher import NotionPublisher
+                pid = NotionPublisher(token=sec.notion_token).create_page_from_markdown(
+                    sec.notion_parent_page_id,
+                    f"[성과] 추천 요인 분석 ({datetime.now(KST):%Y-%m-%d})",
+                    summary.replace("📊 ", "## ", 1) + "\n\n" + attr_md)
+                print(f"[daemon] 요인 분석 Notion 게시 {'완료' if pid else '실패'}")
+            except Exception as e:  # noqa: BLE001
+                print(f"[daemon] 요인 분석 Notion 게시 실패: {type(e).__name__}: {e}")
         print("[daemon] 주간 리포트 전송")
     except Exception as e:  # noqa: BLE001
+        import traceback
         print(f"[daemon] 주간 리포트 실패: {type(e).__name__}: {e}")
+        traceback.print_exc()
+
+
+# ── 놓친 배치 보충 ────────────────────────────────────────────────────────
+_DOW = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+
+
+def _cron_days(expr: str) -> set[int]:
+    """APScheduler day_of_week 식('tue-sat', 'mon,wed', 'sat') → 요일 집합(월=0)."""
+    out: set[int] = set()
+    for part in str(expr).lower().split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            ia, ib = _DOW.get(a.strip(), 0), _DOW.get(b.strip(), 6)
+            out |= set(range(ia, ib + 1)) if ia <= ib else set(range(ia, 7)) | set(range(0, ib + 1))
+        elif part in _DOW:
+            out.add(_DOW[part])
+        elif part == "*":
+            out |= set(range(7))
+    return out
+
+
+def missed_batches(markets: tuple[Market, ...], now: datetime | None = None) -> list[Market]:
+    """오늘(KST) 돌았어야 하는데 기록이 없는 시장 — 시작 직후 한 번 보충할 대상.
+
+    기준: 오늘이 그 시장의 배치 요일이고 배치 시각이 지났는데
+          logs/ui/last_batch_<MKT>.json 의 완료 시각이 오늘이 아니다.
+    예외: 오늘 이미 그 시장의 실패 기록(failures.jsonl)이 있으면 제외 — 실패하는 배치를
+          재시작마다 되돌리면 🚨 알림만 반복된다. 원인을 고친 뒤 수동 실행이 맞다.
+    """
+    from stock_auto.ui import status as ui_status
+    now = now or datetime.now(KST)
+    today = now.strftime("%Y-%m-%d")
+    last = ui_status.read_last_batches()
+    failed_today = {str(f.get("market")) for f in ui_status.read_failures(limit=50)
+                    if str(f.get("at", ""))[:10] == today}
+    out: list[Market] = []
+    for m in markets:
+        s = market_spec(m)
+        if now.weekday() not in _cron_days(s.batch_days):
+            continue
+        bh, bm = _batch_time_kst(m)
+        if (now.hour, now.minute) < (bh, bm):
+            continue
+        done = str((last.get(m.value) or {}).get("finished_at", ""))[:10]
+        if done == today or m.value in failed_today:
+            continue
+        if m.value not in last and _signals_touched_today(m, now, (bh, bm)):
+            # 기록 파일이 아직 없는 구버전에서 올라온 첫날 — signals.csv 가 오늘 배치 시각 뒤에
+            # 그 시장 행을 가진 채 갱신됐으면 배치는 돈 것이다(같은 날 두 번 돌면 노션 행이 중복된다).
+            continue
+        out.append(m)
+    return out
+
+
+def _signals_touched_today(m: Market, now: datetime, hm: tuple[int, int]) -> bool:
+    try:
+        from stock_auto.tracking import store
+        from pathlib import Path
+        p = Path(store.default_path())
+        if not p.exists():
+            return False
+        mt = datetime.fromtimestamp(p.stat().st_mtime, KST)
+        if mt.date() != now.date() or (mt.hour, mt.minute) < hm:
+            return False
+        return any(str(r.get("market") or "").upper() == m.value and r.get("source") == "batch"
+                   for r in store.load())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def missed_weekly(now: datetime | None = None) -> bool:
+    """토요일 10:00 KST 주간 리포트를 오늘 못 보냈나(기록 logs/ui/weekly_<날짜>.txt 기준)."""
+    from stock_auto.ui import status as ui_status
+    now = now or datetime.now(KST)
+    if now.weekday() != 5 or (now.hour, now.minute) < (10, 0):
+        return False
+    return not ui_status.weekly_done(now.strftime("%Y-%m-%d"))
 
 
 def _trigger_watch(sec, market: Market, tg):
@@ -400,7 +510,18 @@ def schedule_lines() -> list[str]:
                  + ("KR 전용 텔레그램" if sec.has_telegram_kr
                     else "알림은 기본 텔레그램(TELEGRAM_KR_* 미설정)"))
     else:
-        L.append("KR 꺼짐 — .env 에 ENABLE_KR=1 을 넣고 데몬을 재시작하면 켜진다")
+        L.append("KR 꺼짐(.env ENABLE_KR=0) — 그 줄을 지우고 데몬을 재시작하면 켜진다")
+    if Market.KR in markets:
+        try:
+            import FinanceDataReader  # noqa: F401 — KRX 유니버스·ETF 목록은 이 패키지로 받는다
+        except ImportError:
+            L.append("⚠️ finance-datareader 미설치 — KR 유니버스는 스냅샷/샘플 20종목으로 폴백. "
+                     ".venv/bin/pip install finance-datareader")
+    missed = missed_batches(markets)
+    if missed:
+        L.append(f"오늘 미실행 배치 {[m.value for m in missed]} — 데몬 시작 직후 보충 실행")
+    if missed_weekly():
+        L.append("오늘 주간 성과 리포트 미발송 — 데몬 시작 직후 보충 발송")
     return L
 
 
@@ -450,7 +571,7 @@ def main(argv: list[str] | None = None) -> int:
                             day_of_week="mon-fri", timezone=ET))
     sched_lines = [f"US 배치 KST {bh:02d}:{bm:02d} {us.batch_days} · 모니터 09:30 ET"]
 
-    # 국내장 — ENABLE_KR=1 일 때만. 배치는 장 마감 뒤(16:10 KST) 자기 시각에 따로 돈다.
+    # 국내장 — 기본 켜짐(ENABLE_KR=0 이면 제외). 배치는 장 마감 뒤(16:10 KST) 자기 시각에 따로 돈다.
     if Market.KR in markets:
         kr = market_spec(Market.KR)
         kh, km = _batch_time_kst(Market.KR)
@@ -465,6 +586,26 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[daemon] 시작 — 대상시장 {[m.value for m in markets]} | "
           + " | ".join(sched_lines) + " | 자가보정 / 주간성과(토 10:00 KST)")
+
+    # 놓친 배치 보충 — 오늘 돌았어야 하는데 기록이 없는 시장을 시작 90초 뒤 한 번.
+    # (autopull 재시작이 배치 시각과 겹친 날, 시장을 방금 켠 날, VM 재부팅 뒤)
+    try:
+        missed = missed_batches(markets)
+    except Exception as e:  # noqa: BLE001 — 보충 판단 실패가 데몬 시작을 막으면 안 된다
+        print(f"[daemon] 미실행 배치 판단 실패: {type(e).__name__}: {e}")
+        missed = []
+    for i, m in enumerate(missed):
+        when = datetime.now(KST) + timedelta(seconds=90 + 30 * i)
+        print(f"[daemon] ⏩ 오늘 {m.value} 배치 기록 없음 → {when:%H:%M:%S} KST 에 보충 실행")
+        sch.add_job(lambda m=m: _recalibrate_and_batch((m,)), "date", run_date=when,
+                    misfire_grace_time=3600)
+    try:
+        if missed_weekly():
+            when = datetime.now(KST) + timedelta(seconds=60)
+            print(f"[daemon] ⏩ 오늘 주간 성과 리포트 기록 없음 → {when:%H:%M:%S} KST 에 보충 발송")
+            sch.add_job(_weekly_report, "date", run_date=when, misfire_grace_time=3600)
+    except Exception as e:  # noqa: BLE001
+        print(f"[daemon] 주간 리포트 보충 판단 실패: {type(e).__name__}: {e}")
     print("[daemon] Ctrl+C 로 종료")
     try:
         sch.start()

@@ -15,6 +15,20 @@ from pathlib import Path
 _WARNED = {"dotenv": False}
 
 
+def _default_env_path() -> Path:
+    """실행 폴더의 .env, 없으면 **앱 루트**(이 패키지가 놓인 폴더)의 .env.
+
+    systemd 유닛은 WorkingDirectory 를 앱 루트로 두지만, 다른 폴더에서 `python -m` 으로
+    점검 명령을 돌리면 cwd 에 .env 가 없어 '키 미설정'으로 보인다 — 운영과 점검이
+    다른 답을 내는 원인이었다. 둘 다 없으면 cwd 경로를 돌려 경고 문구가 그 경로를 가리킨다.
+    """
+    cwd = Path.cwd() / ".env"
+    if cwd.exists():
+        return cwd
+    root = Path(__file__).resolve().parents[2] / ".env"
+    return root if root.exists() else cwd
+
+
 def load_env(dotenv_path: str | None = None) -> None:
     """
     .env 로드. python-dotenv 미설치 시 OS 환경변수만 사용한다.
@@ -24,7 +38,7 @@ def load_env(dotenv_path: str | None = None) -> None:
       '미설정'으로 동작하는데, 배치는 정상 종료한다. 설치를 빠뜨린 첫 배포에서
       가장 흔하고 가장 헷갈리는 실패다 → 한 번은 반드시 경고한다.
     """
-    path = Path(dotenv_path or (Path.cwd() / ".env"))
+    path = Path(dotenv_path) if dotenv_path else _default_env_path()
     try:
         from dotenv import load_dotenv
     except ImportError:

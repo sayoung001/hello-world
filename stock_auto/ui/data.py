@@ -130,9 +130,19 @@ def performance() -> dict:
             "skipped": sum(1 for r in recos if r.get("exit_type") == "skip"),
             "untriaged": sum(1 for r in recos if not r.get("executed")),
             "telegram_text": pnl.telegram_summary(rows, fwd),
+            "attribution_text": _attribution_text(rows),
         }
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
+
+
+def _attribution_text(rows: list[dict]) -> str:
+    """수익 vs 손실 공통점 — 로컬 CSV 만 읽으므로 스냅샷마다 새로 계산해도 가볍다."""
+    try:
+        from stock_auto.tracking import attribution
+        return attribution.telegram_text(attribution.analyze(rows))
+    except Exception as e:  # noqa: BLE001
+        return f"분석 실패: {type(e).__name__}: {e}"
 
 
 # ── 사용량 ────────────────────────────────────────────────────────────────

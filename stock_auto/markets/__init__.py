@@ -19,7 +19,7 @@
   · 한 시장에만 있는 기능(미국 실적 캘린더, 국내 관련 ETF)은 그 시장 폴더에만 둔다.
   · 시장을 하나 더 붙이려면 markets/<xx>/ 폴더와 SPECS 항목 하나를 추가한다.
 
-운영 켜기: 미국장은 항상, 국내장은 .env 의 ENABLE_KR=1 일 때.
+운영 켜기: 미국장은 항상, 국내장도 기본 켜짐(.env 에 ENABLE_KR=0 을 적으면 끔).
 """
 
 from __future__ import annotations
@@ -97,12 +97,21 @@ def fmt_price(market: Market | str, v) -> str:
         return str(v)
 
 
+KR_OFF_VALUES = ("0", "false", "no", "n", "off")
+
+
 def kr_enabled() -> bool:
-    return os.environ.get("ENABLE_KR", "").strip().lower() in ("1", "true", "yes", "y")
+    """국내장 운영 여부 — **기본 켜짐**. 끄려면 .env 에 ENABLE_KR=0.
+
+    옵트인(ENABLE_KR=1 일 때만)이던 동안 운영 .env 에 그 줄이 없어 국내장 배치가
+    한 번도 돌지 않았다(11-04~11-06 노션에 KR 행 0건). 코드는 다 있는데 스위치 하나로
+    조용히 꺼져 있는 상태가 가장 찾기 어려우니, 기본을 켜고 끄는 쪽을 명시하게 한다.
+    """
+    return os.environ.get("ENABLE_KR", "").strip().lower() not in KR_OFF_VALUES
 
 
 def enabled_markets() -> tuple[Market, ...]:
-    """미국장은 항상, 국내장은 ENABLE_KR=1 일 때."""
+    """미국장은 항상, 국내장은 ENABLE_KR=0 이 아니면(기본 켜짐)."""
     return (Market.US, Market.KR) if kr_enabled() else (Market.US,)
 
 

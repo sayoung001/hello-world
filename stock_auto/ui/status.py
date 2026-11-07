@@ -10,6 +10,8 @@
   last_batch_US.json / last_batch_KR.json   마지막 배치 요약
   failures.jsonl                             배치 실패 기록(append)
   digest_<MKT>_<YYYY-MM-DD>.txt              텔레그램으로 간 다이제스트 원문
+  weekly_<YYYY-MM-DD>.txt                    주간 성과 리포트 원문(발송 여부 판단에도 쓴다)
+  attribution.md                             수익/손실 추천 공통점 분석(표 전체)
 """
 
 from __future__ import annotations
@@ -71,6 +73,30 @@ def record_batch(result: Any, digest_text: str = "", n_charts: int = 0) -> Optio
     except Exception as e:  # noqa: BLE001 — 기록 실패가 배치를 막지 않게
         print(f"[ui] 상태 기록 실패: {type(e).__name__}: {e}")
         return None
+
+
+def record_weekly(telegram_text: str, attribution_md: str = "") -> None:
+    """주간 리포트 발송 기록 — weekly_<날짜>.txt(텔레그램 원문) + attribution.md(요인 분석 표 전체).
+    데몬 시작 때 '오늘 주간 리포트가 나갔나' 판단과 PC 화면 성과 탭이 읽는다."""
+    try:
+        day = datetime.now(KST).strftime("%Y-%m-%d")
+        (ui_dir() / f"weekly_{day}.txt").write_text(telegram_text, encoding="utf-8")
+        if attribution_md:
+            (ui_dir() / "attribution.md").write_text(attribution_md, encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        print(f"[ui] 주간 기록 실패: {type(e).__name__}: {e}")
+
+
+def weekly_done(day: str) -> bool:
+    return (ui_dir() / f"weekly_{day}.txt").exists()
+
+
+def read_attribution_md() -> str:
+    p = ui_dir() / "attribution.md"
+    try:
+        return p.read_text(encoding="utf-8") if p.exists() else ""
+    except OSError:
+        return ""
 
 
 def record_failure(market: str, exc: BaseException) -> None:

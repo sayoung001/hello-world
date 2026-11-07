@@ -68,6 +68,8 @@ pre{background:var(--card);border:1px solid var(--line);border-radius:10px;paddi
     <div class="card"><h2 style="margin-top:0">보유일별 평균 수익(배리어 무관)</h2><table><thead><tr><th>보유일</th><th class="num">표본</th><th class="num">평균</th><th class="num">중앙값</th><th class="num">승률</th></tr></thead><tbody id="curveBody"></tbody></table></div>
     <div class="card"><h2 style="margin-top:0">주간 요약 원문</h2><pre id="perfText"></pre></div>
   </div>
+  <h2>수익 vs 손실 추천 공통점 <span class="s">(청산 완료분 · 전체 표는 Notion '[성과] 추천 요인 분석' 또는 logs/ui/attribution.md)</span></h2>
+  <div class="card"><pre id="attrText"></pre></div>
   <h2>LLM 사용량·비용</h2>
   <div class="card"><table><thead><tr><th>일자</th><th>시장</th><th>모델</th><th class="num">입력 tok</th><th class="num">출력 tok</th><th class="num">추천</th><th class="num">비용 $</th></tr></thead><tbody id="usageBody"></tbody></table></div>
 </section>
@@ -113,7 +115,7 @@ function render(){if(!SNAP)return;const m=mktSel();
  const P=SNAP.performance||{},s=P.summary||{};
  $('#perfTiles').innerHTML=tile('추천 누적',(P.total??'-')+'건',`청산 ${s.n??0} · 대기 ${P.waiting??0} · 미체결 ${P.skipped??0}`)+tile('가상계좌 손익',s.n?('$'+fmt(s.total_pnl,2)):'-',s.n?`$${fmt(s.position,0)}/종목 · MDD $${fmt(s.max_dd,0)}`:'청산 대기')+tile('승률 / PF',s.n?`${fmt(s.win_rate,0)}% / ${s.pf===Infinity||s.pf==='inf'?'∞':fmt(s.pf,2)}`:'-',s.n?`TP ${s.tp} / SL ${s.sl} / TO ${s.to}`:'')+tile('BUY vs WATCH',P.by_grade?`${P.by_grade.BUY?.n??0} / ${P.by_grade.WATCH?.n??0}건`:'-',P.by_grade?`BUY $${fmt(P.by_grade.BUY?.total_pnl,0)} · WATCH $${fmt(P.by_grade.WATCH?.total_pnl,0)}`:'')+tile('최적 보유일',P.best?`D+${P.best.day}`:'-',P.best?`${pct(P.best.avg)} (${P.best.n}건)`:'표본 부족');
  $('#curveBody').innerHTML=(P.curve||[]).filter(c=>c.n).map(c=>`<tr><td>D+${c.day}</td><td class="num">${c.n}</td><td class="num ${c.avg>=0?'up':'dn'}">${pct(c.avg)}</td><td class="num">${pct(c.median)}</td><td class="num">${fmt(c.win_rate,0)}%</td></tr>`).join('')||'<tr><td colspan="5" class="empty">아직 없음</td></tr>';
- $('#perfText').textContent=P.telegram_text||'';
+ $('#perfText').textContent=P.telegram_text||'';$('#attrText').textContent=P.attribution_text||'';
  $('#usageBody').innerHTML=(SNAP.usage.rows||[]).map(u=>`<tr><td>${esc(u.date)}</td><td>${esc(u.market)}</td><td>${esc(u.model)}</td><td class="num">${fmt(u.input_tokens,0)}</td><td class="num">${fmt(u.output_tokens,0)}</td><td class="num">${esc(u.n_reco)}</td><td class="num">${u.cost_usd!=null&&u.cost_usd!==''?fmt(u.cost_usd,4):'-'}</td></tr>`).join('')||'<tr><td colspan="7" class="empty">기록 없음</td></tr>';
  const ap=SNAP.autopull||{},lb=SNAP.last_batches||{};
  $('#statusTiles').innerHTML=tile('코드',esc(SNAP.git||'-'),'VM 체크아웃')+tile('autopull',ap.heartbeat_age_min==null?'기록 없음':(ap.stuck?'⚠ ':'')+ap.heartbeat_age_min+'분 전',ap.stuck?'30분 넘게 안 돌았음':'정상')+Object.values(lb).map(b=>tile(`${b.market} 마지막 배치`,b.date,`${b.finished_at||''} · 후보 ${b.n_candidates} → 추천 ${b.n_reco}${b.n_fail?' · LLM 실패 '+b.n_fail:''}`)).join('')+tile('배치 실패',(SNAP.failures||[]).length+'건','최근 기록');
