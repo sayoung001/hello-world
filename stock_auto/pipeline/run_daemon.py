@@ -317,8 +317,18 @@ def missing_backtests(markets: tuple[Market, ...]) -> list[Market]:
     """보고서를 한 번도 못 낸 시장(logs/ui/backtest_<MKT>.done 없음) — 시작 때 한 번 돈다.
     실패해도 .done 을 남기므로 재시작마다 반복되지 않는다(원인은 로그에)."""
     from stock_auto.ui import status as ui_status
+    from stock_auto.research.backtest import REPORT_VERSION
     d = ui_status.ui_dir()
-    return [m for m in markets if not (d / f"backtest_{m.value}.done").exists()]
+    out = []
+    for m in markets:
+        p = d / f"backtest_{m.value}.done"
+        try:
+            # 보고서 형식이 바뀌면(REPORT_VERSION 상승) 옛 표식은 무효 — 새 형식으로 한 번 다시 돈다
+            if not p.exists() or not p.read_text(encoding="utf-8").startswith(f"v{REPORT_VERSION} "):
+                out.append(m)
+        except OSError:
+            out.append(m)
+    return out
 
 
 # ── 놓친 배치 보충 ────────────────────────────────────────────────────────

@@ -15,7 +15,10 @@ MAX_TEXT = 1900   # 안전 여유
 
 
 def _rt(text: str) -> list:
-    return [{"type": "text", "text": {"content": text[:MAX_TEXT]}}]
+    """rich_text 배열. 항목 하나는 2000자 상한이지만 **항목을 여러 개** 둘 수 있다(최대 100개).
+    예전엔 첫 1900자만 남겨 긴 표(코드블록)가 중간에서 잘렸다 — 백테스트 '전체 구간표'가 그렇게 끊겼다."""
+    parts = list(_chunks(text))[:100] or [""]
+    return [{"type": "text", "text": {"content": c}} for c in parts]
 
 
 def _chunks(text: str, n: int = MAX_TEXT) -> Iterator[str]:
@@ -24,9 +27,9 @@ def _chunks(text: str, n: int = MAX_TEXT) -> Iterator[str]:
 
 
 def _para(text: str) -> list:
-    # 2000자 초과 단락은 여러 블록으로 분할
+    # 2000자 초과 단락은 여러 블록으로 분할(단락은 블록을 나누는 쪽이 읽기 좋다)
     return [{"object": "block", "type": "paragraph",
-             "paragraph": {"rich_text": _rt(c)}} for c in _chunks(text)] or \
+             "paragraph": {"rich_text": [{"type": "text", "text": {"content": c}}]}} for c in _chunks(text)] or \
            [{"object": "block", "type": "paragraph", "paragraph": {"rich_text": []}}]
 
 

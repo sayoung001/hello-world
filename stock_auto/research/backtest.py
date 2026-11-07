@@ -47,6 +47,7 @@ from stock_auto.tracking import attribution as A
 
 WIN_PCT = 2.0            # 사용자 기준: 수익 = +2% 이상
 ACCEPT_PCT = 2.0         # 수익 쪽 특이점 수용: 구간 평균 ≥ 2%
+REPORT_VERSION = 2       # 보고서 형식이 바뀌면 올린다 → 데몬이 시작 때 한 번 다시 돈다(.done 에 기록)
 WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"]
 FWD_HORIZONS = (1, 3, 5, 10, 20)
 
@@ -331,15 +332,71 @@ def run(market: Market, days: int = 365, top_n: int = TOP_N_FOR_AGENTS,
     cats = CATEGORICAL + [(f"strat_{n}", f"전략 {n}") for n in STRATEGY_NAMES]
     res = A.analyze_trades(sigs, NUMERIC, cats, OUTCOME_SIDE, min_n=min_n, win_pct=win_pct,
                            accept_pct=accept_pct, title_scope=f"{market.value} 백테스트 {days}일")
+    by_strat = _by_key(sigs, "strategies", win_pct, multi=True)
     res.update({
         "backtest": True, "market_code": market.value, "days": None, "span": f"{start_day} ~ {now:%Y-%m-%d}",
         "n_universe": len(syms), "n_priced": len(prices), "top_n": top_n,
-        "monthly": _monthly(sigs), "by_strategy": _by_key(sigs, "strategies", win_pct, multi=True),
+        "monthly": _monthly(sigs), "by_strategy": by_strat,
         "by_horizon": _by_key(sigs, "horizon", win_pct), "by_exit": _by_key(sigs, "exit_type", win_pct),
         "forward": _forward(sigs), "top15_vs_rest": _by_key(sigs, "top15", win_pct),
+        "scenarios": filter_scenarios(sigs, res, win_pct, by_strat),
         "elapsed_s": round(time.time() - t0),
     })
     return res
+
+
+# ── 4-2. 필터 시나리오 — "손실 쪽 특이점을 피했다면" ───────────────────────
+def _half_split(sigs: list[dict]) -> tuple[list[dict], list[dict]]:
+    dates = sorted({s["date"] for s in sigs})
+    if len(dates) < 2:
+        return sigs, []
+    mid = dates[len(dates) // 2]
+    return [s for s in sigs if s["date"] < mid], [s for s in sigs if s["date"] >= mid]
+
+
+def filter_scenarios(sigs: list[dict], res: dict, win_pct: float,
+                     by_strategy: Optional[list[dict]] = None) -> list[dict]:
+    """손실 쪽 특이점(top_loss)을 하나씩, 그리고 전부 제외했을 때 남는 신호의 성과.
+
+    특이점 표는 '어디에 손실이 몰렸나'를 보여 주지만, 그걸 **피하면 실제로 좋아지나**는
+    따로 세어야 한다(제외한 구간에 수익도 같이 들어 있을 수 있다). 과적합 경계로 구간을
+    앞/뒤 반으로 갈라 양쪽에서 모두 좋아지는지 함께 적는다 — 한쪽만 좋아지면 우연일 가능성.
+    """
+    top_loss = list(res.get("top_loss") or [])
+    if not sigs or not top_loss:
+        return []
+    h1, h2 = _half_split(sigs)
+    # id() 기반 집합 — dict 는 해시 불가
+    set_h1 = {id(s) for s in h1}
+    set_h2 = {id(s) for s in h2}
+
+    def _in_half(keep: list[dict], ids: set[int]) -> list[dict]:
+        return [s for s in keep if id(s) in ids]
+
+    def _row2(name: str, keep: list[dict], excluded: int) -> dict:
+        st = _stats(keep, win_pct)
+        st.update({"name": name, "excluded": excluded, "sum": sum(s["ret_pct"] for s in keep),
+                   "h1": _stats(_in_half(keep, set_h1), win_pct), "h2": _stats(_in_half(keep, set_h2), win_pct)})
+        return st
+
+    out = [_row2("기준(필터 없음)", sigs, 0)]
+    # 월 단위 특이점은 미래에 쓸 수 없는 필터라 뺀다
+    usable = [f for f in top_loss if f["factor"] != "month"][:5]
+    for f in usable:
+        keep = [s for s in sigs if not A._in_bucket(s, f)]
+        out.append(_row2(f"제외: {f['label']}={f['bucket']}", keep, len(sigs) - len(keep)))
+    keep = [s for s in sigs if not any(A._in_bucket(s, f) for f in usable)]
+    out.append(_row2("제외: 위 전부(누적)", keep, len(sigs) - len(keep)))
+    # 전략 선택 — PF 가 가장 좋은 전략 2개만 남기면
+    bs = [r for r in (by_strategy or res.get("by_strategy") or []) if r["n"] >= max(30, len(sigs) * 0.05)]
+    bs.sort(key=lambda r: -(r["pf"] if r["pf"] != float("inf") else 99))
+    if len(bs) >= 2:
+        names = {bs[0]["key"], bs[1]["key"]}
+        keep = [s for s in sigs if names & set(s.get("strategies") or [])]
+        out.append(_row2(f"전략 {'/'.join(sorted(names))} 포함만", keep, len(sigs) - len(keep)))
+        keep2 = [s for s in keep if not any(A._in_bucket(s, f) for f in usable)]
+        out.append(_row2("전략 선택 + 손실 특이점 전부 제외", keep2, len(sigs) - len(keep2)))
+    return out
 
 
 def _stats(lst: list[dict], win_pct: float) -> dict[str, Any]:
@@ -430,6 +487,17 @@ def markdown(res: dict) -> str:
     L += ["", "## 8. 월별", "", "| 월 | 건수 | 평균 | 합계 | ≥2% 비율 |", "|---|---:|---:|---:|---:|"]
     for r in res["monthly"]:
         L.append(f"| {r['month']} | {r['n']} | {r['avg']:+.2f}% | {r['sum']:+.1f}% | {r['win2']:.0f}% |")
+    L += ["", "## 9. 필터 시나리오 — 손실 특이점을 피했다면", "",
+          "같은 1년에서 해당 구간을 **빼고** 남은 신호의 성과. 앞/뒤 반기는 과적합 경계 — 양쪽 모두 좋아져야 믿을 만하다. "
+          "월 특이점은 미래에 쓸 수 없어 제외.", "",
+          "| 시나리오 | 제외 | 남은 건수 | ≥2% 비율 | 평균 | PF | 합계 | 전반 평균/PF | 후반 평균/PF |",
+          "|---|---:|---:|---:|---:|---:|---:|---|---|"]
+    for r in res.get("scenarios") or []:
+        h1, h2 = r.get("h1") or {}, r.get("h2") or {}
+        f1 = f"{h1['avg']:+.2f}%/{_pf(h1['pf'])} ({h1['n']})" if h1.get("n") else "-"
+        f2 = f"{h2['avg']:+.2f}%/{_pf(h2['pf'])} ({h2['n']})" if h2.get("n") else "-"
+        L.append(f"| {r['name']} | {r['excluded']} | {r['n']} | {r['win_rate']:.0f}% | {r['avg']:+.2f}% | "
+                 f"{_pf(r['pf'])} | {r['sum']:+.0f}% | {f1} | {f2} |")
     L.append("")
     return "\n".join(L)
 
@@ -448,6 +516,16 @@ def telegram_text(res: dict) -> str:
     if fw:
         L.append("")
         L.append("📈 단순 보유: " + " · ".join(f"D+{r['h']} {r['avg']:+.2f}%({r['win2']:.0f}%≥2%)" for r in fw))
+    sc = res.get("scenarios") or []
+    if len(sc) >= 2:
+        L.append("")
+        L.append("🧹 손실 특이점을 피했다면(기준 → 전부 제외 → 전략 선택+제외)")
+        for r in [sc[0], next((x for x in sc if x["name"].startswith("제외: 위 전부")), None),
+                  next((x for x in sc if x["name"].startswith("전략 선택 +")), None)]:
+            if r:
+                h1, h2 = r.get("h1") or {}, r.get("h2") or {}
+                L.append(f"· {r['name']}: {r['n']}건 ≥2% {r['win_rate']:.0f}% 평균 {r['avg']:+.2f}% PF {_pf(r['pf'])}"
+                         + (f" (전반 {h1['avg']:+.2f}% / 후반 {h2['avg']:+.2f}%)" if h1.get("n") and h2.get("n") else ""))
     return "\n".join(L)
 
 
@@ -514,7 +592,7 @@ def _mark(market: Market, text: str) -> None:
     try:
         from stock_auto.ui import status as ui_status
         (ui_status.ui_dir() / f"backtest_{market.value}.done").write_text(
-            f"{datetime.now():%Y-%m-%d %H:%M} {text}", encoding="utf-8")
+            f"v{REPORT_VERSION} {datetime.now():%Y-%m-%d %H:%M} {text}", encoding="utf-8")
     except Exception:  # noqa: BLE001
         pass
 
