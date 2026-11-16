@@ -67,6 +67,7 @@ def recommendations(days: int = 10) -> list[dict]:
             "rr": _f(r.get("rr_ratio")), "entry_rule": r.get("entry_rule", ""),
             "p10": _f(r.get("p10_pct")), "p50": _f(r.get("p50_pct")), "p90": _f(r.get("p90_pct")),
             "gated_by": r.get("gated_by", ""), "executed": r.get("executed", ""),
+            "macro_soft": str(r.get("macro_soft") or "") == "1",
             "exit_type": r.get("exit_type", ""), "ret_pct": _f(r.get("ret_pct")),
             "days_held": _f(r.get("days_held")), "news_count": _f(r.get("news_count")),
             "is_reco": pnl.is_recommendation(r),

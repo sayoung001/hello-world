@@ -48,6 +48,9 @@ class SignalRecord:
     # 게이트에 막힌 신호도 기록한다(선택 편향·검증 공백 방지).
     # "" = 통과 / "macro" / "sector" / "earnings" (복수는 쉼표 구분)
     gated_by: str = ""
+    # 1 = 매크로 L0(약세) 인데 섹터·종목 레짐이 강해 '약세장 선별'로 통과한 추천.
+    # 이 표시가 있어야 "약세장에서 낸 소수 추천이 실제로 괜찮았나"를 따로 셀 수 있다.
+    macro_soft: Optional[int] = None
     days_to_earnings: Optional[int] = None
     # 뉴스가 '있었는지' — 뉴스가 성과를 더하는지 재려면 뉴스 있는 추천과 없는
     # 추천을 나눌 수 있어야 한다. 재지 않으면 수집은 그냥 비용이다(llm_eval 5장).
@@ -271,6 +274,7 @@ def from_screen_row(row: dict, date: str, reco: Optional[dict] = None,
         date=date, market=str(row.get("market", "US")),
         symbol=str(row.get("symbol", "")), source="batch",
         gated_by=str(row.get("gated_by", "") or ""),
+        macro_soft=(1 if row.get("macro_soft") else 0) if row.get("macro_soft") is not None else None,
         days_to_earnings=_i(row.get("days_to_earnings")),
         news_count=_i(nmeta.get("count")) if nmeta else None,
         news_pick=(1 if nmeta.get("pick") else 0) if nmeta else None,

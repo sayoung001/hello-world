@@ -377,10 +377,17 @@ def _publish_notion(notion, db_id, parent_page, result: BatchResult,
         exit_lines = [] if (ex is None or ex.empty) else [
             f"{r.symbol}: Exit_Score {r.exit_score}/5 · 종가 {r.close:,.2f}"
             for r in ex.itertuples()]
+        note = None
+        if result.screen.macro.level == 0:
+            cands_df = result.screen.candidates
+            n_soft = (0 if cands_df is None or cands_df.empty or "macro_soft" not in cands_df.columns
+                      else int(cands_df["macro_soft"].astype(bool).sum()))
+            note = (f"약세장(L0) — 섹터 강세·종목 정배열 {n_soft}건만 '약세장 선별'로 추천(비중 축소 권고)"
+                    if n_soft else "약세장(L0) — 매수 보류. 선별 조건을 만족하는 종목 없음")
         blocks = daily_summary_blocks(
             result.screen.macro.label, result.screen.macro.level,
             score_lines, sector_lines=result.sector_lines or None,
-            exit_lines=exit_lines or None)
+            exit_lines=exit_lines or None, note=note)
         title = (f"[{result.market.value}] {result.date} 분석"
                  if as_of == result.date else
                  f"[{result.market.value}] {result.date} 분석 (기준봉 {as_of})")

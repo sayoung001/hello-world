@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 import pandas as pd
 
@@ -82,3 +83,48 @@ def compute_macro_regime(index_ohlcv: dict[str, pd.DataFrame],
 def macro_gate_ok(macro: MacroRegime) -> bool:
     """AND 게이트: 매크로 레짐 0이면 차단."""
     return macro.trade_allowed
+
+
+# ── 약세장(L0) 처리 방식 ─────────────────────────────────────────────────
+# hard: L0 이면 전 종목 차단(예전 동작). 2026-11-03~ 2주간 US·KR 모두 L0 이 이어져
+#       추천이 한 건도 나가지 않았다 — 그 사이 미국 12섹터 중 8개는 '상승추세[4]' 였다.
+#       지수 그룹 min 으로 묶는 매크로는 나스닥(기술·반도체) 약세를 시장 전체 약세로 읽는다.
+# soft: L0 이어도 **섹터 ETF 상태 ≥ SOFT_SECTOR_MIN 이고 종목 레짐 ≥ SOFT_STOCK_REGIME_MIN**
+#       인 종목만 소수(SOFT_TOP_N) 추천한다. 백테스트(1년·1666건)에서 L0 구간 전체 PF 는
+#       0.71 이지만 섹터 ETF 레짐 R4 구간은 PF 1.28 — 약세장이라도 강한 섹터의 정배열
+#       종목은 평균을 깎지 않았다. 다이제스트·기록에 '약세장 선별'로 표시해 따로 평가한다.
+# off : 매크로 게이트 없음(연구용).
+import os as _os
+
+
+def gate_mode() -> str:
+    m = _os.environ.get("STOCK_MACRO_GATE", "soft").strip().lower()
+    return m if m in ("hard", "soft", "off") else "soft"
+
+
+def soft_top_n() -> int:
+    try:
+        return max(1, int(_os.environ.get("STOCK_MACRO_SOFT_TOP_N", "5")))
+    except ValueError:
+        return 5
+
+
+def soft_sector_min() -> int:
+    try:
+        return int(_os.environ.get("STOCK_MACRO_SOFT_SECTOR_MIN", "3"))
+    except ValueError:
+        return 3
+
+
+def soft_stock_regime_min() -> int:
+    try:
+        return int(_os.environ.get("STOCK_MACRO_SOFT_STOCK_REGIME_MIN", "3"))
+    except ValueError:
+        return 3
+
+
+def soft_pick_ok(sector_score: Optional[int], stock_regime: Optional[int]) -> bool:
+    """L0 에서도 통과시킬 종목인가 — 섹터 상태와 종목 레짐이 둘 다 강할 때만."""
+    if sector_score is None or stock_regime is None:
+        return False
+    return sector_score >= soft_sector_min() and stock_regime >= soft_stock_regime_min()

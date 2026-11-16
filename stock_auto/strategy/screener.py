@@ -34,6 +34,7 @@ from stock_auto.strategy.regime_v2 import (
 )
 from stock_auto.strategy.macro_regime import (
     MacroRegime, compute_macro_regime, macro_gate_ok,
+    gate_mode as macro_gate_mode, soft_pick_ok, soft_top_n,
 )
 
 
@@ -82,6 +83,11 @@ def screen_universe(
     """
     macro = compute_macro_regime(index_ohlcv or {}, market)
     gate_ok = macro_gate_ok(macro)
+    # 약세장(L0) 처리 — hard: 전부 차단 / soft: 섹터·종목 레짐이 강한 것만 소수 / off: 무시
+    mode = macro_gate_mode()
+    if mode == "off":
+        gate_ok = True
+    soft_mode = (mode == "soft") and not gate_ok
     stock_sector_etf = stock_sector_etf or {}
     sector_status = sector_status or {}
     earnings_blocked = earnings_blocked or {}
@@ -129,7 +135,9 @@ def screen_universe(
             sector_ok = (sec_score is None) or (sec_score >= 1)
             earn_blocked = bool(earnings_blocked.get(symbol, False))
             reasons = []
-            if not gate_ok:
+            # 약세장 선별: L0 이지만 섹터 상태·종목 레짐이 둘 다 강하면 통과시키고 표시한다
+            macro_soft = soft_mode and soft_pick_ok(sec_score, rinfo["current"])
+            if not gate_ok and not macro_soft:
                 reasons.append("macro")
             if not sector_ok:
                 reasons.append("sector")
@@ -159,6 +167,8 @@ def screen_universe(
                 "regime_trans": rinfo["transition"],
                 "macro_regime": macro.level,
                 "macro_gate": gate_ok,
+                "macro_soft": bool(macro_soft),     # 약세장(L0) 선별 통과 — 따로 평가한다
+                "macro_mode": mode,
                 "sector_etf": sec_etf,
                 "sector_status_score": sec_score,
                 "raw_buy": raw_buy,
@@ -231,6 +241,9 @@ def _finish(scored_all: pd.DataFrame, exits: pd.DataFrame, macro, failures: dict
     as_of = str(scored_all["bar_date"].max())
     scored_all = flag_stale(scored_all, as_of)
     scored_all = scored_all.sort_values("effective_score", ascending=False)
+    # 약세장 선별 모드면 후보 수를 줄인다 — 강한 섹터의 정배열 종목이라도 시장이 약세다
+    if "macro_soft" in scored_all.columns and bool(scored_all["macro_soft"].any()):
+        top_n = min(top_n, soft_top_n())
     candidates = (scored_all[scored_all["final_buy"]]
                   .head(top_n).reset_index(drop=True))
     # 원신호는 섰는데 게이트에 막힌 것 — 기록 대상(게이트 실효성 검증용)

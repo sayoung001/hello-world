@@ -141,6 +141,15 @@ def batch_digest(result: Any, sector_lines: Optional[list[str]] = None,
         f"🌐 매크로 L{macro.level} ({macro.label})",
         f"   {macro.detail}",
     ]
+    # 약세장(L0) 안내 — 왜 추천이 적거나 없는지 첫 화면에서 보이게
+    cands0 = screen.candidates
+    n_soft = (0 if cands0 is None or cands0.empty or "macro_soft" not in cands0.columns
+              else int(cands0["macro_soft"].astype(bool).sum()))
+    if macro.level == 0:
+        if n_soft:
+            L.append(f"   ⚠️ 약세장 — 섹터 강세·종목 정배열인 {n_soft}건만 선별(비중 축소 권고)")
+        else:
+            L.append("   ⛔ 약세장 — 매수 보류. 섹터 강세·정배열 조건을 만족하는 종목도 없음")
 
     # ── 섹터 ──
     lines = list(sector_lines or getattr(result, "sector_lines", []) or [])
@@ -181,7 +190,8 @@ def batch_digest(result: Any, sector_lines: Optional[list[str]] = None,
                 f"  [{r.get('recommend', '-')}/{r.get('horizon', '-')}] "
                 f"확신 {_num(r.get('conviction'), '{:.2f}')}"
                 + (f" ({_action_hint(r.get('conviction'))})"
-                   if _action_hint(r.get('conviction')) else ""),
+                   if _action_hint(r.get('conviction')) else "")
+                + (" ⚠️약세장 선별" if row.get("macro_soft") else ""),
                 f"   Eff {_num(row.get('effective_score'))} · "
                 f"종가 {pf(row.get('close'))} · {row.get('strategies', '-')}{earn}",
                 # 220자 — 요즘 진입 문장은 150~230자다. 120 에서 자르면 '분할 진입'
@@ -204,6 +214,9 @@ def batch_digest(result: Any, sector_lines: Optional[list[str]] = None,
         for r in cands.head(max_reco).itertuples():
             L.append(f"   • {r.symbol} Eff {getattr(r, 'effective_score', '-')} · "
                      f"{getattr(r, 'strategies', '-')}")
+    elif macro.level == 0:
+        L.append("   매수 후보 없음 — 매크로 약세(L0)로 전 종목 보류. 지수 레짐이 L1 이상으로 "
+                 "돌아오거나 섹터 강세·정배열 종목이 나오면 재개됩니다.")
     else:
         L.append("   매수 후보 없음 — 게이트 차단이거나 임계 미달입니다.")
 

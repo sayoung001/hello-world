@@ -131,9 +131,12 @@ def daily_summary_blocks(macro_label: str, macro_level: int,
                          score_lines: list[str],
                          sector_lines: Optional[list[str]] = None,
                          exit_lines: Optional[list[str]] = None,
-                         disclaimer: bool = True) -> list:
-    """일자 요약 페이지 본문 블록."""
+                         disclaimer: bool = True,
+                         note: Optional[str] = None) -> list:
+    """일자 요약 페이지 본문 블록. note: 매크로 줄 바로 아래 한 줄(예: 약세장 선별 안내)."""
     blocks = [_heading(f"매크로 레짐: {macro_label} (L{macro_level})")]
+    if note:
+        blocks.append(_callout(note))
     if sector_lines:
         blocks.append(_heading("섹터 현황", level=3))
         for line in sector_lines:
