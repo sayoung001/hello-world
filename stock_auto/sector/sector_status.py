@@ -37,7 +37,11 @@ def compute_sector_status(
     lookback_days: int = 400,
     ohlcv_map: Optional[dict[str, pd.DataFrame]] = None,
 ) -> tuple[dict[str, int], dict[str, str]]:
-    """섹터 ETF별 상태 점수(0~5)와 라벨. ohlcv_map 주입 시 다운로드 생략(테스트)."""
+    """섹터 ETF별 상태 점수(0~5)와 라벨. ohlcv_map 주입 시 다운로드 생략(테스트).
+
+    배치는 sector_overview.compute_overview(수익률·지수대비·전환 포함)를 쓰고 scores_labels 로
+    같은 값을 얻는다. 이 함수는 점수만 필요한 호출자(점검 도구 등)용으로 남긴다.
+    """
     tickers = sector_tickers(market)
     start = (market_now(market) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
 

@@ -149,11 +149,13 @@ def _batch_one_market(market: Market, sec) -> None:
     except Exception as e:  # noqa: BLE001 — 프로파일(실시간용)은 추천과 무관하다
         print(f"[daemon] {market.value} 프로파일 재구축 실패: {type(e).__name__}: {e}")
 
-    # ② 섹터 게이트 — 하락위험 섹터 종목 매수 차단
-    from stock_auto.sector.sector_status import (
-        compute_sector_status, labels_for_symbols, summary_lines)
+    # ② 섹터 게이트 + 섹터 장 개요 — 하락위험 섹터 종목 매수 차단, 수익률·지수대비·전환은 다이제스트로
+    from stock_auto.sector.sector_status import labels_for_symbols
+    from stock_auto.sector import sector_overview as so
+    sector_rows: list[dict] = []
     try:
-        sec_scores, sec_labels = compute_sector_status(market)
+        sector_rows = so.compute_overview(market)
+        sec_scores, sec_labels = so.scores_labels(sector_rows)
     except Exception as e:  # noqa: BLE001 — 섹터 실패가 배치를 막지 않게
         print(f"[daemon] 섹터 진단 실패: {type(e).__name__}: {e}")
         sec_scores, sec_labels = {}, {}
@@ -180,8 +182,8 @@ def _batch_one_market(market: Market, sec) -> None:
               sector_status=sec_scores or None,
               sector_label_map=(labels_for_symbols(uni_map, sec_labels)
                                 if sec_labels else None),
-              sector_lines=(summary_lines(sec_scores, sec_labels, market)
-                            if sec_scores else None),
+              sector_lines=(so.overview_lines(sector_rows) if sector_rows else None),
+              sector_rows=sector_rows or None,
               notion=notion, send_telegram=True,
               telegram=for_market(market, sec),     # 국내장은 KR 채널(없으면 기본)
               notion_db_id=sec.notion_reco_db_id or None,

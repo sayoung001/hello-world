@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 MAX_RECO_IN_DIGEST = 8      # 상위 몇 건까지 상세히 보낼지
-MAX_SECTOR_LINES = 12
+MAX_SECTOR_LINES = 24       # US 12섹터 + 로테이션 요약 / KR 16~20섹터 — 잘리면 '섹터 장'을 못 본다
 
 
 AUTOPULL_STALE_MIN = 30     # heartbeat 가 이보다 오래되면 타이머가 죽은 것으로 본다
@@ -154,9 +154,10 @@ def batch_digest(result: Any, sector_lines: Optional[list[str]] = None,
     # ── 섹터 ──
     lines = list(sector_lines or getattr(result, "sector_lines", []) or [])
     if lines:
-        L += ["", "🏭 섹터 현황"]
+        L += ["", "🏭 섹터 장 (점수순 · 1D/5D/20D 수익 · 지수대비 20일 · 레짐 전환 · 정배열 종목 비율)"]
         for ln in lines[:MAX_SECTOR_LINES]:
-            L.append(f"   • {ln}")
+            # 🧭 로테이션 요약 줄은 들여쓰기 없이, 섹터 줄은 불릿으로
+            L.append(ln if ln.startswith("🧭") else f"   • {ln}")
         if len(lines) > MAX_SECTOR_LINES:
             L.append(f"   … 외 {len(lines) - MAX_SECTOR_LINES}개")
     else:

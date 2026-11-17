@@ -60,6 +60,7 @@ def run_daily(
     sector_status: Optional[dict[str, int]] = None,
     sector_label_map: Optional[dict[str, str]] = None,
     sector_lines: Optional[list[str]] = None,
+    sector_rows: Optional[list[dict]] = None,
     earnings_blocked: Optional[dict[str, bool]] = None,
     earnings_days: Optional[dict[str, Any]] = None,
     llm_client: Any = None,
@@ -100,6 +101,15 @@ def run_daily(
           f"[{screen.macro.detail}] | 후보 {len(screen.candidates)} "
           f"| 게이트 차단 {n_gated} | 실패 {len(screen.failures)}")
 
+    # 섹터 장 개요(sector_overview 행)가 오면 채점표로 섹터별 종목 폭(정배열 비율)을 붙여
+    # 줄을 다시 만든다 — 추천이 0건인 날에도 '섹터 장이 어떤가'는 보여야 한다.
+    if sector_rows:
+        try:
+            from stock_auto.sector import sector_overview as so
+            so.attach_breadth(sector_rows, screen.scored_all)
+            sector_lines = so.overview_lines(sector_rows)
+        except Exception as e:  # noqa: BLE001 — 개요 실패가 배치를 막지 않게
+            print(f"[batch] 섹터 개요 줄 생성 실패: {type(e).__name__}: {e}")
     result = BatchResult(market=market, date=today, screen=screen,
                          sector_lines=list(sector_lines or []))
 

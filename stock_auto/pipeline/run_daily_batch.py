@@ -62,15 +62,20 @@ def main() -> int:
               ("" if args.no_llm else " (ANTHROPIC_API_KEY 없음)"))
 
     # 섹터 게이트 — 섹터 ETF 진단 → 하락위험(0) 섹터 종목 매수 차단
-    from stock_auto.sector.sector_status import (
-        compute_sector_status, labels_for_symbols, summary_lines)
+    from stock_auto.sector.sector_status import labels_for_symbols
+    from stock_auto.sector import sector_overview as so
     sector_scores: dict[str, int] = {}
     sector_labels: dict[str, str] = {}
+    sector_rows: list[dict] = []
     if not args.no_sector:
-        sector_scores, sector_labels = compute_sector_status(market)
+        try:
+            sector_rows = so.compute_overview(market)
+            sector_scores, sector_labels = so.scores_labels(sector_rows)
+        except Exception as e:  # noqa: BLE001
+            print(f"[run] 섹터 진단 실패({type(e).__name__}: {e}) — 게이트 비활성으로 진행")
         if sector_scores:
             print(f"[run] 섹터 게이트 ON — {len(sector_scores)}개 진단")
-            for line in summary_lines(sector_scores, sector_labels, market):
+            for line in so.overview_lines(sector_rows):
                 print(f"       {line}")
         else:
             print("[run] 섹터 진단 실패 — 게이트 비활성으로 진행")
@@ -100,8 +105,8 @@ def main() -> int:
         stock_sector_etf=uni_map,
         sector_status=sector_scores or None,
         sector_label_map=label_map,
-        sector_lines=(summary_lines(sector_scores, sector_labels, market)
-                      if sector_scores else None),
+        sector_lines=(so.overview_lines(sector_rows) if sector_rows else None),
+        sector_rows=sector_rows or None,
         earnings_blocked=earn_blocked or None,
         earnings_days=earn_days or None,
         llm_client=None,                 # base가 .env의 키로 실제 생성
